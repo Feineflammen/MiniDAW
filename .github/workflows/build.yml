@@ -14,6 +14,13 @@ jobs:
         run: |
           $p = Start-Process -FilePath build\Release\minidaw.exe -ArgumentList '--screenshot','screenshot.png' -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "Screenshot fehlgeschlagen, Code $($p.ExitCode)" }
+      - name: Bild als Text ins Protokoll schreiben (zum Pruefen ohne Download)
+        shell: pwsh
+        run: |
+          $b = [Convert]::ToBase64String([IO.File]::ReadAllBytes('screenshot.png'))
+          Write-Output "PNGBEGIN"
+          for ($i = 0; $i -lt $b.Length; $i += 200) { Write-Output ("PNG:" + $b.Substring($i, [Math]::Min(200, $b.Length - $i))) }
+          Write-Output "PNGEND"
       - uses: actions/upload-artifact@v6
         with:
           name: minidaw

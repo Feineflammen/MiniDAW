@@ -3,6 +3,8 @@
 #include "audio/AudioCallback.h"
 #include "disk/RecordSink.h"
 #include "disk/TrackStream.h"
+#include "engine/Synth.h"
+#include "midi/MidiMessage.h"
 #include "util/SpscQueue.h"
 
 #include <array>
@@ -43,6 +45,11 @@ public:
 
     // Ersetzt die Audio-Clips einer Spur. Wirkt, sobald der Disk-Thread sie uebernimmt.
     bool setTrackPlaylist(int track, Playlist playlist);
+
+    // Live-MIDI (Keyboard, Rechnertastatur) fuer die scharfgeschaltete Spur.
+    // Darf als einzige Methode aus mehreren Threads gerufen werden, zum
+    // Beispiel aus dem Rueckruf des MIDI-Treibers; nie aus dem Audio-Thread.
+    bool postMidi(MidiMessage message);
 
     // Spur, die den Eingang bekommt (Pegelanzeige, Mithoeren). -1 = keine.
     bool setArmedTrack(int track) noexcept;
@@ -116,6 +123,11 @@ private:
 
     SpscQueue<Command, 1024> commands_;
 
+    // Live-MIDI: mehrere Absender teilen sich die Schreibseite ueber einen Mutex,
+    // der Audio-Thread liest ohne Sperre.
+    SpscQueue<MidiMessage, 1024> midiIn_;
+    std::mutex midiPostMutex_;
+
     // Zustand des Audio-Threads
     double sampleRate_ = 48000.0;
     int maxFrames_ = 0;
@@ -134,6 +146,9 @@ private:
     std::vector<float> masterL_, masterR_;
     std::vector<float> trackL_, trackR_;
     std::array<TrackStream, kNumTracks> streams_;
+    std::array<Synth, kNumTracks> synths_;
+    std::array<MidiMessage, 128> liveMidi_{};  // Nachrichten fuer den naechsten Block
+    int liveMidiCount_ = 0;
 
     // Rueckkanal zur UI
     std::atomic<std::int64_t> positionOut_{0};

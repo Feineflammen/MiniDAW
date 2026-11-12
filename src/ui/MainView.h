@@ -32,6 +32,10 @@ public:
     void mouseUp(float x, float y);
     void wheel(float x, float y, float notches, bool ctrl);
     void key(Key k);
+    // Rechnertastatur als Klaviatur: semitone 0 = C. Wirkt nur mit scharfgeschalteter Spur.
+    void noteKey(int semitone, bool down);
+    void shiftOctave(int delta);
+    void releaseAllNotes();
     void dropFiles(float x, float y, const std::vector<std::filesystem::path>& paths);
 
 private:
@@ -87,6 +91,7 @@ private:
     std::array<float, kProjectTracks> meters_{};
     float masterMeter_ = 0.0f;
     float inputMeter_ = 0.0f;
+    int octave_ = 4;  // Oktave der Rechnertastatur, 4 = C ist das mittlere C (Note 60)
 
     std::wstring deviceInfo_;
     std::wstring status_;

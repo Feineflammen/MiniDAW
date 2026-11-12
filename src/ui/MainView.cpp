@@ -693,6 +693,21 @@ void MainView::key(Key k) {
     }
 }
 
+void MainView::noteKey(int semitone, bool down) {
+    if (controller_.armedTrack() < 0) return;
+    const int note = 12 * (octave_ + 1) + semitone;
+    if (note < 0 || note > 127) return;
+    engine_.postMidi(down ? MidiMessage::noteOn(note, 100) : MidiMessage::noteOff(note));
+}
+
+void MainView::shiftOctave(int delta) {
+    releaseAllNotes();
+    octave_ = std::clamp(octave_ + delta, 0, 8);
+    setStatus(L"Tastatur-Oktave: C" + std::to_wstring(octave_));
+}
+
+void MainView::releaseAllNotes() { engine_.postMidi(MidiMessage::allNotesOff()); }
+
 void MainView::dropFiles(float x, float y, const std::vector<std::filesystem::path>& paths) {
     int track = rowAt(y);
     if (track < 0) track = 0;

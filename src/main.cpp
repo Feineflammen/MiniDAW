@@ -8,6 +8,7 @@
 #include "disk/DiskThread.h"
 #include "disk/WavFile.h"
 #include "engine/Engine.h"
+#include "midi/MidiInput.h"
 #include "model/ProjectController.h"
 #include "ui/MainView.h"
 #include "ui/MainWindow.h"
@@ -173,6 +174,9 @@ int runApp(HINSTANCE instance, int showCommand) {
     }
     disk.start(*engine);
 
+    MidiInput midi(*engine);
+    midi.open();
+
     ui::MainView view(controller, *engine);
     wchar_t info[160];
     std::swprintf(info, 160, L"%.0f Hz, Puffer %d Frames (%.1f ms), %ls", device.sampleRate(),
@@ -185,6 +189,7 @@ int runApp(HINSTANCE instance, int showCommand) {
         const std::string& reason = device.inputError();  // reines ASCII
         deviceInfo += L" (" + std::wstring(reason.begin(), reason.end()) + L")";
     }
+    deviceInfo += midi.names().empty() ? L", kein MIDI-Ger\u00E4t" : L", MIDI: " + midi.names();
     view.setDeviceInfo(deviceInfo);
 
     ui::MainWindow window(view);
@@ -194,6 +199,7 @@ int runApp(HINSTANCE instance, int showCommand) {
     }
     const int result = window.run();
     saveSettings(controller);
+    midi.close();
 
     // Reihenfolge: erst den Audio-Thread anhalten, dann eine laufende Aufnahme
     // abschliessen (dafuer muss der Disk-Thread noch laufen), dann den Disk-Thread.

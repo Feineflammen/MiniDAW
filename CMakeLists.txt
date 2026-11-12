@@ -14,6 +14,7 @@ endif()
 # Plattformunabhaengiger Kern: Engine, Dateien, Projektmodell.
 add_library(dawcore STATIC
     src/engine/Engine.cpp
+    src/engine/Synth.cpp
     src/disk/PeakData.cpp
     src/disk/RecordSink.cpp
     src/disk/TrackStream.cpp
@@ -36,10 +37,11 @@ if(WIN32)
     add_executable(minidaw WIN32
         src/main.cpp
         src/audio/WasapiDevice.cpp
+        src/midi/MidiInput.cpp
         src/ui/Canvas.cpp
         src/ui/MainView.cpp
         src/ui/MainWindow.cpp
     )
     target_compile_definitions(minidaw PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(minidaw PRIVATE dawcore ole32 avrt d2d1 dwrite windowscodecs shell32 user32)
+    target_link_libraries(minidaw PRIVATE dawcore ole32 avrt d2d1 dwrite windowscodecs shell32 user32 winmm)
 endif()

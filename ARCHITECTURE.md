@@ -108,6 +108,24 @@ getrennte Taktgeber (zum Beispiel USB-Mikrofon und Onboard-Ausgang), laufen
 sie langsam auseinander; der Ringpuffer gleicht das alle paar Minuten mit
 einem kurzen Sprung aus. Sauber löst das erst ASIO oder ein Gerät für beides.
 
+## MIDI
+
+- Live-MIDI kommt aus zwei Quellen: den MIDI-Geräten (`midi/MidiInput`, WinMM,
+  Rückruf im Thread des Treibers) und der Rechnertastatur (UI-Thread). Beide
+  rufen `Engine::postMidi`. Die Schreibseite der Queue teilen sie sich über
+  einen Mutex; der Audio-Thread liest ohne Sperre.
+- Die Nachrichten gehen an die scharfgeschaltete Spur und wirken am Anfang des
+  nächsten Blocks.
+- Jede Spur hat einen eingebauten Synthesizer (`engine/Synth`: Sägezahn,
+  Tiefpass, Hüllkurve, 16 Stimmen). Er ist die Klangquelle für MIDI, bis in
+  Schritt 7 VST-Instrumente dazukommen, und bleibt danach der Ersatz für
+  Spuren ohne Instrument.
+- Der Synthesizer läuft durch Fader, Panorama und Pegelanzeige der Spur und
+  klingt auch bei stehendem Transport.
+
+Einstellungen, die zum Rechner gehören (bisher der Latenz-Zusatz), liegen in
+`%APPDATA%\MiniDAW\einstellungen.txt`.
+
 ## Modell und Engine
 
 - Das **Projektmodell** (Spuren, Clips, Noten, Plugin-Zuordnung, Mixerwerte)
@@ -145,8 +163,9 @@ Windows-Code. Sie bilden die Bibliothek `dawcore`, die auch die Tests benutzen.
 | 2 | Engine-Gerüst: Transport, Spuren-Array, Summierung, Kommando-Queue | fertig, auf Hardware gehört |
 | 3 | WAV-Wiedergabe mit Streaming vom Disk-Thread | fertig, auf Hardware gehört |
 | 4 | Minimale GUI: Spurliste, Timeline, Wellenformen, Transport, Fader | fertig, auf Hardware bedient |
-| 5 | Audio-Aufnahme mit Latenzkorrektur | Code und Offline-Tests fertig, Test mit echtem Eingang offen |
-| 6 | MIDI-Eingang, MIDI-Clips, Piano Roll | offen |
+| 5 | Audio-Aufnahme mit Latenzkorrektur | fertig, mit echtem Eingang getestet; Latenz-Zusatz einstellbar |
+| 6a | MIDI-Eingang, eingebauter Synthesizer, live spielen | Code und Offline-Tests fertig, Hörtest offen |
+| 6b | MIDI-Clips, MIDI-Aufnahme, Piano Roll, Tempo und Taktraster | offen |
 | 7 | VST3-Hosting: Laden, Verarbeiten, Editor-Fenster, State | offen |
 | 8 | Mixer komplett: Inserts, Sends, Busse, Pegel, Latenzausgleich | offen |
 | 9 | Projekt speichern und laden, Undo/Redo fertig | offen |

@@ -65,6 +65,11 @@ bool Engine::setTrackPlaylist(int track, Playlist playlist) {
     return true;
 }
 
+bool Engine::postMidi(MidiMessage message) {
+    std::lock_guard<std::mutex> lock(midiPostMutex_);
+    return midiIn_.push(message);
+}
+
 bool Engine::setArmedTrack(int track) noexcept {
     if (track != -1 && !validTrack(track)) return false;
     return send({CommandType::ArmTrack, track});
@@ -135,6 +140,8 @@ void Engine::prepare(double sampleRate, int /*numInputs*/, int /*numOutputs*/, i
         t.phase = 0.0;
         t.phaseInc = kTwoPi * static_cast<double>(t.toneHz) / sampleRate_;
     }
+    for (auto& synth : synths_) synth.prepare(sampleRate);
+    liveMidiCount_ = 0;
     updateTargets();
     for (auto& t : tracks_) { t.curL = t.tgtL; t.curR = t.tgtR; }
     masterCur_ = masterGain_;
@@ -184,6 +191,9 @@ void Engine::drainCommands() noexcept {
                 masterGain_ = c.value;
                 break;
             case CommandType::ArmTrack:
+                // Gehaltene Noten der bisherigen Spur ausklingen lassen.
+                if (validTrack(armedTrack_) && armedTrack_ != c.track)
+                    synths_[static_cast<std::size_t>(armedTrack_)].allNotesOff();
                 armedTrack_ = c.track;
                 break;
             case CommandType::InputMonitor:
@@ -198,6 +208,11 @@ void Engine::drainCommands() noexcept {
         }
     }
     if (mixChanged) updateTargets();
+
+    // Live-MIDI einsammeln; angewendet wird es am Anfang des naechsten Blocks.
+    MidiMessage m;
+    while (liveMidiCount_ < static_cast<int>(liveMidi_.size()) && midiIn_.pop(m))
+        liveMidi_[static_cast<std::size_t>(liveMidiCount_++)] = m;
 }
 
 void Engine::updateTargets() noexcept {
@@ -235,12 +250,23 @@ void Engine::renderBlock(int numFrames) noexcept {
         raisePeak(inputPeak_, peak);
     }
 
+    // Live-MIDI geht an den Synthesizer der scharfgeschalteten Spur.
+    if (liveMidiCount_ > 0) {
+        if (armedTrack_ >= 0) {
+            Synth& synth = synths_[static_cast<std::size_t>(armedTrack_)];
+            for (int i = 0; i < liveMidiCount_; ++i) synth.handle(liveMidi_[static_cast<std::size_t>(i)]);
+        }
+        liveMidiCount_ = 0;
+    }
+    bool anySynth = false;
+    for (const auto& synth : synths_) anySynth = anySynth || synth.active();
+
     if (!rolling_) {
         // Transport steht: Stroeme auf die aktuelle Position vorbereiten,
         // damit beim Start sofort Daten da sind.
         for (auto& stream : streams_)
             if (stream.active()) stream.prime(position_);
-        if (!monitoring) return;
+        if (!monitoring && !anySynth) return;
     }
 
     // Aufnahme: den Eingang dieses Blocks an den Disk-Thread weiterreichen.
@@ -259,7 +285,8 @@ void Engine::renderBlock(int numFrames) noexcept {
         const bool hasClips = rolling_ && stream.active();
         const bool hasTone = rolling_ && t.toneHz > 0.0f;
         const bool hasInput = monitoring && static_cast<int>(ti) == armedTrack_;
-        if (!hasClips && !hasTone && !hasInput) { t.curL = t.tgtL; t.curR = t.tgtR; continue; }
+        const bool hasSynth = synths_[ti].active();
+        if (!hasClips && !hasTone && !hasInput && !hasSynth) { t.curL = t.tgtL; t.curR = t.tgtR; continue; }
 
         // Quelle der Spur nach tl/tr: Audio-Clips, dazu gegebenenfalls der Testton.
         if (hasClips) {
@@ -296,6 +323,9 @@ void Engine::renderBlock(int numFrames) noexcept {
                 tr[i] += inR_[i];
             }
         }
+
+        // Synthesizer der Spur (live gespielte Noten klingen auch bei stehendem Transport).
+        if (hasSynth) synths_[ti].render(tl, tr, numFrames);
 
         // Fader und Panorama, ueber den Block ueberblendet.
         const float stepL = (t.tgtL - t.curL) * invFrames;

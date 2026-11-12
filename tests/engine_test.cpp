@@ -842,6 +842,109 @@ void testControllerRecording() {
     while (!controller.peaksIdle()) std::this_thread::yield();
 }
 
+// --- MIDI und Synthesizer ----------------------------------------------------
+
+// Zaehlt die Nulldurchgaenge nach oben und liefert daraus die Grundfrequenz.
+double measureFrequency(const std::vector<float>& signal, double rate) {
+    int crossings = 0;
+    std::size_t first = 0, last = 0;
+    for (std::size_t i = 1; i < signal.size(); ++i) {
+        if (signal[i - 1] <= 0.0f && signal[i] > 0.0f) {
+            if (crossings == 0) first = i;
+            last = i;
+            ++crossings;
+        }
+    }
+    if (crossings < 2) return 0.0;
+    return (crossings - 1) * rate / static_cast<double>(last - first);
+}
+
+void testSynth() {
+    Synth synth;
+    synth.prepare(kRate);
+    CHECK(!synth.active());
+
+    std::vector<float> l(48000, 0.0f), r(48000, 0.0f);
+    synth.handle(MidiMessage::noteOn(69, 100));  // A4 = 440 Hz
+    CHECK(synth.active());
+    synth.render(l.data(), r.data(), 48000);
+    const double hz = measureFrequency(l, kRate);
+    CHECK(std::fabs(hz - 440.0) < 1.0);
+    float peak = 0.0f, maxJump = 0.0f;
+    for (std::size_t i = 0; i < l.size(); ++i) {
+        peak = std::max(peak, std::fabs(l[i]));
+        if (i > 0) maxJump = std::max(maxJump, std::fabs(l[i] - l[i - 1]));
+        if (l[i] != r[i]) peak = 99.0f;
+    }
+    CHECK(peak > 0.05f && peak < 0.5f);
+    CHECK(maxJump < 0.1f);  // kein Knack beim Einsatz
+
+    // Nach dem Loslassen klingt die Note aus, die Stimme wird frei.
+    synth.handle(MidiMessage::noteOff(69));
+    std::fill(l.begin(), l.end(), 0.0f);
+    std::fill(r.begin(), r.end(), 0.0f);
+    synth.render(l.data(), r.data(), 48000);
+    CHECK(!synth.active());
+    CHECK(l.back() == 0.0f);
+
+    // Mehr Noten als Stimmen: Die aeltesten werden uebernommen, nichts stuerzt ab.
+    for (int n = 0; n < 40; ++n) synth.handle(MidiMessage::noteOn(40 + n, 90));
+    synth.render(l.data(), r.data(), 256);
+    CHECK(synth.active());
+
+    // Haltepedal: Losgelassene Noten klingen weiter, bis das Pedal hochkommt.
+    synth.handle(MidiMessage::allNotesOff());
+    synth.render(l.data(), r.data(), 48000);
+    CHECK(!synth.active());
+    synth.handle({0xB0, 64, 127});
+    synth.handle(MidiMessage::noteOn(60, 100));
+    synth.handle(MidiMessage::noteOff(60));
+    synth.render(l.data(), r.data(), 48000);
+    CHECK(synth.active());
+    synth.handle({0xB0, 64, 0});
+    synth.render(l.data(), r.data(), 48000);
+    CHECK(!synth.active());
+}
+
+void testLiveMidi() {
+    Rig rig;
+    // Ohne scharfgeschaltete Spur verpuffen die Noten.
+    rig.engine->postMidi(MidiMessage::noteOn(60, 100));
+    auto [pl, pr] = rig.render();
+    CHECK(pl == 0.0f && pr == 0.0f);
+
+    // Mit scharfgeschalteter Spur klingt die Note, auch bei stehendem Transport,
+    // und laeuft durch Panorama und Pegelanzeige der Spur.
+    rig.engine->setArmedTrack(3);
+    rig.engine->setTrackPan(3, 1.0f);
+    rig.engine->postMidi(MidiMessage::noteOn(60, 100));
+    rig.render();
+    std::tie(pl, pr) = rig.render();
+    CHECK(pl == 0.0f && pr > 0.02f);
+    CHECK(rig.engine->position() == 0);
+    CHECK(rig.engine->takeTrackPeak(3) > 0.02f);
+
+    // Spurwechsel laesst die gehaltene Note ausklingen.
+    rig.engine->setArmedTrack(5);
+    for (int b = 0; b < 200; ++b) rig.render();
+    std::tie(pl, pr) = rig.render();
+    CHECK(pl == 0.0f && pr == 0.0f);
+
+    // Aus einem zweiten Thread senden (wie der MIDI-Treiber).
+    std::thread sender([&] {
+        for (int n = 0; n < 50; ++n) {
+            rig.engine->postMidi(MidiMessage::noteOn(48 + n % 12, 80));
+            rig.engine->postMidi(MidiMessage::noteOff(48 + n % 12));
+        }
+        rig.engine->postMidi(MidiMessage::noteOn(72, 100));
+    });
+    for (int b = 0; b < 100; ++b) rig.render();
+    sender.join();
+    rig.render();
+    std::tie(pl, pr) = rig.render();
+    CHECK(pl > 0.01f && pr > 0.01f);  // die letzte Note wird noch gehalten
+}
+
 }  // namespace
 
 int main() {
@@ -866,6 +969,8 @@ int main() {
     testRecording();
     testInputMonitor();
     testControllerRecording();
+    testSynth();
+    testLiveMidi();
     {
         std::error_code ec;
         std::filesystem::remove_all(tempFile("minidaw_test_aufnahmen"), ec);

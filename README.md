@@ -17,7 +17,7 @@ build\Release\minidaw.exe
 
 Tests ausführen: `ctest --test-dir build -C Release --output-on-failure`
 
-Aktueller Stand: Schritt 5, Audio-Aufnahme.
+Aktueller Stand: Schritt 6a, MIDI live spielen mit eingebautem Synthesizer.
 
 ## Bedienung
 
@@ -34,5 +34,10 @@ Aktueller Stand: Schritt 5, Audio-Aufnahme.
 | R am Spurkopf | Spur für die Aufnahme scharfschalten |
 | Rec-Knopf oder Taste R | Aufnahme starten / beenden |
 | Mithören | Eingang über die scharfgeschaltete Spur hören |
+
+| − / + neben "Latenz" | Aufnahme-Latenz in 5-ms-Schritten anpassen; Mausrad 1 ms, Doppelklick setzt zurück |
+| Tasten A S D F G H J K L | weiße Tasten ab C auf der scharfgeschalteten Spur |
+| Tasten W E T Z U O | schwarze Tasten |
+| Y / X | Oktave tiefer / höher |
 
 Aufnahmen landen unter `Dokumente\MiniDAW\Aufnahmen`.

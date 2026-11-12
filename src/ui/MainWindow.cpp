@@ -13,6 +13,31 @@ namespace ui {
 namespace {
 
 const wchar_t* const kClassName = L"MiniDawMainWindow";
+
+// Rechnertastatur als Klaviatur, nach Tastenposition (Scancode) statt
+// Beschriftung, damit es auf jedem Tastaturlayout gleich liegt:
+// untere Reihe A S D F G H J K L = weisse Tasten ab C,
+// obere Reihe W E   T Z U   O    = schwarze Tasten.
+int semitoneForScancode(int scancode) {
+    switch (scancode) {
+        case 0x1E: return 0;   // A  -> C
+        case 0x11: return 1;   // W  -> C#
+        case 0x1F: return 2;   // S  -> D
+        case 0x12: return 3;   // E  -> D#
+        case 0x20: return 4;   // D  -> E
+        case 0x21: return 5;   // F  -> F
+        case 0x14: return 6;   // T  -> F#
+        case 0x22: return 7;   // G  -> G
+        case 0x15: return 8;   // Z (deutsch) / Y -> G#
+        case 0x23: return 9;   // H  -> A
+        case 0x16: return 10;  // U  -> A#
+        case 0x24: return 11;  // J  -> H
+        case 0x25: return 12;  // K  -> C
+        case 0x18: return 13;  // O  -> C#
+        case 0x26: return 14;  // L  -> D
+        default: return -1;
+    }
+}
 constexpr UINT_PTR kFrameTimer = 1;
 
 bool createFactories(ComPtr<ID2D1Factory>& d2d, ComPtr<IDWriteFactory>& dwrite, std::string& error) {
@@ -145,7 +170,20 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
-        case WM_KEYDOWN:
+        case WM_KEYDOWN: {
+            const int scancode = static_cast<int>((lParam >> 16) & 0xFF);
+            const bool repeat = (lParam & (LPARAM{1} << 30)) != 0;
+            const int semitone = semitoneForScancode(scancode);
+            if (semitone >= 0) {
+                if (!repeat) view_.noteKey(semitone, true);
+                return 0;
+            }
+            if (scancode == 0x2C || scancode == 0x2D) {  // die beiden Tasten links unten: Oktave -/+
+                if (!repeat) view_.shiftOctave(scancode == 0x2C ? -1 : 1);
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return 0;
+            }
+            if (repeat && wParam != VK_DELETE) return 0;
             if (wParam == VK_SPACE) view_.key(Key::Space);
             else if (wParam == VK_HOME) view_.key(Key::Home);
             else if (wParam == VK_DELETE) view_.key(Key::Delete);
@@ -153,6 +191,20 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
             else break;
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
+        }
+
+        case WM_KEYUP: {
+            const int semitone = semitoneForScancode(static_cast<int>((lParam >> 16) & 0xFF));
+            if (semitone >= 0) {
+                view_.noteKey(semitone, false);
+                return 0;
+            }
+            break;
+        }
+
+        case WM_KILLFOCUS:
+            view_.releaseAllNotes();  // sonst bleiben Noten haengen, wenn das Fenster den Fokus verliert
+            break;
 
         case WM_DROPFILES: {
             const auto drop = reinterpret_cast<HDROP>(wParam);

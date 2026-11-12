@@ -94,14 +94,18 @@ src/
   disk/     WAV lesen und schreiben, Streaming, Peak-Dateien
   ui/       Fenster, Zeichnen, Widgets
   util/     Ringpuffer, Hilfsfunktionen
+tests/      Offline-Tests der Engine
 ```
+
+`engine/`, `model/`, `midi/` (Daten) und `util/` enthalten keinen
+Windows-Code. Sie bilden die Bibliothek `dawcore`, die auch die Tests benutzen.
 
 ## Fahrplan
 
 | Schritt | Inhalt | Stand |
 |---|---|---|
-| 1 | Audio-Callback über WASAPI, Sinus-Test | Code geschrieben, noch nicht auf Windows getestet |
-| 2 | Engine-Gerüst: Transport, Spuren-Array, Summierung, Kommando-Queue | offen |
+| 1 | Audio-Callback über WASAPI, Sinus-Test | fertig, auf Hardware gehört |
+| 2 | Engine-Gerüst: Transport, Spuren-Array, Summierung, Kommando-Queue | Code und Offline-Tests fertig, Hörtest offen |
 | 3 | WAV-Wiedergabe mit Streaming vom Disk-Thread | offen |
 | 4 | Minimale GUI: Spurliste, Timeline, Wellenformen, Transport, Fader | offen |
 | 5 | Audio-Aufnahme mit Latenzkorrektur | offen |
@@ -113,6 +117,16 @@ src/
 
 Jeder Schritt gilt erst als fertig, wenn er auf echter Hardware läuft und
 ohne Knackser klingt.
+
+## Tests
+
+`tests/engine_test.cpp` prüft die Engine offline, ohne Testbibliothek. Die
+Tests laufen bei jedem Push auf GitHub (`ctest`). Jede neue Engine-Funktion
+bekommt dort mindestens eine Prüfung.
+
+Wertänderungen an Fadern, Mute, Solo und Transport werden über einen Block
+überblendet, damit nichts knackt. Ein Test misst den größten Sprung zwischen
+zwei Samples.
 
 ## Offline-Rendering
 

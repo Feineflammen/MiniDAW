@@ -15,4 +15,6 @@ cmake --build build --config Release
 build\Release\minidaw.exe
 ```
 
-Aktueller Stand: Schritt 1, Sinus-Test über WASAPI.
+Tests ausführen: `ctest --test-dir build -C Release --output-on-failure`
+
+Aktueller Stand: Schritt 2, Engine mit Transport und Mixer, bedient über die Konsole.

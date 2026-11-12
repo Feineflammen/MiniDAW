@@ -5,10 +5,11 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: cmake -B build
       - run: cmake --build build --config Release
-      - uses: actions/upload-artifact@v4
+      - run: ctest --test-dir build -C Release --output-on-failure
+      - uses: actions/upload-artifact@v6
         with:
           name: minidaw
           path: build/Release/minidaw.exe

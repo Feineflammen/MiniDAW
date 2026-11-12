@@ -1,0 +1,226 @@
+#include "engine/Engine.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+
+namespace {
+
+constexpr double kTwoPi = 6.283185307179586;
+constexpr float kQuarterPi = 0.7853981633974483f;
+
+bool validTrack(int track) noexcept { return track >= 0 && track < Engine::kNumTracks; }
+
+void raisePeak(std::atomic<float>& peak, float value) noexcept {
+    if (value > peak.load(std::memory_order_relaxed))
+        peak.store(value, std::memory_order_relaxed);
+}
+
+}  // namespace
+
+// --- UI-Thread ---------------------------------------------------------------
+
+bool Engine::play() noexcept { return send({CommandType::Play}); }
+bool Engine::stop() noexcept { return send({CommandType::Stop}); }
+
+bool Engine::locate(std::int64_t samplePosition) noexcept {
+    Command c{CommandType::Locate};
+    c.position = std::max<std::int64_t>(0, samplePosition);
+    return send(c);
+}
+
+bool Engine::setTrackGain(int track, float gain) noexcept {
+    if (!validTrack(track)) return false;
+    return send({CommandType::TrackGain, track, std::max(0.0f, gain)});
+}
+
+bool Engine::setTrackPan(int track, float pan) noexcept {
+    if (!validTrack(track)) return false;
+    return send({CommandType::TrackPan, track, std::clamp(pan, -1.0f, 1.0f)});
+}
+
+bool Engine::setTrackMute(int track, bool mute) noexcept {
+    if (!validTrack(track)) return false;
+    return send({CommandType::TrackMute, track, mute ? 1.0f : 0.0f});
+}
+
+bool Engine::setTrackSolo(int track, bool solo) noexcept {
+    if (!validTrack(track)) return false;
+    return send({CommandType::TrackSolo, track, solo ? 1.0f : 0.0f});
+}
+
+bool Engine::setMasterGain(float gain) noexcept {
+    return send({CommandType::MasterGain, 0, std::max(0.0f, gain)});
+}
+
+bool Engine::setTrackTestTone(int track, float hz) noexcept {
+    if (!validTrack(track)) return false;
+    return send({CommandType::TrackTestTone, track, std::max(0.0f, hz)});
+}
+
+float Engine::takeTrackPeak(int track) noexcept {
+    if (!validTrack(track)) return 0.0f;
+    return trackPeak_[static_cast<std::size_t>(track)].exchange(0.0f, std::memory_order_relaxed);
+}
+
+float Engine::takeMasterPeak() noexcept {
+    return masterPeak_.exchange(0.0f, std::memory_order_relaxed);
+}
+
+// --- Audio-Thread ------------------------------------------------------------
+
+void Engine::prepare(double sampleRate, int /*numChannels*/, int maxFrames) {
+    sampleRate_ = sampleRate;
+    maxFrames_ = std::max(1, maxFrames);
+    masterL_.assign(static_cast<std::size_t>(maxFrames_), 0.0f);
+    masterR_.assign(static_cast<std::size_t>(maxFrames_), 0.0f);
+
+    for (auto& t : tracks_) {
+        t.phase = 0.0;
+        t.phaseInc = kTwoPi * static_cast<double>(t.toneHz) / sampleRate_;
+    }
+    updateTargets();
+    for (auto& t : tracks_) { t.curL = t.tgtL; t.curR = t.tgtR; }
+    masterCur_ = wantPlay_ ? masterGain_ : 0.0f;
+}
+
+void Engine::drainCommands() noexcept {
+    bool mixChanged = false;
+    Command c;
+    while (commands_.pop(c)) {
+        Track* t = validTrack(c.track) ? &tracks_[static_cast<std::size_t>(c.track)] : nullptr;
+        switch (c.type) {
+            case CommandType::Play:
+                wantPlay_ = true;
+                rolling_ = true;
+                break;
+            case CommandType::Stop:
+                wantPlay_ = false;  // rolling_ endet nach dem Ausblenden
+                break;
+            case CommandType::Locate:
+                position_ = c.position;
+                break;
+            case CommandType::TrackGain:
+                if (t) { t->gain = c.value; mixChanged = true; }
+                break;
+            case CommandType::TrackPan:
+                if (t) { t->pan = c.value; mixChanged = true; }
+                break;
+            case CommandType::TrackMute:
+                if (t) { t->mute = c.value != 0.0f; mixChanged = true; }
+                break;
+            case CommandType::TrackSolo:
+                if (t) { t->solo = c.value != 0.0f; mixChanged = true; }
+                break;
+            case CommandType::TrackTestTone:
+                if (t) {
+                    t->toneHz = c.value;
+                    t->phase = 0.0;
+                    t->phaseInc = kTwoPi * static_cast<double>(c.value) / sampleRate_;
+                }
+                break;
+            case CommandType::MasterGain:
+                masterGain_ = c.value;
+                break;
+        }
+    }
+    if (mixChanged) updateTargets();
+}
+
+void Engine::updateTargets() noexcept {
+    bool anySolo = false;
+    for (const auto& t : tracks_) anySolo = anySolo || t.solo;
+
+    for (auto& t : tracks_) {
+        // Mute gewinnt gegen Solo. Ist irgendwo Solo aktiv, sind nur Solo-Spuren hoerbar.
+        const bool audible = !t.mute && (!anySolo || t.solo);
+        if (!audible) { t.tgtL = 0.0f; t.tgtR = 0.0f; continue; }
+        // Constant-Power-Panning: in der Mitte -3 dB je Seite.
+        const float angle = (t.pan + 1.0f) * kQuarterPi;
+        t.tgtL = t.gain * std::cos(angle);
+        t.tgtR = t.gain * std::sin(angle);
+        if (t.pan <= -1.0f) t.tgtR = 0.0f;
+        if (t.pan >= 1.0f) t.tgtL = 0.0f;
+    }
+}
+
+void Engine::renderBlock(int numFrames) noexcept {
+    float* L = masterL_.data();
+    float* R = masterR_.data();
+    const std::size_t bytes = static_cast<std::size_t>(numFrames) * sizeof(float);
+    std::memset(L, 0, bytes);
+    std::memset(R, 0, bytes);
+
+    if (!rolling_) return;
+
+    const float invFrames = 1.0f / static_cast<float>(numFrames);
+
+    for (std::size_t ti = 0; ti < tracks_.size(); ++ti) {
+        Track& t = tracks_[ti];
+        if (t.toneHz <= 0.0f) { t.curL = t.tgtL; t.curR = t.tgtR; continue; }
+
+        const float stepL = (t.tgtL - t.curL) * invFrames;
+        const float stepR = (t.tgtR - t.curR) * invFrames;
+        float gl = t.curL, gr = t.curR;
+        float peak = 0.0f;
+
+        for (int i = 0; i < numFrames; ++i) {
+            const float s = kTestToneLevel * static_cast<float>(std::sin(t.phase));
+            t.phase += t.phaseInc;
+            if (t.phase >= kTwoPi) t.phase -= kTwoPi;
+
+            gl += stepL;
+            gr += stepR;
+            const float l = s * gl;
+            const float r = s * gr;
+            L[i] += l;
+            R[i] += r;
+            peak = std::max(peak, std::max(std::fabs(l), std::fabs(r)));
+        }
+        t.curL = t.tgtL;
+        t.curR = t.tgtR;
+        raisePeak(trackPeak_[ti], peak);
+    }
+
+    // Master-Fader. Start und Stopp blenden hier ueber einen Block ein und aus.
+    const float masterTarget = wantPlay_ ? masterGain_ : 0.0f;
+    const float step = (masterTarget - masterCur_) * invFrames;
+    float g = masterCur_;
+    float peak = 0.0f;
+    for (int i = 0; i < numFrames; ++i) {
+        g += step;
+        L[i] *= g;
+        R[i] *= g;
+        peak = std::max(peak, std::max(std::fabs(L[i]), std::fabs(R[i])));
+    }
+    masterCur_ = masterTarget;
+    raisePeak(masterPeak_, peak);
+
+    position_ += numFrames;
+    if (!wantPlay_) rolling_ = false;  // ausgeblendet, Transport steht
+}
+
+void Engine::process(float* const* out, int numChannels, int numFrames) noexcept {
+    drainCommands();
+
+    int done = 0;
+    while (done < numFrames) {
+        const int n = std::min(numFrames - done, maxFrames_);
+        renderBlock(n);
+
+        const std::size_t bytes = static_cast<std::size_t>(n) * sizeof(float);
+        if (numChannels >= 2) {
+            std::memcpy(out[0] + done, masterL_.data(), bytes);
+            std::memcpy(out[1] + done, masterR_.data(), bytes);
+            for (int c = 2; c < numChannels; ++c) std::memset(out[c] + done, 0, bytes);
+        } else if (numChannels == 1) {
+            for (int i = 0; i < n; ++i)
+                out[0][done + i] = 0.5f * (masterL_[static_cast<std::size_t>(i)] +
+                                           masterR_[static_cast<std::size_t>(i)]);
+        }
+        done += n;
+    }
+
+    positionOut_.store(position_, std::memory_order_relaxed);
+    playingOut_.store(wantPlay_, std::memory_order_relaxed);
+}

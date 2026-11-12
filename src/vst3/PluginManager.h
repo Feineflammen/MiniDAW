@@ -17,7 +17,7 @@ namespace vst3 {
 
 // Verbindet Oberflaeche, Projekt und VST3-Host: sucht Plugins, laedt sie auf
 // Spuren und verwaltet ihre Fenster. Alles hier laeuft im UI-Thread.
-class PluginManager final : public ui::PluginHost {
+class PluginManager final : public ui::PluginHost, public PluginPersistence {
 public:
     PluginManager(ProjectController& controller, double sampleRate, int maxFrames)
         : controller_(controller), sampleRate_(sampleRate), maxFrames_(maxFrames) {}
@@ -40,11 +40,18 @@ public:
     void unload(int track) override;
     bool openEditor(int track, std::wstring& error) override;
 
+    // --- PluginPersistence (Projekt speichern und laden) ---
+    bool capture(int track, std::filesystem::path& file, std::vector<char>& state) override;
+    bool restore(int track, const std::filesystem::path& file, const std::vector<char>& state,
+                 std::string& error) override;
+
 private:
     struct Slot {
         std::unique_ptr<PluginWindow> window;  // vor dem Plugin zerstoeren
         std::shared_ptr<Vst3Plugin> plugin;
+        std::filesystem::path path;            // Datei, aus der das Plugin stammt
     };
+    void install(int track, std::shared_ptr<Vst3Plugin> plugin, const std::filesystem::path& path);
 
     ProjectController& controller_;
     double sampleRate_;

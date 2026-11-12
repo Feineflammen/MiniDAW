@@ -94,6 +94,7 @@ bool ProjectController::removeClip(int track, int index) {
 
 void ProjectController::setTrackGain(int track, float gain) {
     if (!validTrack(track)) return;
+    modified_ = true;
     project_.tracks[static_cast<std::size_t>(track)].gain = std::max(0.0f, gain);
     engine_.setTrackGain(track, gain);
 }
@@ -101,25 +102,172 @@ void ProjectController::setTrackGain(int track, float gain) {
 void ProjectController::setTrackPan(int track, float pan) {
     if (!validTrack(track)) return;
     pan = std::clamp(pan, -1.0f, 1.0f);
+    modified_ = true;
     project_.tracks[static_cast<std::size_t>(track)].pan = pan;
     engine_.setTrackPan(track, pan);
 }
 
 void ProjectController::setTrackMute(int track, bool mute) {
     if (!validTrack(track)) return;
+    modified_ = true;
     project_.tracks[static_cast<std::size_t>(track)].mute = mute;
     engine_.setTrackMute(track, mute);
 }
 
 void ProjectController::setTrackSolo(int track, bool solo) {
     if (!validTrack(track)) return;
+    modified_ = true;
     project_.tracks[static_cast<std::size_t>(track)].solo = solo;
     engine_.setTrackSolo(track, solo);
 }
 
 void ProjectController::setMasterGain(float gain) {
+    modified_ = true;
     project_.masterGain = std::max(0.0f, gain);
     engine_.setMasterGain(gain);
+}
+
+// --- Projektdatei ------------------------------------------------------------
+
+std::int64_t ProjectController::contentLength() const noexcept {
+    std::int64_t end = 0;
+    for (const auto& track : project_.tracks) {
+        for (const auto& clip : track.clips) end = std::max(end, clip.start + clip.length);
+        for (const auto& clip : track.midiClips) end = std::max(end, clip.start + clip.length);
+    }
+    return end;
+}
+
+// Setzt alles auf den Ausgangszustand zurueck: keine Clips, keine Plugins, Regler neutral.
+void ProjectController::clearProject() {
+    engine_.stop();
+    engine_.locate(0);
+    for (int t = 0; t < kProjectTracks; ++t) {
+        TrackModel& track = project_.tracks[static_cast<std::size_t>(t)];
+        std::string ignored;
+        if (persistence_) persistence_->restore(t, {}, {}, ignored);
+        else setTrackPlugin(t, nullptr, L"");
+        track.clips.clear();
+        track.midiClips.clear();
+        syncTrack(t);
+        syncMidi(t);
+        track.name = L"Spur " + std::to_wstring(t + 1);
+        setTrackGain(t, 1.0f);
+        setTrackPan(t, 0.0f);
+        setTrackMute(t, false);
+        setTrackSolo(t, false);
+        setTrackInput(t, kTrackInputAudio);
+        setTrackMidiOutput(t, kTrackOutputSynth);
+    }
+    setMasterGain(1.0f);
+    setBpm(120.0);
+}
+
+void ProjectController::newProject() {
+    if (isRecording()) return;
+    clearProject();
+    projectPath_.clear();
+    modified_ = false;
+}
+
+bool ProjectController::saveProject(const std::filesystem::path& path, std::string& message) {
+    message.clear();
+    SavedProject saved;
+    saved.sampleRate = sampleRate_;
+    saved.bpm = project_.bpm;
+    saved.masterGain = project_.masterGain;
+    for (int t = 0; t < kProjectTracks; ++t) {
+        const TrackModel& track = project_.tracks[static_cast<std::size_t>(t)];
+        SavedTrack& out = saved.tracks[static_cast<std::size_t>(t)];
+        out.name = track.name;
+        out.gain = track.gain;
+        out.pan = track.pan;
+        out.mute = track.mute;
+        out.solo = track.solo;
+        out.input = track.input;
+        out.midiOutput = track.midiOutput;
+        if (persistence_ && persistence_->capture(t, out.plugin, out.pluginState)) out.pluginName = track.pluginName;
+        for (const ClipModel& clip : track.clips)
+            out.clips.push_back({clip.file->path, clip.start, clip.offset, clip.length});
+        out.midiClips = track.midiClips;
+    }
+    if (!writeProjectFile(path, saved, message)) return false;
+    projectPath_ = path;
+    modified_ = false;
+    return true;
+}
+
+bool ProjectController::loadProject(const std::filesystem::path& path, std::string& message) {
+    message.clear();
+    if (isRecording()) { message = "W\u00E4hrend einer Aufnahme l\u00E4sst sich kein Projekt laden."; return false; }
+
+    // Erst vollstaendig lesen; schlaegt das fehl, bleibt das bisherige Projekt stehen.
+    SavedProject saved;
+    if (!readProjectFile(path, saved, message)) return false;
+
+    clearProject();
+    int missingFiles = 0, failedPlugins = 0;
+    std::string firstProblem;
+
+    setBpm(saved.bpm);
+    setMasterGain(saved.masterGain);
+    for (int t = 0; t < kProjectTracks; ++t) {
+        const SavedTrack& in = saved.tracks[static_cast<std::size_t>(t)];
+        TrackModel& track = project_.tracks[static_cast<std::size_t>(t)];
+        track.name = in.name;
+        setTrackGain(t, in.gain);
+        setTrackPan(t, in.pan);
+        setTrackMute(t, in.mute);
+        setTrackSolo(t, in.solo);
+        setTrackInput(t, in.input);
+        setTrackMidiOutput(t, in.midiOutput);
+
+        for (const SavedClip& savedClip : in.clips) {
+            std::string error;
+            auto file = openFile(savedClip.file, error);
+            if (!file) {
+                ++missingFiles;
+                if (firstProblem.empty()) firstProblem = toUtf8(savedClip.file.filename().wstring()) + ": " + error;
+                continue;
+            }
+            ClipModel clip;
+            clip.start = std::max<std::int64_t>(0, savedClip.start);
+            clip.offset = std::clamp<std::int64_t>(savedClip.offset, 0, file->wav->frames());
+            clip.length = std::min(savedClip.length, file->wav->frames() - clip.offset);
+            if (clip.length <= 0) continue;
+            clip.file = std::move(file);
+            track.clips.push_back(std::move(clip));
+        }
+        syncTrack(t);
+
+        track.midiClips = in.midiClips;
+        syncMidi(t);
+
+        if (!in.plugin.empty()) {
+            std::string error;
+            if (!persistence_ || !persistence_->restore(t, in.plugin, in.pluginState, error)) {
+                ++failedPlugins;
+                if (firstProblem.empty())
+                    firstProblem = toUtf8(in.pluginName) + ": " + (error.empty() ? "Plugins sind hier nicht verf\u00FCgbar" : error);
+            }
+        }
+    }
+
+    projectPath_ = path;
+    modified_ = false;
+
+    if (missingFiles > 0 || failedPlugins > 0) {
+        message = "Geladen mit L\u00FCcken: ";
+        if (missingFiles > 0) message += std::to_string(missingFiles) + " Audiodatei(en) fehlen";
+        if (missingFiles > 0 && failedPlugins > 0) message += ", ";
+        if (failedPlugins > 0) message += std::to_string(failedPlugins) + " Plugin(s) nicht geladen";
+        message += " (" + firstProblem + ")";
+    } else if (saved.sampleRate > 0.0 && std::fabs(saved.sampleRate - sampleRate_) > 0.5) {
+        message = "Das Projekt wurde mit " + std::to_string(static_cast<int>(saved.sampleRate)) +
+                  " Hz gespeichert, das Ger\u00E4t l\u00E4uft mit " + std::to_string(static_cast<int>(sampleRate_)) +
+                  " Hz. Positionen und Tonh\u00F6hen stimmen deshalb nicht.";
+    }
+    return true;
 }
 
 // --- MIDI --------------------------------------------------------------------
@@ -127,12 +275,14 @@ void ProjectController::setMasterGain(float gain) {
 void ProjectController::setTrackInput(int track, int input) {
     if (!validTrack(track) || input < kTrackInputAudio || input > 15) return;
     if (isRecording()) return;
+    modified_ = true;
     project_.tracks[static_cast<std::size_t>(track)].input = input;
     engine_.setTrackMidiInput(track, input);
 }
 
 void ProjectController::setTrackMidiOutput(int track, int output) {
     if (!validTrack(track) || output < kTrackOutputSynth || output > 15) return;
+    modified_ = true;
     project_.tracks[static_cast<std::size_t>(track)].midiOutput = output;
     engine_.setTrackMidiOutput(track, output);
 }
@@ -141,6 +291,7 @@ void ProjectController::setTrackPlugin(int track, std::shared_ptr<AudioPlugin> p
     if (!validTrack(track)) return;
     auto& slot = plugins_[static_cast<std::size_t>(track)];
     if (!engine_.setTrackPlugin(track, plugin.get())) return;
+    modified_ = true;
     if (slot) retiringPlugins_.push_back(std::move(slot));
     slot = std::move(plugin);
     TrackModel& model = project_.tracks[static_cast<std::size_t>(track)];
@@ -158,6 +309,7 @@ void ProjectController::releasePlugins() {
 }
 
 void ProjectController::setBpm(double bpm) {
+    modified_ = true;
     project_.bpm = std::clamp(bpm, 30.0, 300.0);
     engine_.setTempo(project_.bpm);
 }
@@ -219,6 +371,7 @@ bool ProjectController::removeMidiClip(int track, int index) {
 
 // Baut aus allen MIDI-Clips der Spur die sortierte Ereignisliste fuer die Engine.
 void ProjectController::syncMidi(int track) {
+    modified_ = true;
     const auto& clips = project_.tracks[static_cast<std::size_t>(track)].midiClips;
     if (clips.empty()) {
         engine_.setTrackMidiSequence(track, nullptr);
@@ -474,6 +627,7 @@ std::int64_t ProjectController::projectLength() const noexcept {
 }
 
 void ProjectController::syncTrack(int track) {
+    modified_ = true;
     Playlist playlist;
     for (const auto& clip : project_.tracks[static_cast<std::size_t>(track)].clips)
         playlist.push_back(Clip{clip.file->wav, clip.start, clip.offset, clip.length, 1.0f});

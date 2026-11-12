@@ -3,6 +3,7 @@
 #include "disk/PeakData.h"
 #include "engine/Engine.h"
 #include "model/Project.h"
+#include "model/ProjectFile.h"
 
 #include <filesystem>
 #include <functional>
@@ -10,6 +11,19 @@
 #include <memory>
 #include <string>
 #include <vector>
+
+// Sichert und laedt die Plugins der Spuren. Der ProjectController kennt keine
+// Plugin-Technik; die Umsetzung liegt beim VST3-Teil.
+class PluginPersistence {
+public:
+    virtual ~PluginPersistence() = default;
+    // Liefert Datei und Einstellungen des Plugins der Spur. false, wenn keins geladen ist.
+    virtual bool capture(int track, std::filesystem::path& file, std::vector<char>& state) = 0;
+    // Laedt das Plugin aus file auf die Spur und stellt seine Einstellungen her.
+    // Ein leerer Pfad entfernt das Plugin der Spur.
+    virtual bool restore(int track, const std::filesystem::path& file, const std::vector<char>& state,
+                         std::string& error) = 0;
+};
 
 // Einziger Weg, das Projektmodell zu aendern. Jede Aenderung landet im Modell
 // und wird an die Engine weitergegeben. Nur vom UI-Thread benutzen.
@@ -21,6 +35,24 @@ public:
     explicit ProjectController(Engine& engine);
 
     const Project& project() const noexcept { return project_; }
+
+    // --- Projektdatei ---
+    void setPluginPersistence(PluginPersistence* persistence) noexcept { persistence_ = persistence; }
+    // Leert das Projekt.
+    void newProject();
+    // Speichert das Projekt. Bei false steht der Grund in message.
+    bool saveProject(const std::filesystem::path& path, std::string& message);
+    // Laedt ein Projekt. Bei false steht der Grund in message und das bisherige
+    // Projekt ist unveraendert; bei true kann message Hinweise enthalten
+    // (fehlende Dateien, nicht ladbare Plugins).
+    bool loadProject(const std::filesystem::path& path, std::string& message);
+    // Pfad der Projektdatei, leer solange nie gespeichert wurde.
+    const std::filesystem::path& projectPath() const noexcept { return projectPath_; }
+    // true, wenn seit dem letzten Speichern oder Laden etwas geaendert wurde.
+    // Einstellungen in Plugin-Fenstern werden dabei nicht erkannt.
+    bool modified() const noexcept { return modified_; }
+    // Laenge fuer den Export: Ende des letzten Audio- oder MIDI-Clips.
+    std::int64_t contentLength() const noexcept;
 
     // Samplerate des Audiogeraets; dient der Zeitanzeige und der Warnung bei
     // Dateien mit anderer Samplerate.
@@ -124,10 +156,14 @@ private:
     std::shared_ptr<AudioFile> openFile(const std::filesystem::path& path, std::string& error);
     void syncTrack(int track);
     void syncMidi(int track);
+    void clearProject();
     void finishMidiRecording(std::int64_t end);
 
     Engine& engine_;
     Project project_;
+    PluginPersistence* persistence_ = nullptr;
+    std::filesystem::path projectPath_;
+    bool modified_ = false;
     double sampleRate_ = 44100.0;
     std::vector<std::weak_ptr<AudioFile>> files_;
     std::array<std::shared_ptr<AudioPlugin>, kProjectTracks> plugins_;

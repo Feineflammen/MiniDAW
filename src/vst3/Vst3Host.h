@@ -134,6 +134,12 @@ public:
     // Bedienoberflaeche des Plugins oder nullptr. Der Aufrufer gibt sie mit release() frei.
     Steinberg::IPlugView* createView();
 
+    // Einstellungen des Plugins sichern und wiederherstellen (UI-Thread). Der
+    // Inhalt ist das, was das Plugin selbst liefert: der Zustand des
+    // Verarbeitungsteils, gefolgt von dem des Bedienteils.
+    bool saveState(std::vector<char>& state);
+    bool loadState(const std::vector<char>& state);
+
     // Regelmaessig im UI-Thread rufen: reicht Parameteraenderungen, die beim
     // Rechnen entstanden sind, an die Bedienoberflaeche weiter.
     void idle();

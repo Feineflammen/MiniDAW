@@ -31,6 +31,9 @@ public:
     // Schaltet zum naechsten Geraet weiter (nach dem letzten kommt "keins").
     void cycle();
 
+    // Stumm: Nachrichten der Engine werden verworfen statt gesendet (waehrend des Exports).
+    void setMuted(bool muted) { muted_.store(muted); }
+
     // Name des offenen Geraets oder leer.
     std::wstring current();
 
@@ -42,5 +45,6 @@ private:
     HMIDIOUT handle_ = nullptr;
     std::wstring current_;
     std::atomic<bool> running_{true};
+    std::atomic<bool> muted_{false};
     std::thread thread_;
 };

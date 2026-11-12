@@ -81,6 +81,10 @@ public:
     bool setTempo(double bpm) noexcept;
     bool setMetronome(bool on) noexcept;
 
+    // Offline-Rechnen (Export): Start und Stopp werden nicht ein- und
+    // ausgeblendet, damit der Anfang der Datei unveraendert bleibt.
+    bool setOffline(bool on) noexcept;
+
     // Testton als Quelle einer Spur (fuer Tests). 0 Hz schaltet ihn aus.
     bool setTrackTestTone(int track, float hz) noexcept;
 
@@ -177,7 +181,7 @@ private:
         MasterGain,
         ArmTrack, InputMonitor, Record, RecordMidi,
         TrackMidiInput, TrackMidiOutput, TrackMidiSequence,
-        Tempo, Metronome, TrackPlugin,
+        Tempo, Metronome, TrackPlugin, Offline,
     };
 
     struct Command {
@@ -260,6 +264,7 @@ private:
     bool midiRecording_ = false;
     double tempo_ = 120.0;
     bool metronome_ = false;
+    bool offline_ = false;
     int clickRemaining_ = 0;   // noch zu spielende Frames des aktuellen Klicks
     int clickLength_ = 1;
     double clickPhase_ = 0.0;

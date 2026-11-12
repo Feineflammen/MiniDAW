@@ -72,6 +72,7 @@ void MidiOutput::run() {
     while (running_.load(std::memory_order_relaxed)) {
         MidiOutEvent e;
         while (engine_.popMidiOut(e)) pending.push_back(e);
+        if (muted_.load(std::memory_order_relaxed)) pending.clear();
 
         if (!pending.empty()) {
             const std::int64_t now = std::chrono::duration_cast<std::chrono::microseconds>(

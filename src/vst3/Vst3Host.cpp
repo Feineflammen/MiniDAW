@@ -502,6 +502,47 @@ IPlugView* Vst3Plugin::createView() {
     return controller_ ? controller_->createView(ViewType::kEditor) : nullptr;
 }
 
+// Aufbau: 4 Bytes Laenge des ersten Teils, Zustand des Verarbeitungsteils, Zustand des Bedienteils.
+bool Vst3Plugin::saveState(std::vector<char>& state) {
+    state.clear();
+    if (!component_) return false;
+
+    MemoryStream componentState;
+    if (component_->getState(&componentState) != kResultOk) return false;
+    MemoryStream controllerState;
+    if (controller_) controller_->getState(&controllerState);  // darf fehlen
+
+    const auto size = static_cast<std::uint32_t>(componentState.data().size());
+    for (int i = 0; i < 4; ++i) state.push_back(static_cast<char>((size >> (8 * i)) & 0xFF));
+    state.insert(state.end(), componentState.data().begin(), componentState.data().end());
+    state.insert(state.end(), controllerState.data().begin(), controllerState.data().end());
+    return true;
+}
+
+bool Vst3Plugin::loadState(const std::vector<char>& state) {
+    if (!component_ || state.size() < 4) return false;
+    std::uint32_t size = 0;
+    for (int i = 0; i < 4; ++i)
+        size |= static_cast<std::uint32_t>(static_cast<unsigned char>(state[static_cast<std::size_t>(i)])) << (8 * i);
+    if (size > state.size() - 4) return false;
+
+    MemoryStream componentState;
+    componentState.data().assign(state.begin() + 4, state.begin() + 4 + static_cast<std::ptrdiff_t>(size));
+    if (component_->setState(&componentState) != kResultOk) return false;
+
+    if (controller_) {
+        // Der Bedienteil erfaehrt erst den Zustand des Verarbeitungsteils, dann seinen eigenen.
+        componentState.rewind();
+        controller_->setComponentState(&componentState);
+        if (state.size() > 4 + static_cast<std::size_t>(size)) {
+            MemoryStream controllerState;
+            controllerState.data().assign(state.begin() + 4 + static_cast<std::ptrdiff_t>(size), state.end());
+            controller_->setState(&controllerState);
+        }
+    }
+    return true;
+}
+
 void Vst3Plugin::idle() {
     ParamEdit edit;
     while (editsToUi_.pop(edit))

@@ -246,10 +246,10 @@ Windows-Code. Sie bilden die Bibliothek `dawcore`, die auch die Tests benutzen.
 | 6a | MIDI-Eingang, eingebauter Synthesizer, live spielen | fertig, mit Keyboard gespielt |
 | 6b | MIDI-Clips, MIDI-Aufnahme, Kanalwahl je Spur, MIDI-Ausgabegerät | Code und Offline-Tests fertig, vom Benutzer NICHT getestet (übersprungen) |
 | 6c | Piano Roll, Tempo, Taktraster, Metronom | Code fertig, per Screenshot geprüft, Bedientest offen |
-| 7 | VST3-Hosting: Laden, Verarbeiten, Editor-Fenster (ein Plugin je Spur) | Code fertig; getestet nur gegen ein Mini-Plugin im Test, mit echten Plugins NICHT |
+| 7 | VST3-Hosting: Laden, Verarbeiten, Editor-Fenster (ein Plugin je Spur) | fertig, mit echtem Plugin gespielt |
 | 8 | Mixer komplett: Inserts, Sends, Busse, Pegel, Latenzausgleich | offen |
-| 9 | Projekt speichern und laden, Undo/Redo fertig | offen |
-| 10 | Automation, Offline-Export | offen |
+| 9 | Projekt speichern und laden, WAV-Export | Code und Offline-Tests fertig, Bedientest offen; Undo/Redo offen |
+| 10 | Automation | offen |
 
 Jeder Schritt gilt erst als fertig, wenn er auf echter Hardware läuft und
 ohne Knackser klingt.
@@ -280,6 +280,40 @@ bekommt dort mindestens eine Prüfung.
 Wertänderungen an Fadern, Mute, Solo und Transport werden über einen Block
 überblendet, damit nichts knackt. Ein Test misst den größten Sprung zwischen
 zwei Samples.
+
+## Projektdatei
+
+- Endung `.mdaw`, zeilenweiser Text in UTF-8 (`model/ProjectFile`), bewusst
+  lesbar und von Hand reparierbar. Unbekannte Schlüsselwörter werden beim
+  Lesen übersprungen, damit ältere Programmversionen neuere Dateien nicht
+  zerstören.
+- Gespeichert werden Tempo, Master, je Spur Name, Regler, Eingang, Ausgang,
+  Plugin (Pfad und Einstellungen als Hex-Text), Audio-Clips (Pfad, Position,
+  Ausschnitt) und MIDI-Clips mit Noten. Audiodateien bleiben, wo sie sind:
+  Pfade unterhalb des Projektordners stehen relativ in der Datei, andere
+  vollständig.
+- Geschrieben wird erst in eine Nachbardatei, dann umbenannt. Scheitert das
+  Schreiben, bleibt die alte Datei unversehrt.
+- Geladen wird erst vollständig in den Speicher; nur wenn das gelingt, wird das
+  laufende Projekt ersetzt. Fehlende Audiodateien und nicht ladbare Plugins
+  brechen das Laden nicht ab, sondern werden gemeldet.
+- Plugins sichert und lädt der VST3-Teil über `PluginPersistence`; das Modell
+  kennt keine Plugin-Technik.
+- `ProjectController::modified()` merkt sich Änderungen am Modell. Drehen an
+  Reglern in Plugin-Fenstern wird dabei nicht erkannt.
+
+Positionen stehen in Frames. Ein Projekt passt deshalb nur zu der Samplerate,
+mit der es gespeichert wurde; beim Laden mit anderer Samplerate wird gewarnt.
+
+## Export
+
+`engine/OfflineRender` rechnet das Projekt ohne Audiogerät in eine WAV-Datei
+(16 Bit, 24 Bit oder 32-Bit-Float). Dafür hält das Programm Audiogerät und
+Disk-Thread an und treibt die Engine aus dem UI-Thread an; danach startet
+beides wieder. Im Offline-Modus blendet die Engine Start und Stopp nicht ein
+und aus, der Anfang der Datei bleibt also unverändert. MIDI an externe Geräte
+wird während des Exports verworfen: Was ein Hardware-Klangerzeuger spielt,
+kann nicht im Export landen.
 
 ## Offline-Rendering
 

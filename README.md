@@ -17,7 +17,7 @@ build\Release\minidaw.exe
 
 Tests ausführen: `ctest --test-dir build -C Release --output-on-failure`
 
-Aktueller Stand: Schritt 7, VST3-Plugins (ein Plugin je Spur).
+Aktueller Stand: Projekte speichern, laden und als WAV exportieren.
 
 ## Bedienung
 
@@ -39,6 +39,8 @@ Aktueller Stand: Schritt 7, VST3-Plugins (ein Plugin je Spur).
 | Tasten A S D F G H J K L | weiße Tasten ab C auf der scharfgeschalteten Spur |
 | Tasten W E T Z U O | schwarze Tasten |
 | Y / X | Oktave tiefer / höher |
+
+Menü "Datei": Neu (Strg+N), Öffnen (Strg+O), Speichern (Strg+S), Speichern unter (Strg+Umschalt+S), Als WAV exportieren (Strg+E). Projekte haben die Endung `.mdaw` und sind lesbare Textdateien; die Audiodateien bleiben an ihrem Ort.
 
 Am Spurkopf rechts stehen zwei Felder: oben der Eingang der Spur (Audio, MIDI alle, MIDI 1 bis 16), unten ihr MIDI-Ausgang (Synth oder MIDI 1 bis 16). Linksklick schaltet weiter, Rechtsklick zurück, das Mausrad geht auch. In der Statusleiste wählt ein Klick auf "MIDI aus" das Ausgabegerät.
 

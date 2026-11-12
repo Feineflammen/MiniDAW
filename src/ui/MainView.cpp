@@ -273,6 +273,15 @@ void MainView::setStatus(const std::wstring& message) {
     statusTicks_ = 240;  // etwa acht Sekunden
 }
 
+void MainView::projectReplaced() {
+    selTrack_ = selIndex_ = -1;
+    selMidi_ = false;
+    drag_ = Drag::None;
+    pickerTrack_ = -1;
+    pianoRoll_.close();
+    viewStart_ = 0.0;
+}
+
 void MainView::togglePlay() {
     if (engine_.isPlaying()) engine_.stop();
     else engine_.play();

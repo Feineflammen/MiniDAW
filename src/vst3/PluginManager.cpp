@@ -45,6 +45,12 @@ bool PluginManager::load(int track, int index, std::wstring& error) {
         return false;
     }
 
+    install(track, std::move(plugin), entries_[static_cast<std::size_t>(index)].path);
+    return true;
+}
+
+// Setzt ein fertig geladenes Plugin auf die Spur.
+void PluginManager::install(int track, std::shared_ptr<Vst3Plugin> plugin, const std::filesystem::path& path) {
     // Erst das Fenster des bisherigen Plugins schliessen, dann austauschen. Das
     // alte Plugin haelt der ProjectController, bis der Audio-Thread es loslaesst.
     Slot& slot = slots_[static_cast<std::size_t>(track)];
@@ -52,6 +58,30 @@ bool PluginManager::load(int track, int index, std::wstring& error) {
     const std::wstring name = plugin->name();
     controller_.setTrackPlugin(track, plugin, name);
     slot.plugin = std::move(plugin);
+    slot.path = path;
+}
+
+bool PluginManager::capture(int track, std::filesystem::path& file, std::vector<char>& state) {
+    if (!validTrack(track)) return false;
+    Slot& slot = slots_[static_cast<std::size_t>(track)];
+    if (!slot.plugin) return false;
+    file = slot.path;
+    slot.plugin->saveState(state);  // liefert das Plugin nichts, wird es ohne Einstellungen gespeichert
+    return true;
+}
+
+bool PluginManager::restore(int track, const std::filesystem::path& file, const std::vector<char>& state,
+                            std::string& error) {
+    if (!validTrack(track)) return false;
+    if (file.empty()) {
+        unload(track);
+        return true;
+    }
+    std::shared_ptr<Vst3Plugin> plugin = loadPlugin(file, sampleRate_, maxFrames_, error);
+    if (!plugin) return false;
+    // Einstellungen setzen, bevor der Audio-Thread das Plugin bekommt.
+    if (!state.empty()) plugin->loadState(state);
+    install(track, std::move(plugin), file);
     return true;
 }
 
@@ -61,6 +91,7 @@ void PluginManager::unload(int track) {
     slot.window.reset();
     controller_.setTrackPlugin(track, nullptr, L"");
     slot.plugin.reset();
+    slot.path.clear();
 }
 
 bool PluginManager::openEditor(int track, std::wstring& error) {

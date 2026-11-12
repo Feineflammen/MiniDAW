@@ -12,6 +12,9 @@
 
 namespace ui {
 
+// Befehle des Menues "Datei".
+enum MenuCommand { kFileNew = 1001, kFileOpen, kFileSave, kFileSaveAs, kFileExport, kFileQuit };
+
 // Das Win32-Fenster. Reicht Eingaben an die MainView weiter und zeichnet sie
 // mit Direct2D, etwa 30-mal pro Sekunde.
 class MainWindow {
@@ -22,6 +25,12 @@ public:
     int run();
 
     HWND hwnd() const { return hwnd_; }
+    void setTitle(const std::wstring& title);
+
+    // Wird fuer Menuebefehle und ihre Tastenkuerzel gerufen (MenuCommand).
+    std::function<void(int)> onCommand;
+    // Wird gefragt, bevor das Fenster schliesst. false bricht das Schliessen ab.
+    std::function<bool()> onCloseRequest;
 
     // Wird bei jedem Bild (etwa 30-mal pro Sekunde) im UI-Thread gerufen.
     std::function<void()> onFrame;
@@ -43,6 +52,14 @@ private:
     Microsoft::WRL::ComPtr<ID2D1HwndRenderTarget> target_;
     std::unique_ptr<Canvas> canvas_;
 };
+
+// Dateiauswahl. filter im Format der Windows-Dialoge ("Name\0*.ext\0...\0").
+// Liefert einen leeren Pfad, wenn der Benutzer abbricht. filterIndex (ab 1)
+// nennt bei Bedarf den gewaehlten Dateityp.
+std::filesystem::path askOpenFile(HWND owner, const wchar_t* title, const wchar_t* filter);
+std::filesystem::path askSaveFile(HWND owner, const wchar_t* title, const wchar_t* filter,
+                                  const wchar_t* defaultExtension, const std::wstring& suggestedName,
+                                  int* filterIndex = nullptr);
 
 // Zeichnet die Ansicht ohne Fenster in eine PNG-Datei (fuer automatische Pruefungen).
 bool renderToPng(MainView& view, int width, int height, const std::filesystem::path& path,

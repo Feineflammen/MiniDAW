@@ -164,26 +164,61 @@ void WavFile::readStereo(std::int64_t frame, int count, float* out) {
     }
 }
 
-bool WavWriter::open(const std::filesystem::path& path, int channels, int sampleRate, std::string& error) {
+namespace {
+
+int bytesPerSample(WavFormat format) { return format == WavFormat::Pcm16 ? 2 : format == WavFormat::Pcm24 ? 3 : 4; }
+
+// Wandelt Float-Werte in das Dateiformat und haengt sie an out an.
+void encodeSamples(const float* samples, std::int64_t count, WavFormat format, std::vector<unsigned char>& out) {
+    for (std::int64_t i = 0; i < count; ++i) {
+        const float x = samples[i];
+        if (format == WavFormat::Float32) {
+            unsigned char b[4];
+            std::memcpy(b, &x, 4);
+            out.insert(out.end(), b, b + 4);
+        } else if (format == WavFormat::Pcm16) {
+            const double c = std::clamp(static_cast<double>(x), -1.0, 1.0);
+            putU16(out, static_cast<std::uint16_t>(static_cast<std::int16_t>(std::lround(c * 32767.0))));
+        } else {
+            const double c = std::clamp(static_cast<double>(x), -1.0, 1.0);
+            const auto v = static_cast<std::uint32_t>(static_cast<std::int32_t>(std::lround(c * 8388607.0)));
+            out.push_back(static_cast<unsigned char>(v & 0xFF));
+            out.push_back(static_cast<unsigned char>((v >> 8) & 0xFF));
+            out.push_back(static_cast<unsigned char>((v >> 16) & 0xFF));
+        }
+    }
+}
+
+std::vector<unsigned char> wavHeader(int channels, int sampleRate, WavFormat format, std::int64_t dataSize) {
+    const int bytes = bytesPerSample(format);
+    std::vector<unsigned char> head;
+    head.insert(head.end(), {'R', 'I', 'F', 'F'});
+    putU32(head, static_cast<std::uint32_t>(36 + dataSize));
+    head.insert(head.end(), {'W', 'A', 'V', 'E', 'f', 'm', 't', ' '});
+    putU32(head, 16);
+    putU16(head, format == WavFormat::Float32 ? kTagFloat : kTagPcm);
+    putU16(head, static_cast<std::uint16_t>(channels));
+    putU32(head, static_cast<std::uint32_t>(sampleRate));
+    putU32(head, static_cast<std::uint32_t>(sampleRate * channels * bytes));
+    putU16(head, static_cast<std::uint16_t>(channels * bytes));
+    putU16(head, static_cast<std::uint16_t>(bytes * 8));
+    head.insert(head.end(), {'d', 'a', 't', 'a'});
+    putU32(head, static_cast<std::uint32_t>(dataSize));
+    return head;
+}
+
+}  // namespace
+
+bool WavWriter::open(const std::filesystem::path& path, int channels, int sampleRate, std::string& error,
+                     WavFormat format) {
     if (channels < 1 || sampleRate < 1) { error = "Ungueltige Parameter"; return false; }
     out_.open(path, std::ios::binary | std::ios::trunc);
     if (!out_) { error = "Datei laesst sich nicht anlegen"; return false; }
     channels_ = channels;
     frames_ = 0;
+    format_ = format;
 
-    std::vector<unsigned char> head;
-    head.insert(head.end(), {'R', 'I', 'F', 'F'});
-    putU32(head, 36);  // wird in finish() korrigiert
-    head.insert(head.end(), {'W', 'A', 'V', 'E', 'f', 'm', 't', ' '});
-    putU32(head, 16);
-    putU16(head, kTagFloat);
-    putU16(head, static_cast<std::uint16_t>(channels));
-    putU32(head, static_cast<std::uint32_t>(sampleRate));
-    putU32(head, static_cast<std::uint32_t>(sampleRate * channels * 4));
-    putU16(head, static_cast<std::uint16_t>(channels * 4));
-    putU16(head, 32);
-    head.insert(head.end(), {'d', 'a', 't', 'a'});
-    putU32(head, 0);  // wird in finish() korrigiert
+    const auto head = wavHeader(channels, sampleRate, format, 0);  // Laengen traegt finish() nach
     out_.write(reinterpret_cast<const char*>(head.data()), static_cast<std::streamsize>(head.size()));
     if (!out_) { error = "Schreibfehler"; return false; }
     return true;
@@ -191,15 +226,22 @@ bool WavWriter::open(const std::filesystem::path& path, int channels, int sample
 
 bool WavWriter::write(const float* interleaved, std::int64_t frames) {
     if (!out_.is_open() || frames <= 0) return out_.is_open();
-    out_.write(reinterpret_cast<const char*>(interleaved),
-               static_cast<std::streamsize>(frames * channels_ * 4));
+    if (format_ == WavFormat::Float32) {
+        out_.write(reinterpret_cast<const char*>(interleaved),
+                   static_cast<std::streamsize>(frames * channels_ * 4));
+    } else {
+        buffer_.clear();
+        encodeSamples(interleaved, frames * channels_, format_, buffer_);
+        out_.write(reinterpret_cast<const char*>(buffer_.data()), static_cast<std::streamsize>(buffer_.size()));
+    }
     frames_ += frames;
     return static_cast<bool>(out_);
 }
 
 bool WavWriter::finish() {
     if (!out_.is_open()) return false;
-    const std::int64_t dataSize = std::min<std::int64_t>(frames_ * channels_ * 4, 0xFFFFFFFFll - 36);
+    const std::int64_t dataSize =
+        std::min<std::int64_t>(frames_ * channels_ * bytesPerSample(format_), 0xFFFFFFFFll - 36);
     std::vector<unsigned char> size;
     putU32(size, static_cast<std::uint32_t>(36 + dataSize));
     out_.seekp(4);
@@ -214,60 +256,21 @@ bool WavWriter::finish() {
     return ok;
 }
 
+// Schreibt eine ganze Datei auf einmal.
 bool writeWav(const std::filesystem::path& path, const float* interleaved, std::int64_t frames,
               int channels, int sampleRate, WavFormat format, std::string& error) {
     if (frames < 0 || channels < 1 || sampleRate < 1) { error = "Ungueltige Parameter"; return false; }
-
-    const int bytes = format == WavFormat::Pcm16 ? 2 : format == WavFormat::Pcm24 ? 3 : 4;
-    const std::int64_t dataSize = frames * channels * bytes;
-    if (dataSize > 0xFFFFFFFFll - 44) { error = "Datei waere groesser als 4 GB"; return false; }
-
-    std::vector<unsigned char> head;
-    head.insert(head.end(), {'R', 'I', 'F', 'F'});
-    putU32(head, static_cast<std::uint32_t>(36 + dataSize));
-    head.insert(head.end(), {'W', 'A', 'V', 'E', 'f', 'm', 't', ' '});
-    putU32(head, 16);
-    putU16(head, format == WavFormat::Float32 ? kTagFloat : kTagPcm);
-    putU16(head, static_cast<std::uint16_t>(channels));
-    putU32(head, static_cast<std::uint32_t>(sampleRate));
-    putU32(head, static_cast<std::uint32_t>(sampleRate * channels * bytes));
-    putU16(head, static_cast<std::uint16_t>(channels * bytes));
-    putU16(head, static_cast<std::uint16_t>(bytes * 8));
-    head.insert(head.end(), {'d', 'a', 't', 'a'});
-    putU32(head, static_cast<std::uint32_t>(dataSize));
-
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out) { error = "Datei laesst sich nicht anlegen"; return false; }
-    out.write(reinterpret_cast<const char*>(head.data()), static_cast<std::streamsize>(head.size()));
-
-    const std::int64_t total = frames * channels;
-    std::vector<unsigned char> buffer;
-    constexpr std::int64_t kChunk = 16384;
-
-    for (std::int64_t done = 0; done < total; done += kChunk) {
-        const std::int64_t n = std::min(kChunk, total - done);
-        buffer.clear();
-        for (std::int64_t i = 0; i < n; ++i) {
-            const float x = interleaved[done + i];
-            if (format == WavFormat::Float32) {
-                unsigned char b[4];
-                std::memcpy(b, &x, 4);
-                buffer.insert(buffer.end(), b, b + 4);
-            } else if (format == WavFormat::Pcm16) {
-                const double c = std::clamp(static_cast<double>(x), -1.0, 1.0);
-                putU16(buffer, static_cast<std::uint16_t>(static_cast<std::int16_t>(std::lround(c * 32767.0))));
-            } else {
-                const double c = std::clamp(static_cast<double>(x), -1.0, 1.0);
-                const auto v = static_cast<std::uint32_t>(static_cast<std::int32_t>(std::lround(c * 8388607.0)));
-                buffer.push_back(static_cast<unsigned char>(v & 0xFF));
-                buffer.push_back(static_cast<unsigned char>((v >> 8) & 0xFF));
-                buffer.push_back(static_cast<unsigned char>((v >> 16) & 0xFF));
-            }
-        }
-        out.write(reinterpret_cast<const char*>(buffer.data()), static_cast<std::streamsize>(buffer.size()));
+    if (frames * channels * bytesPerSample(format) > 0xFFFFFFFFll - 44) {
+        error = "Datei waere groesser als 4 GB";
+        return false;
     }
-
-    out.flush();
-    if (!out) { error = "Schreibfehler"; return false; }
+    WavWriter writer;
+    if (!writer.open(path, channels, sampleRate, error, format)) return false;
+    constexpr std::int64_t kChunkFrames = 8192;
+    for (std::int64_t done = 0; done < frames; done += kChunkFrames) {
+        const std::int64_t n = std::min(kChunkFrames, frames - done);
+        if (!writer.write(interleaved + done * channels, n)) { error = "Schreibfehler"; return false; }
+    }
+    if (!writer.finish()) { error = "Schreibfehler"; return false; }
     return true;
 }

@@ -79,6 +79,8 @@ bool Engine::setTempo(double bpm) noexcept {
     return send({CommandType::Tempo, 0, static_cast<float>(std::clamp(bpm, 20.0, 400.0))});
 }
 
+bool Engine::setOffline(bool on) noexcept { return send({CommandType::Offline, 0, on ? 1.0f : 0.0f}); }
+
 bool Engine::setMetronome(bool on) noexcept { return send({CommandType::Metronome, 0, on ? 1.0f : 0.0f}); }
 
 bool Engine::setTrackTestTone(int track, float hz) noexcept {
@@ -318,6 +320,9 @@ void Engine::drainCommands() noexcept {
             case CommandType::Tempo:
                 tempo_ = static_cast<double>(c.value);
                 break;
+            case CommandType::Offline:
+                offline_ = c.value != 0.0f;
+                break;
             case CommandType::Metronome:
                 metronome_ = c.value != 0.0f;
                 break;
@@ -476,6 +481,7 @@ void Engine::renderBlock(int numFrames, std::int64_t blockMicros) noexcept {
 
     const float invFrames = 1.0f / static_cast<float>(numFrames);
     const float transportTarget = (rolling_ && wantPlay_) ? 1.0f : 0.0f;
+    if (offline_) transportCur_ = transportTarget;  // beim Export nichts ein- oder ausblenden
     const float transportStep = (transportTarget - transportCur_) * invFrames;
     const bool transportFading = transportCur_ != 1.0f || transportTarget != 1.0f;
     const double microsPerFrame = 1'000'000.0 / sampleRate_;

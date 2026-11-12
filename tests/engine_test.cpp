@@ -3,6 +3,7 @@
 #include "disk/DiskThread.h"
 #include "disk/WavFile.h"
 #include "engine/Engine.h"
+#include "engine/OfflineRender.h"
 #include "model/ProjectController.h"
 #include "util/SpscQueue.h"
 
@@ -12,6 +13,8 @@
 #include <cstdlib>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <functional>
 #include <string>
 #include <memory>
@@ -1367,6 +1370,239 @@ void testControllerPlugins() {
     CHECK(Counted::alive == 0);
 }
 
+// --- Projektdatei und Export -------------------------------------------------
+
+// Merkt sich, was gesichert und wiederhergestellt werden soll, statt echte Plugins zu laden.
+struct FakePersistence final : PluginPersistence {
+    struct Entry {
+        std::filesystem::path file;
+        std::vector<char> state;
+    };
+    std::array<Entry, kProjectTracks> slots;
+    int restoreCalls = 0;
+    bool failRestore = false;
+
+    bool capture(int track, std::filesystem::path& file, std::vector<char>& state) override {
+        const Entry& e = slots[static_cast<std::size_t>(track)];
+        if (e.file.empty()) return false;
+        file = e.file;
+        state = e.state;
+        return true;
+    }
+    bool restore(int track, const std::filesystem::path& file, const std::vector<char>& state,
+                 std::string& error) override {
+        if (!file.empty()) ++restoreCalls;
+        if (failRestore && !file.empty()) { error = "Datei fehlt"; return false; }
+        slots[static_cast<std::size_t>(track)] = {file, state};
+        return true;
+    }
+};
+
+void testProjectFile() {
+    const auto folder = tempFile("minidaw_test_projekt");
+    std::error_code ec;
+    std::filesystem::remove_all(folder, ec);
+    std::filesystem::create_directories(folder / "Audio");
+    const auto projectPath = folder / "Mein Projekt.mdaw";
+
+    // Zwei Audiodateien: eine im Projektordner, eine ausserhalb.
+    makeSource();
+    const auto outside = tempFile("minidaw_test_source.wav");
+    const auto inside = folder / "Audio" / "drin.wav";
+    std::filesystem::copy_file(outside, inside, std::filesystem::copy_options::overwrite_existing);
+
+    std::string message;
+    {
+        Rig rig;
+        ProjectController controller(*rig.engine);
+        controller.setSampleRate(kRate);
+        FakePersistence plugins;
+        controller.setPluginPersistence(&plugins);
+        CHECK(!controller.modified());
+
+        CHECK(controller.addClip(0, outside, 1000, message));
+        CHECK(controller.addClip(2, inside, 48000, message));
+        MidiClipModel midi;
+        midi.name = L"Bass \u00FC";
+        midi.start = 96000;
+        midi.length = 48000;
+        midi.notes = {{0, 1200, 36, 110}, {24000, 600, 43, 64}};
+        CHECK(controller.addMidiClip(5, midi) == 0);
+        controller.setTrackGain(0, 0.5f);
+        controller.setTrackPan(2, -0.25f);
+        controller.setTrackMute(5, true);
+        controller.setTrackSolo(2, true);
+        controller.setTrackInput(5, 3);
+        controller.setTrackMidiOutput(5, 9);
+        controller.setTrackInput(6, kTrackInputMidiAll);
+        controller.setMasterGain(0.8f);
+        controller.setBpm(97.0);
+        plugins.slots[5] = {"C:/Plugins/Piano.vst3", {1, 2, 3, 0, static_cast<char>(0xFF)}};
+        CHECK(controller.modified());
+        CHECK(controller.contentLength() == 96000 + 48000 || controller.contentLength() == 48000 + kSourceFrames);
+
+        CHECK(controller.saveProject(projectPath, message));
+        CHECK(!controller.modified());
+        CHECK(controller.projectPath() == projectPath);
+        controller.setTrackGain(1, 0.3f);
+        CHECK(controller.modified());
+
+        // Speichern in einen Ordner, den es nicht gibt, scheitert mit Meldung.
+        CHECK(!controller.saveProject(folder / "gibtsnicht" / "x.mdaw", message));
+        CHECK(!message.empty());
+        while (!controller.peaksIdle()) std::this_thread::yield();
+    }
+
+    // Die Datei ist lesbarer Text; die Datei im Projektordner steht relativ darin.
+    {
+        std::ifstream in(projectPath, std::ios::binary);
+        std::stringstream text;
+        text << in.rdbuf();
+        const std::string content = text.str();
+        CHECK(content.rfind("MiniDAW-Projekt 1", 0) == 0);
+        CHECK(content.find(" Audio/drin.wav\n") != std::string::npos);
+        CHECK(content.find("tempo 97") != std::string::npos);
+        CHECK(content.find("pluginzustand 01020300ff") != std::string::npos);
+    }
+
+    // Laden in ein frisches Programm: Alles ist wieder da.
+    {
+        Rig rig;
+        ProjectController controller(*rig.engine);
+        controller.setSampleRate(kRate);
+        FakePersistence plugins;
+        controller.setPluginPersistence(&plugins);
+        controller.addClip(9, outside, 0, message);  // wird vom Laden ersetzt
+
+        CHECK(controller.loadProject(projectPath, message));
+        CHECK(message.empty());
+        CHECK(!controller.modified());
+        const Project& p = controller.project();
+        CHECK(p.bpm == 97.0);
+        CHECK(std::fabs(p.masterGain - 0.8f) < 1e-6f);
+        CHECK(p.tracks[9].clips.empty());
+        CHECK(p.tracks[0].clips.size() == 1 && p.tracks[0].clips[0].start == 1000 &&
+              p.tracks[0].clips[0].length == kSourceFrames);
+        CHECK(p.tracks[2].clips.size() == 1 && p.tracks[2].clips[0].start == 48000);
+        CHECK(p.tracks[2].clips.size() == 1 && p.tracks[2].clips[0].file->path == inside);
+        CHECK(std::fabs(p.tracks[0].gain - 0.5f) < 1e-6f);
+        CHECK(std::fabs(p.tracks[2].pan + 0.25f) < 1e-6f);
+        CHECK(p.tracks[5].mute && p.tracks[2].solo && !p.tracks[0].mute);
+        CHECK(p.tracks[5].input == 3 && p.tracks[5].midiOutput == 9);
+        CHECK(p.tracks[6].input == kTrackInputMidiAll);
+        CHECK(p.tracks[5].midiClips.size() == 1);
+        if (p.tracks[5].midiClips.size() == 1) {
+            const MidiClipModel& m = p.tracks[5].midiClips[0];
+            CHECK(m.name == L"Bass \u00FC" && m.start == 96000 && m.length == 48000);
+            CHECK(m.notes.size() == 2 && m.notes[1].start == 24000 && m.notes[1].pitch == 43 && m.notes[1].velocity == 64);
+        }
+        CHECK(plugins.restoreCalls == 1);
+        CHECK(plugins.slots[5].file == std::filesystem::path("C:/Plugins/Piano.vst3"));
+        CHECK(plugins.slots[5].state.size() == 5 && plugins.slots[5].state[4] == static_cast<char>(0xFF));
+
+        // Das geladene Projekt klingt auch: Der Clip auf Spur 3 (solo) wird abgespielt.
+        rig.service();
+        rig.render();
+        rig.engine->locate(50000);
+        rig.render();
+        rig.service();
+        rig.engine->play();
+        rig.render();
+        rig.service();
+        CHECK(rig.render().first > 0.01f);
+
+        // Kaputte Datei: Laden scheitert, das Projekt bleibt unveraendert.
+        const auto broken = folder / "kaputt.mdaw";
+        { std::ofstream out(broken); out << "irgendwas\n"; }
+        CHECK(!controller.loadProject(broken, message));
+        CHECK(!message.empty());
+        CHECK(controller.project().tracks[0].clips.size() == 1);
+        CHECK(controller.projectPath() == projectPath);
+
+        // Neues Projekt: alles leer.
+        controller.newProject();
+        CHECK(controller.project().tracks[0].clips.empty() && controller.project().tracks[5].midiClips.empty());
+        CHECK(controller.project().bpm == 120.0 && controller.projectPath().empty() && !controller.modified());
+        CHECK(plugins.slots[5].file.empty());
+        while (!controller.peaksIdle()) std::this_thread::yield();
+    }
+
+    // Fehlt eine Audiodatei oder ein Plugin, wird der Rest trotzdem geladen und der Mangel gemeldet.
+    std::filesystem::remove(inside, ec);
+    {
+        Rig rig;
+        ProjectController controller(*rig.engine);
+        controller.setSampleRate(kRate);
+        FakePersistence plugins;
+        plugins.failRestore = true;
+        controller.setPluginPersistence(&plugins);
+        CHECK(controller.loadProject(projectPath, message));
+        CHECK(message.find("1 Audiodatei") != std::string::npos);
+        CHECK(message.find("1 Plugin") != std::string::npos);
+        CHECK(controller.project().tracks[0].clips.size() == 1);
+        CHECK(controller.project().tracks[2].clips.empty());
+        while (!controller.peaksIdle()) std::this_thread::yield();
+    }
+    std::filesystem::remove_all(folder, ec);
+}
+
+void testOfflineRender() {
+    auto source = makeSource();
+    if (!source) return;
+    const auto sourcePath = tempFile("minidaw_test_source.wav");
+    const auto exportPath = tempFile("minidaw_test_export.wav");
+    std::string message;
+
+    Rig rig;
+    ProjectController controller(*rig.engine);
+    controller.setSampleRate(kRate);
+    CHECK(controller.addClip(0, sourcePath, 0, message));  // beginnt genau am Anfang
+    rig.engine->locate(12345);
+    rig.render();
+
+    constexpr std::int64_t kFrames = 20000;
+    int progressCalls = 0;
+    CHECK(renderOffline(*rig.engine, kFrames, kBlock, 48000, exportPath, WavFormat::Float32, message,
+                        [&](double fraction) { ++progressCalls; return fraction >= 0.0 && fraction <= 1.0; }));
+    CHECK(progressCalls > 0);
+    CHECK(!rig.engine->isPlaying());
+    CHECK(rig.engine->position() == 12345);  // Position wie vorher
+
+    auto wav = WavFile::open(exportPath, message);
+    CHECK(wav != nullptr);
+    if (wav) {
+        CHECK(wav->frames() == kFrames && wav->channels() == 2 && wav->sampleRate() == 48000);
+        std::vector<float> data(static_cast<std::size_t>(2 * kFrames));
+        wav->readStereo(0, static_cast<int>(kFrames), data.data());
+        // Jedes Sample stimmt, auch das allererste: beim Export wird nichts eingeblendet.
+        const float g = std::cos(0.7853981633974483f);
+        bool ok = true;
+        for (std::int64_t i = 0; i < kFrames; ++i) {
+            if (std::fabs(data[static_cast<std::size_t>(2 * i)] - sourceL(i) * g) > 1e-6f ||
+                std::fabs(data[static_cast<std::size_t>(2 * i + 1)] - sourceR(i) * g) > 1e-6f)
+                ok = false;
+        }
+        CHECK(ok);
+        CHECK(std::fabs(data[1]) > 0.1f);  // rechts beginnt die Quelle mit vollem Pegel
+    }
+    wav.reset();
+
+    // 16 Bit geht auch, und Abbrechen entfernt die halbe Datei.
+    CHECK(renderOffline(*rig.engine, kFrames, kBlock, 48000, exportPath, WavFormat::Pcm16, message));
+    wav = WavFile::open(exportPath, message);
+    CHECK(wav && wav->bitsPerSample() == 16 && wav->frames() == kFrames);
+    wav.reset();
+    CHECK(!renderOffline(*rig.engine, 200000, kBlock, 48000, exportPath, WavFormat::Pcm24, message,
+                         [](double) { return false; }));
+    CHECK(!std::filesystem::exists(exportPath));
+    CHECK(!renderOffline(*rig.engine, 0, kBlock, 48000, exportPath, WavFormat::Pcm24, message));
+
+    // Danach laeuft die normale Wiedergabe wieder mit Einblenden (kein Offline-Modus mehr).
+    std::error_code ec;
+    std::filesystem::remove(exportPath, ec);
+    while (!controller.peaksIdle()) std::this_thread::yield();
+}
+
 }  // namespace
 
 int main() {
@@ -1399,6 +1635,8 @@ int main() {
     testMetronome();
     testPlugins();
     testControllerPlugins();
+    testProjectFile();
+    testOfflineRender();
     {
         std::error_code ec;
         std::filesystem::remove_all(tempFile("minidaw_test_aufnahmen"), ec);

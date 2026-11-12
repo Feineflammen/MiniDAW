@@ -36,6 +36,11 @@ public:
     std::function<void()> onCycleMidiOut;
     void selectClip(int track, int index, bool midi = false) { selTrack_ = track; selIndex_ = index; selMidi_ = midi; }
 
+    // Zeigt eine Meldung oben rechts, fuer einige Sekunden.
+    void showMessage(const std::wstring& message) { setStatus(message); }
+    // Nach "Neu" oder "Oeffnen": Auswahl, Editor und Ansicht zuruecksetzen.
+    void projectReplaced();
+
     void tick();  // einmal pro Bild: Pegel abholen, Ansicht nachfuehren
     void draw(Canvas& canvas, float width, float height);
 

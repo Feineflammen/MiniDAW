@@ -8,6 +8,7 @@
 #include "disk/DiskThread.h"
 #include "disk/WavFile.h"
 #include "engine/Engine.h"
+#include "engine/OfflineRender.h"
 #include "midi/MidiInput.h"
 #include "midi/MidiOutput.h"
 #include "model/ProjectController.h"
@@ -152,23 +153,6 @@ std::filesystem::path settingsPath() {
     return path;
 }
 
-std::string toUtf8(const std::wstring& text) {
-    if (text.empty()) return {};
-    const int size = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0,
-                                         nullptr, nullptr);
-    std::string out(static_cast<std::size_t>(size), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), size, nullptr, nullptr);
-    return out;
-}
-
-std::wstring fromUtf8(const std::string& text) {
-    if (text.empty()) return {};
-    const int size = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
-    std::wstring out(static_cast<std::size_t>(size), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), size);
-    return out;
-}
-
 struct Settings {
     int recordOffsetMs = 0;
     std::wstring midiOutput;  // Name des MIDI-Ausgabegeraets, leer = keins
@@ -203,7 +187,11 @@ void saveSettings(const Settings& settings) {
 }
 
 
-int runApp(HINSTANCE instance, int showCommand) {
+const wchar_t* const kProjectFilter = L"MiniDAW-Projekt (*.mdaw)\0*.mdaw\0Alle Dateien (*.*)\0*.*\0";
+const wchar_t* const kExportFilter =
+    L"WAV, 24 Bit (*.wav)\0*.wav\0WAV, 16 Bit (*.wav)\0*.wav\0WAV, 32 Bit Float (*.wav)\0*.wav\0";
+
+int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& initialProject) {
     auto engine = std::make_unique<Engine>();
     WasapiDevice device;
     DiskThread disk;
@@ -245,6 +233,7 @@ int runApp(HINSTANCE instance, int showCommand) {
 
     // VST3-Plugins: geladen wird mit Samplerate und groesster Blocklaenge des Audiogeraets.
     vst3::PluginManager plugins(controller, device.sampleRate(), device.bufferFrames());
+    controller.setPluginPersistence(&plugins);
 
     ui::MainView view(controller, *engine);
     wchar_t info[160];
@@ -268,9 +257,135 @@ int runApp(HINSTANCE instance, int showCommand) {
     };
 
     ui::MainWindow window(view);
+
+    // --- Datei-Befehle ---
+    std::wstring shownTitle;
+    const auto updateTitle = [&] {
+        std::wstring title = controller.projectPath().empty() ? std::wstring(L"Unbenannt")
+                                                              : controller.projectPath().stem().wstring();
+        if (controller.modified()) title += L" *";
+        title += L" \u2013 MiniDAW";
+        if (title != shownTitle) {
+            shownTitle = title;
+            window.setTitle(title);
+        }
+    };
+    const auto saveTo = [&](const std::filesystem::path& path) {
+        std::string message;
+        if (controller.saveProject(path, message)) {
+            view.showMessage(L"Gespeichert: " + path.filename().wstring());
+            return true;
+        }
+        MessageBoxW(window.hwnd(), (L"Speichern fehlgeschlagen.\n\n" + fromUtf8(message)).c_str(), L"MiniDAW",
+                    MB_OK | MB_ICONERROR);
+        return false;
+    };
+    const auto saveAs = [&] {
+        const std::wstring suggestion =
+            controller.projectPath().empty() ? std::wstring(L"Projekt.mdaw") : controller.projectPath().wstring();
+        const auto path = ui::askSaveFile(window.hwnd(), L"Projekt speichern", kProjectFilter, L"mdaw", suggestion);
+        return !path.empty() && saveTo(path);
+    };
+    const auto save = [&] { return controller.projectPath().empty() ? saveAs() : saveTo(controller.projectPath()); };
+    // Fragt bei ungespeicherten Aenderungen nach. true = weitermachen, false = abbrechen.
+    const auto confirmDiscard = [&] {
+        if (!controller.modified()) return true;
+        const int answer = MessageBoxW(window.hwnd(), L"Das Projekt wurde ge\u00E4ndert. Vorher speichern?",
+                                       L"MiniDAW", MB_YESNOCANCEL | MB_ICONQUESTION);
+        if (answer == IDYES) return save();
+        return answer == IDNO;
+    };
+    const auto openProject = [&](const std::filesystem::path& path) {
+        std::string message;
+        if (!controller.loadProject(path, message)) {
+            MessageBoxW(window.hwnd(), (L"\u00D6ffnen fehlgeschlagen.\n\n" + fromUtf8(message)).c_str(), L"MiniDAW",
+                        MB_OK | MB_ICONERROR);
+            return;
+        }
+        view.projectReplaced();
+        if (!message.empty())
+            MessageBoxW(window.hwnd(), fromUtf8(message).c_str(), L"MiniDAW", MB_OK | MB_ICONWARNING);
+    };
+    const auto exportWav = [&] {
+        if (controller.isRecording()) {
+            view.showMessage(L"W\u00E4hrend einer Aufnahme l\u00E4sst sich nicht exportieren.");
+            return;
+        }
+        const std::int64_t content = controller.contentLength();
+        if (content <= 0) {
+            view.showMessage(L"Das Projekt ist leer, es gibt nichts zu exportieren.");
+            return;
+        }
+        const std::wstring suggestion =
+            (controller.projectPath().empty() ? std::wstring(L"Export") : controller.projectPath().stem().wstring()) + L".wav";
+        int filterIndex = 1;
+        const auto path = ui::askSaveFile(window.hwnd(), L"Als WAV exportieren", kExportFilter, L"wav", suggestion, &filterIndex);
+        if (path.empty()) return;
+        const WavFormat format = filterIndex == 2 ? WavFormat::Pcm16 : filterIndex == 3 ? WavFormat::Float32 : WavFormat::Pcm24;
+
+        // Zwei Sekunden anhaengen, damit Hall und ausklingende Noten nicht abgeschnitten werden.
+        const auto rate = static_cast<int>(device.sampleRate() + 0.5);
+        const std::int64_t frames = content + 2 * static_cast<std::int64_t>(rate);
+
+        // Audiogeraet und Disk-Thread anhalten: Solange exportiert wird, treibt
+        // nur dieser Thread die Engine an. MIDI-Geraete bekommen nichts.
+        const bool metronome = controller.metronome();
+        controller.setMetronome(false);
+        device.stop();
+        disk.stop();
+        midiOut.setMuted(true);
+
+        std::string message;
+        const bool ok = renderOffline(*engine, frames, device.bufferFrames(), rate, path, format, message,
+                                      [&](double fraction) {
+                                          wchar_t title[64];
+                                          std::swprintf(title, 64, L"Exportiere \u2026 %d %%", static_cast<int>(fraction * 100.0));
+                                          window.setTitle(title);
+                                          MSG peek;  // haelt das Fenster fuer Windows "ansprechbar"
+                                          PeekMessageW(&peek, nullptr, 0, 0, PM_NOREMOVE);
+                                          return true;
+                                      });
+        shownTitle.clear();
+
+        Sleep(30);  // der MIDI-Thread verwirft noch, was beim Export angefallen ist
+        midiOut.setMuted(false);
+        controller.setMetronome(metronome);
+        disk.start(*engine);
+        std::string startError;
+        if (!device.start(*engine, startError))
+            showError("Das Audiogeraet liess sich nach dem Export nicht wieder starten: " + startError);
+
+        if (ok) view.showMessage(L"Exportiert: " + path.filename().wstring());
+        else MessageBoxW(window.hwnd(), (L"Export fehlgeschlagen.\n\n" + fromUtf8(message)).c_str(), L"MiniDAW",
+                         MB_OK | MB_ICONERROR);
+    };
+    window.onCommand = [&](int command) {
+        switch (command) {
+            case ui::kFileNew:
+                if (confirmDiscard()) {
+                    controller.newProject();
+                    view.projectReplaced();
+                }
+                break;
+            case ui::kFileOpen:
+                if (confirmDiscard()) {
+                    const auto path = ui::askOpenFile(window.hwnd(), L"Projekt \u00F6ffnen", kProjectFilter);
+                    if (!path.empty()) openProject(path);
+                }
+                break;
+            case ui::kFileSave: save(); break;
+            case ui::kFileSaveAs: saveAs(); break;
+            case ui::kFileExport: exportWav(); break;
+            default: break;
+        }
+        updateTitle();
+    };
+    window.onCloseRequest = confirmDiscard;
+
     // MIDI-Geraete, die spaeter angesteckt oder abgezogen werden, neu erkennen.
-    window.onPeriodic = [&midi, &view] {
+    window.onPeriodic = [&] {
         if (midi.refresh()) view.setMidiInfo(midi.summary());
+        updateTitle();
     };
     window.onFrame = [&plugins] { plugins.idle(); };
     if (!window.create(instance, showCommand, error)) {
@@ -278,6 +393,11 @@ int runApp(HINSTANCE instance, int showCommand) {
         return 1;
     }
     plugins.setOwner(window.hwnd());
+    updateTitle();
+    if (!initialProject.empty()) {
+        openProject(initialProject);
+        updateTitle();
+    }
     const int result = window.run();
     settings.recordOffsetMs = controller.recordOffsetMs();
     settings.midiOutput = midiOut.current();
@@ -288,6 +408,7 @@ int runApp(HINSTANCE instance, int showCommand) {
     // abschliessen (dafuer muss der Disk-Thread noch laufen), dann den Disk-Thread.
     // Plugins werden erst zerstoert, wenn der Audio-Thread sicher steht.
     view.setPluginHost(nullptr);
+    controller.setPluginPersistence(nullptr);
     device.stop();
     controller.finishRecordingOnShutdown();
     disk.stop();
@@ -311,7 +432,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     if (argv && argc >= 3 && std::wcscmp(argv[1], L"--screenshot") == 0) {
         result = runScreenshot(argv[2]);
     } else {
-        result = runApp(instance, showCommand);
+        // Eine Projektdatei als Argument (zum Beispiel per "Oeffnen mit") wird gleich geladen.
+        result = runApp(instance, showCommand, (argv && argc >= 2) ? std::filesystem::path(argv[1])
+                                                                 : std::filesystem::path());
     }
     if (argv) LocalFree(argv);
 

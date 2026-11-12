@@ -1,9 +1,12 @@
 #include "ui/MainWindow.h"
 
+#include <commdlg.h>
 #include <shellapi.h>
 #include <wincodec.h>
 #include <windowsx.h>
 
+#include <algorithm>
+#include <iterator>
 #include <vector>
 
 using Microsoft::WRL::ComPtr;
@@ -68,21 +71,39 @@ bool MainWindow::create(HINSTANCE instance, int showCommand, std::string& error)
     wc.lpszClassName = kClassName;
     if (!RegisterClassExW(&wc)) { error = "Fensterklasse nicht registrierbar"; return false; }
 
+    // Menue "Datei".
+    const HMENU file = CreatePopupMenu();
+    AppendMenuW(file, MF_STRING, kFileNew, L"&Neu\tStrg+N");
+    AppendMenuW(file, MF_STRING, kFileOpen, L"\u00D6&ffnen \u2026\tStrg+O");
+    AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(file, MF_STRING, kFileSave, L"&Speichern\tStrg+S");
+    AppendMenuW(file, MF_STRING, kFileSaveAs, L"Speichern &unter \u2026\tStrg+Umschalt+S");
+    AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(file, MF_STRING, kFileExport, L"Als WAV &exportieren \u2026\tStrg+E");
+    AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(file, MF_STRING, kFileQuit, L"&Beenden");
+    const HMENU bar = CreateMenu();
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"&Datei");
+
     hwnd_ = CreateWindowExW(0, kClassName, L"MiniDAW", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-                            1300, 860, nullptr, nullptr, instance, this);
+                            1300, 880, nullptr, bar, instance, this);
     if (!hwnd_) { error = "Fenster nicht anlegbar"; return false; }
 
     // Fenstergroesse an die Bildschirmskalierung anpassen.
     dpi_ = static_cast<float>(GetDpiForWindow(hwnd_));
     if (dpi_ <= 0.0f) dpi_ = 96.0f;
     SetWindowPos(hwnd_, nullptr, 0, 0, MulDiv(1300, static_cast<int>(dpi_), 96),
-                 MulDiv(860, static_cast<int>(dpi_), 96), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                 MulDiv(880, static_cast<int>(dpi_), 96), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 
     DragAcceptFiles(hwnd_, TRUE);
     SetTimer(hwnd_, kFrameTimer, 33, nullptr);
     ShowWindow(hwnd_, showCommand);
     UpdateWindow(hwnd_);
     return true;
+}
+
+void MainWindow::setTitle(const std::wstring& title) {
+    if (hwnd_) SetWindowTextW(hwnd_, title.c_str());
 }
 
 int MainWindow::run() {
@@ -116,6 +137,19 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
 
         case WM_ERASEBKGND:
             return 1;
+
+        case WM_COMMAND:
+            if (HIWORD(wParam) == 0 && onCommand) {
+                if (LOWORD(wParam) == kFileQuit) SendMessageW(hwnd_, WM_CLOSE, 0, 0);
+                else onCommand(LOWORD(wParam));
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            return 0;
+
+        case WM_CLOSE:
+            if (onCloseRequest && !onCloseRequest()) return 0;  // der Benutzer hat abgebrochen
+            DestroyWindow(hwnd_);
+            return 0;
 
         case WM_SIZE:
             if (target_) target_->Resize(D2D1::SizeU(LOWORD(lParam), HIWORD(lParam)));
@@ -184,6 +218,22 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
         case WM_KEYDOWN: {
             const int scancode = static_cast<int>((lParam >> 16) & 0xFF);
             const bool repeat = (lParam & (LPARAM{1} << 30)) != 0;
+
+            // Tastenkuerzel des Menues. Sie gehen vor, weil S und E sonst Noten waeren.
+            if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+                const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                const int command = wParam == 'N'   ? kFileNew
+                                    : wParam == 'O' ? kFileOpen
+                                    : wParam == 'S' ? (shift ? kFileSaveAs : kFileSave)
+                                    : wParam == 'E' ? kFileExport
+                                                    : 0;
+                if (command != 0 && !repeat && onCommand) {
+                    view_.releaseAllNotes();
+                    onCommand(command);
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                }
+                return 0;
+            }
             const int semitone = semitoneForScancode(scancode);
             if (semitone >= 0) {
                 if (!repeat) view_.noteKey(semitone, true);
@@ -272,6 +322,38 @@ void MainWindow::paint() {
         target_.Reset();
     }
     ValidateRect(hwnd_, nullptr);
+}
+
+std::filesystem::path askOpenFile(HWND owner, const wchar_t* title, const wchar_t* filter) {
+    wchar_t buffer[2048] = L"";
+    OPENFILENAMEW dialog{};
+    dialog.lStructSize = sizeof dialog;
+    dialog.hwndOwner = owner;
+    dialog.lpstrTitle = title;
+    dialog.lpstrFilter = filter;
+    dialog.lpstrFile = buffer;
+    dialog.nMaxFile = static_cast<DWORD>(std::size(buffer));
+    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
+    return GetOpenFileNameW(&dialog) ? std::filesystem::path(buffer) : std::filesystem::path();
+}
+
+std::filesystem::path askSaveFile(HWND owner, const wchar_t* title, const wchar_t* filter,
+                                  const wchar_t* defaultExtension, const std::wstring& suggestedName,
+                                  int* filterIndex) {
+    wchar_t buffer[2048] = L"";
+    suggestedName.copy(buffer, std::min<std::size_t>(suggestedName.size(), std::size(buffer) - 1));
+    OPENFILENAMEW dialog{};
+    dialog.lStructSize = sizeof dialog;
+    dialog.hwndOwner = owner;
+    dialog.lpstrTitle = title;
+    dialog.lpstrFilter = filter;
+    dialog.lpstrFile = buffer;
+    dialog.nMaxFile = static_cast<DWORD>(std::size(buffer));
+    dialog.lpstrDefExt = defaultExtension;
+    dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
+    if (!GetSaveFileNameW(&dialog)) return {};
+    if (filterIndex) *filterIndex = static_cast<int>(dialog.nFilterIndex);
+    return std::filesystem::path(buffer);
 }
 
 bool renderToPng(MainView& view, int width, int height, const std::filesystem::path& path,

@@ -42,11 +42,14 @@ private:
     bool isFloat_ = false;
 };
 
-// Schreibt eine WAV-Datei (32-Bit-Float) stueckweise, zum Beispiel waehrend
-// einer Aufnahme. Die Laengenangaben im Kopf traegt finish() nach.
+enum class WavFormat { Pcm16, Pcm24, Float32 };
+
+// Schreibt eine WAV-Datei stueckweise, zum Beispiel waehrend einer Aufnahme
+// oder beim Export. Die Laengenangaben im Kopf traegt finish() nach.
 class WavWriter {
 public:
-    bool open(const std::filesystem::path& path, int channels, int sampleRate, std::string& error);
+    bool open(const std::filesystem::path& path, int channels, int sampleRate, std::string& error,
+              WavFormat format = WavFormat::Float32);
     bool write(const float* interleaved, std::int64_t frames);
     bool finish();
     bool isOpen() const { return out_.is_open(); }
@@ -56,9 +59,9 @@ private:
     std::ofstream out_;
     int channels_ = 0;
     std::int64_t frames_ = 0;
+    WavFormat format_ = WavFormat::Float32;
+    std::vector<unsigned char> buffer_;
 };
-
-enum class WavFormat { Pcm16, Pcm24, Float32 };
 
 // Schreibt verschachtelte Float-Daten als WAV-Datei.
 bool writeWav(const std::filesystem::path& path, const float* interleaved, std::int64_t frames,

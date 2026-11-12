@@ -131,10 +131,23 @@ struct TestSynth final : IComponent, IAudioProcessor, IEditController, IMidiMapp
         active = state != 0;
         return kResultOk;
     }
-    tresult PLUGIN_API setState(IBStream*) override { return kResultOk; }
+    // Zustand: Kennzahl und Lautstaerke. Gilt hier fuer Verarbeitungs- und Bedienteil zugleich.
+    int setStateCalls = 0;
+    tresult PLUGIN_API setState(IBStream* state) override {
+        int32 magic = 0, read = 0;
+        state->read(&magic, sizeof magic, &read);
+        if (read != 4 || magic != 1234) return kResultFalse;
+        double stored = 0.0;
+        state->read(&stored, sizeof stored, &read);
+        if (read != 8) return kResultFalse;
+        volume = stored;
+        ++setStateCalls;
+        return kResultOk;
+    }
     tresult PLUGIN_API getState(IBStream* state) override {
         int32 magic = 1234;
-        return state->write(&magic, sizeof magic, nullptr);
+        state->write(&magic, sizeof magic, nullptr);
+        return state->write(&volume, sizeof volume, nullptr);
     }
 
     // IAudioProcessor
@@ -332,6 +345,45 @@ void testPluginLifecycle() {
     CHECK(liveObjects == 0);  // sauber abgebaut, alle Referenzen freigegeben
 }
 
+// Einstellungen sichern und in ein frisch geladenes Plugin zurueckspielen.
+void testPluginState() {
+    TestFactory factory;
+    std::string error;
+    std::vector<char> state;
+    {
+        auto plugin = vst3::Vst3Plugin::create(&factory, kSynthClass, true, L"A", 48000.0, 256, error);
+        CHECK(plugin != nullptr);
+        if (!plugin) return;
+        TestSynth* synth = lastSynth;
+        std::vector<float> l(256), r(256);
+        synth->handler->performEdit(kVolumeParam, 0.375);
+        plugin->process(l.data(), r.data(), 256, nullptr, 0, PluginTransport{});
+        CHECK(synth->volume == 0.375);
+        CHECK(plugin->saveState(state));
+        CHECK(state.size() == 4 + 12 + 12);  // Laenge, Verarbeitungsteil, Bedienteil
+    }
+    {
+        auto plugin = vst3::Vst3Plugin::create(&factory, kSynthClass, true, L"B", 48000.0, 256, error);
+        CHECK(plugin != nullptr);
+        if (!plugin) return;
+        TestSynth* synth = lastSynth;
+        CHECK(synth->volume == 1.0);
+        synth->gotComponentState = false;
+        CHECK(plugin->loadState(state));
+        CHECK(synth->volume == 0.375);
+        CHECK(synth->setStateCalls == 2);  // einmal als Verarbeitungsteil, einmal als Bedienteil
+        CHECK(synth->gotComponentState);
+
+        // Unbrauchbare Daten werden abgelehnt, ohne etwas zu veraendern.
+        CHECK(!plugin->loadState({}));
+        CHECK(!plugin->loadState({1, 2}));
+        CHECK(!plugin->loadState({100, 0, 0, 0, 1, 2, 3}));  // behauptete Laenge groesser als vorhanden
+        CHECK(!plugin->loadState({4, 0, 0, 0, 9, 9, 9, 9}));  // das Plugin erkennt den Inhalt nicht
+        CHECK(synth->volume == 0.375);
+    }
+    CHECK(liveObjects == 0);
+}
+
 void testStreamAndLists() {
     vst3::MemoryStream stream;
     int32 written = 0, readCount = 0;
@@ -368,6 +420,7 @@ void testStreamAndLists() {
 
 int main() {
     testPluginLifecycle();
+    testPluginState();
     testStreamAndLists();
     if (failures == 0) {
         std::printf("Alle VST3-Tests bestanden.\n");

@@ -5,6 +5,12 @@
 #include <cstddef>
 #include <type_traits>
 
+// Die Auffuellung durch alignas ist gewollt, MSVC warnt sonst (C4324).
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4324)
+#endif
+
 // Lock-freier Ringpuffer fuer genau einen schreibenden und einen lesenden Thread.
 // Feste Groesse (Zweierpotenz), keine Allokation, push/pop warten nie.
 template <typename T, std::size_t Capacity>
@@ -40,3 +46,7 @@ private:
     alignas(64) std::atomic<std::size_t> read_{0};
     alignas(64) std::array<T, Capacity> buffer_{};
 };
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif

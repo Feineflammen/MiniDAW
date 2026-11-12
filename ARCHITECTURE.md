@@ -9,7 +9,9 @@ Wer Code für das Projekt schreibt (Mensch oder KI), hält sich an diese Regeln.
 - 16 Spuren (Audio oder MIDI), 4 Busse, 1 Master. Die Anzahl ist fest.
 - VST3-Instrumente und -Effekte, Mixer mit Inserts und Sends.
 - C++20. Keine Fremdbibliotheken: nur C++-Standardbibliothek, Windows-SDK
-  und die VST3-Interface-Header.
+  und die VST3-Schnittstellen von Steinberg (`third_party/vst3`, MIT-Lizenz;
+  nur Schnittstellen-Header und zwei kleine Quelldateien mit Kennungen, keine
+  Hilfsklassen des VST3 SDK).
 
 Bewusst nicht enthalten: Timestretching, Comping, Notation, Video, Surround,
 Tempoänderungen im Projekt, MP3/FLAC, eigene Effekte.
@@ -171,6 +173,38 @@ auf etwa 1 ms genau. Der Audio-Thread ruft nie in den MIDI-Treiber.
 Einstellungen, die zum Rechner gehören (Latenz-Zusatz, MIDI-Ausgabegerät),
 liegen in `%APPDATA%\MiniDAW\einstellungen.txt`.
 
+## VST3-Plugins
+
+- Die Engine kennt nur `engine/AudioPlugin`: `process()` mit Stereo-Puffern,
+  MIDI-Ereignissen des Blocks und Transport. Ein Instrument bekommt das MIDI
+  der Spur anstelle des eingebauten Synthesizers; ein Effekt bearbeitet den
+  Klang der Spur vor Fader und Panorama. Bisher ein Plugin je Spur.
+- Besitz: Die Engine bekommt nur einen Zeiger. Der `ProjectController` hält
+  das Plugin; ein ersetztes Plugin lebt weiter, bis der Audio-Thread es über
+  `popReleasedPlugin()` zurückmeldet. Zerstört wird im UI-Thread.
+- `vst3/Vst3Host` ist der plattformunabhängige Host: Plugin anlegen (Component,
+  Controller, Verbindung, Zustand abgleichen), Busse in Stereo einrichten,
+  rechnen, abbauen. Dazu die Host-Objekte: Ereignisliste und
+  Parameteränderungen fester Größe (kein Speicheranfordern im Audio-Thread),
+  Speicherstrom, Nachrichten und Attributlisten.
+- MIDI-Controller (Haltepedal, Pitchbend ...) kennt VST3 nur als Parameter. Die
+  Zuordnung fragt der Host beim Laden über `IMidiMapping` ab und übersetzt im
+  Audio-Thread.
+- Bedienung im Plugin-Fenster kommt als `performEdit` im UI-Thread an und geht
+  über eine lock-freie Queue in den Audio-Thread; Änderungen aus dem
+  Audio-Thread gehen über eine zweite Queue zurück an die Oberfläche (`idle()`).
+- `vst3/Vst3Module` (Windows) findet `.vst3`-Dateien und -Bündel unter
+  `Gemeinsame Dateien\VST3` und lädt sie. Gesucht wird nach Dateinamen, ohne
+  die Dateien zu laden. Geladene Dateien bleiben bis zum Programmende geladen.
+- `vst3/PluginWindow` (Windows) ist das Fenster für die Plugin-Oberfläche,
+  `vst3/PluginManager` verbindet Oberfläche, Projekt und Host.
+- `tests/vst3_test.cpp` baut ein kleines VST3-Plugin direkt im Test und prüft
+  daran Aufrufreihenfolge, Referenzzählung, MIDI-Übersetzung und Parameterwege.
+
+Offen: Plugins laufen im selben Prozess, ein abstürzendes Plugin reißt die DAW
+mit. Plugin-Zustand wird noch nicht gespeichert (kommt mit dem Projekt in
+Schritt 9). Latenz der Plugins wird noch nicht ausgeglichen (Schritt 8).
+
 ## Modell und Engine
 
 - Das **Projektmodell** (Spuren, Clips, Noten, Plugin-Zuordnung, Mixerwerte)
@@ -212,7 +246,7 @@ Windows-Code. Sie bilden die Bibliothek `dawcore`, die auch die Tests benutzen.
 | 6a | MIDI-Eingang, eingebauter Synthesizer, live spielen | fertig, mit Keyboard gespielt |
 | 6b | MIDI-Clips, MIDI-Aufnahme, Kanalwahl je Spur, MIDI-Ausgabegerät | Code und Offline-Tests fertig, vom Benutzer NICHT getestet (übersprungen) |
 | 6c | Piano Roll, Tempo, Taktraster, Metronom | Code fertig, per Screenshot geprüft, Bedientest offen |
-| 7 | VST3-Hosting: Laden, Verarbeiten, Editor-Fenster, State | offen |
+| 7 | VST3-Hosting: Laden, Verarbeiten, Editor-Fenster (ein Plugin je Spur) | Code fertig; getestet nur gegen ein Mini-Plugin im Test, mit echten Plugins NICHT |
 | 8 | Mixer komplett: Inserts, Sends, Busse, Pegel, Latenzausgleich | offen |
 | 9 | Projekt speichern und laden, Undo/Redo fertig | offen |
 | 10 | Automation, Offline-Export | offen |

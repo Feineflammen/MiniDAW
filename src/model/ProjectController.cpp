@@ -137,6 +137,26 @@ void ProjectController::setTrackMidiOutput(int track, int output) {
     engine_.setTrackMidiOutput(track, output);
 }
 
+void ProjectController::setTrackPlugin(int track, std::shared_ptr<AudioPlugin> plugin, std::wstring name) {
+    if (!validTrack(track)) return;
+    auto& slot = plugins_[static_cast<std::size_t>(track)];
+    if (!engine_.setTrackPlugin(track, plugin.get())) return;
+    if (slot) retiringPlugins_.push_back(std::move(slot));
+    slot = std::move(plugin);
+    TrackModel& model = project_.tracks[static_cast<std::size_t>(track)];
+    model.pluginName = slot ? std::move(name) : std::wstring();
+    model.pluginIsInstrument = slot && slot->isInstrument();
+}
+
+void ProjectController::releasePlugins() {
+    for (auto& track : project_.tracks) {
+        track.pluginName.clear();
+        track.pluginIsInstrument = false;
+    }
+    for (auto& slot : plugins_) slot.reset();
+    retiringPlugins_.clear();
+}
+
 void ProjectController::setBpm(double bpm) {
     project_.bpm = std::clamp(bpm, 30.0, 300.0);
     engine_.setTempo(project_.bpm);
@@ -354,6 +374,14 @@ bool ProjectController::recordProgress(std::int64_t& start, std::int64_t& frames
 bool ProjectController::poll(std::string& message) {
     message.clear();
     engine_.collectGarbage();
+
+    // Abgeloeste Plugins freigeben, sobald der Audio-Thread sie zurueckmeldet.
+    AudioPlugin* released = nullptr;
+    while (engine_.popReleasedPlugin(released)) {
+        retiringPlugins_.erase(std::remove_if(retiringPlugins_.begin(), retiringPlugins_.end(),
+                                              [released](const auto& p) { return p.get() == released; }),
+                               retiringPlugins_.end());
+    }
 
     // MIDI-Aufnahme: Ereignisse abholen, Noten zusammensetzen, am Ende den Clip anlegen.
     if (midiRecording_) {

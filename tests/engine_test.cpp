@@ -1198,6 +1198,175 @@ void testMetronome() {
     CHECK(!controller.updateMidiClip(0, 3, {}, 100));
 }
 
+// --- Plugins -----------------------------------------------------------------
+
+// Instrument fuer Tests: gibt 0.5 aus, solange eine Note gehalten wird, und
+// merkt sich, was es gesehen hat.
+struct FakeInstrument final : AudioPlugin {
+    int held = 0;
+    int firstNoteOffset = -1;
+    int calls = 0;
+    PluginTransport lastTransport{};
+    bool isInstrument() const noexcept override { return true; }
+    void process(float* left, float* right, int numFrames, const PluginMidiEvent* events, int numEvents,
+                 const PluginTransport& transport) noexcept override {
+        ++calls;
+        lastTransport = transport;
+        int e = 0;
+        for (int i = 0; i < numFrames; ++i) {
+            while (e < numEvents && events[e].offset <= i) {
+                if (events[e].message.isNoteOn()) {
+                    if (firstNoteOffset < 0) firstNoteOffset = events[e].offset;
+                    ++held;
+                } else if (events[e].message.isNoteOff() && held > 0) {
+                    --held;
+                }
+                ++e;
+            }
+            left[i] = right[i] = held > 0 ? 0.5f : 0.0f;
+        }
+    }
+};
+
+// Effekt fuer Tests: halbiert den Pegel.
+struct FakeEffect final : AudioPlugin {
+    bool isInstrument() const noexcept override { return false; }
+    void process(float* left, float* right, int numFrames, const PluginMidiEvent*, int,
+                 const PluginTransport&) noexcept override {
+        for (int i = 0; i < numFrames; ++i) {
+            left[i] *= 0.5f;
+            right[i] *= 0.5f;
+        }
+    }
+};
+
+void testPlugins() {
+    Rig rig;
+    FakeInstrument instrument;
+    FakeEffect effect;
+    AudioPlugin* released = nullptr;
+
+    // Instrument auf Spur 0: Es bekommt das Live-MIDI, der eingebaute Synthesizer schweigt.
+    rig.engine->setArmedTrack(0);
+    rig.engine->setTrackMidiInput(0, Engine::kInputMidiAll);
+    rig.engine->setTrackPan(0, -1.0f);  // ganz links: Verstaerkung 1
+    CHECK(rig.engine->setTrackPlugin(0, &instrument));
+    rig.render();
+    CHECK(instrument.calls > 0);  // laeuft auch bei stehendem Transport
+    CHECK(!rig.engine->popReleasedPlugin(released));
+
+    rig.engine->postMidi(MidiMessage::noteOn(60, 100));
+    rig.render();
+    auto [pl, pr] = rig.render();
+    CHECK(std::fabs(pl - 0.5f) < 1e-6f && pr == 0.0f);  // genau der Pegel des Plugins, kein Synthesizer dazu
+    rig.engine->postMidi(MidiMessage::noteOff(60));
+    rig.render();
+    std::tie(pl, pr) = rig.render();
+    CHECK(pl == 0.0f);
+
+    // MIDI-Clip: Die Note kommt samplegenau beim Plugin an, mit Transportdaten.
+    ProjectController controller(*rig.engine);
+    controller.setSampleRate(kRate);
+    MidiClipModel clip;
+    clip.start = 0;
+    clip.length = 2000;
+    clip.notes = {{300, 500, 64, 100}};
+    controller.addMidiClip(0, clip);
+    instrument.firstNoteOffset = -1;
+    rig.engine->play();
+    rig.render();  // 0..255
+    rig.render();  // 256..511: Note bei 300 -> Offset 44
+    CHECK(instrument.firstNoteOffset == 44);
+    CHECK(instrument.lastTransport.playing);
+    CHECK(instrument.lastTransport.position == 256);
+    CHECK(instrument.lastTransport.sampleRate == kRate);
+    for (int b = 0; b < 10; ++b) rig.render();
+    CHECK(instrument.held == 0);  // "Note aus" kam an
+    rig.engine->stop();
+    rig.render();
+
+    // Effekt auf Spur 1: halbiert den Testton der Spur.
+    rig.engine->setTrackTestTone(1, 440.0f);
+    rig.engine->setTrackPan(1, -1.0f);
+    rig.engine->setTrackMute(0, true);
+    rig.engine->locate(0);
+    rig.engine->play();
+    float dry = 0.0f, wet = 0.0f;
+    for (int b = 0; b < 8; ++b) dry = std::max(dry, rig.render().first);
+    CHECK(rig.engine->setTrackPlugin(1, &effect));
+    rig.render();
+    for (int b = 0; b < 8; ++b) wet = std::max(wet, rig.render().first);
+    CHECK(std::fabs(dry - Engine::kTestToneLevel) < 0.01f);
+    CHECK(std::fabs(wet - 0.5f * dry) < 0.01f);
+
+    // Plugin entfernen und ersetzen: Die Engine meldet, was sie losgelassen hat.
+    CHECK(rig.engine->setTrackPlugin(1, nullptr));
+    CHECK(!rig.engine->popReleasedPlugin(released));  // erst nach dem naechsten Block
+    rig.render();
+    CHECK(rig.engine->popReleasedPlugin(released) && released == &effect);
+    FakeInstrument second;
+    CHECK(rig.engine->setTrackPlugin(0, &second));
+    rig.render();
+    CHECK(rig.engine->popReleasedPlugin(released) && released == &instrument);
+    const int callsAfterRelease = instrument.calls;
+    rig.render();
+    CHECK(instrument.calls == callsAfterRelease);  // wird wirklich nicht mehr angefasst
+    CHECK(!rig.engine->setTrackPlugin(99, &effect));
+
+    rig.engine->setTrackPlugin(0, nullptr);
+    rig.render();
+    std::string message;
+    controller.poll(message);
+}
+
+// Der ProjectController haelt Plugins am Leben, bis der Audio-Thread sie loslaesst.
+struct Counted final : AudioPlugin {
+    static inline int alive = 0;
+    bool instrument;
+    explicit Counted(bool isInstr) : instrument(isInstr) { ++alive; }
+    ~Counted() override { --alive; }
+    bool isInstrument() const noexcept override { return instrument; }
+    void process(float*, float*, int, const PluginMidiEvent*, int, const PluginTransport&) noexcept override {}
+};
+
+void testControllerPlugins() {
+    {
+        Rig rig;
+        ProjectController controller(*rig.engine);
+        std::string message;
+
+        controller.setTrackPlugin(2, std::make_shared<Counted>(true), L"Erstes");
+        CHECK(controller.project().tracks[2].pluginName == L"Erstes");
+        CHECK(controller.project().tracks[2].pluginIsInstrument);
+        rig.render();
+
+        // Austausch: Das alte Plugin lebt, bis die Engine es zurueckmeldet.
+        controller.setTrackPlugin(2, std::make_shared<Counted>(false), L"Zweites");
+        CHECK(!controller.project().tracks[2].pluginIsInstrument);
+        CHECK(Counted::alive == 2);
+        controller.poll(message);
+        CHECK(Counted::alive == 2);  // der Audio-Thread koennte es noch benutzen
+        rig.render();
+        controller.poll(message);
+        CHECK(Counted::alive == 1);
+
+        // Entfernen.
+        controller.setTrackPlugin(2, nullptr, L"egal");
+        CHECK(controller.project().tracks[2].pluginName.empty());
+        rig.render();
+        controller.poll(message);
+        CHECK(Counted::alive == 0);
+
+        // Was beim Beenden noch geladen ist, gibt releasePlugins() frei.
+        controller.setTrackPlugin(5, std::make_shared<Counted>(true), L"Rest");
+        rig.render();
+        CHECK(Counted::alive == 1);
+        controller.releasePlugins();
+        CHECK(Counted::alive == 0);
+    }
+    CHECK(Counted::alive == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -1228,6 +1397,8 @@ int main() {
     testMidiClipPlayback();
     testMidiRecording();
     testMetronome();
+    testPlugins();
+    testControllerPlugins();
     {
         std::error_code ec;
         std::filesystem::remove_all(tempFile("minidaw_test_aufnahmen"), ec);

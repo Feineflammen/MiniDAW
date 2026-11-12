@@ -4,6 +4,7 @@
 #include "model/ProjectController.h"
 #include "ui/Canvas.h"
 #include "ui/PianoRoll.h"
+#include "ui/PluginHost.h"
 
 #include <array>
 #include <cstdint>
@@ -27,6 +28,10 @@ public:
     void setMidiInfo(std::wstring info) { midiInfo_ = std::move(info); }
     // Name des MIDI-Ausgabegeraets, leer = keins.
     void setMidiOutInfo(std::wstring name) { midiOutInfo_ = std::move(name); }
+    // Zugang zu den Plugins; ohne ihn bleiben die Plugin-Felder ohne Funktion.
+    void setPluginHost(PluginHost* host) { pluginHost_ = host; }
+    // Oeffnet die Plugin-Auswahl fuer eine Spur.
+    void openPluginPicker(int track);
     // Wird gerufen, wenn der Benutzer das MIDI-Ausgabegeraet weiterschalten will.
     std::function<void()> onCycleMidiOut;
     void selectClip(int track, int index, bool midi = false) { selTrack_ = track; selIndex_ = index; selMidi_ = midi; }
@@ -65,6 +70,9 @@ private:
     Rect inputRect(int track) const;
     Rect outputRect(int track) const;
     Rect midiOutRect() const;
+    Rect pluginRect(int track) const;
+    Rect editorButtonRect(int track) const;
+    Rect pickerRect() const;
     Rect editorRect() const;
 
     // Zeichnen
@@ -73,6 +81,8 @@ private:
     void drawTimeline(Canvas& c);
     void drawHeaders(Canvas& c);
     void drawStatusBar(Canvas& c);
+    void drawPluginPicker(Canvas& c);
+    bool pickerMouseDown(float x, float y);
     void drawClip(Canvas& c, const ClipModel& clip, int track, std::int64_t start, bool selected,
                   float alpha);
     void drawMidiClip(Canvas& c, const MidiClipModel& clip, int track, std::int64_t start, bool selected,
@@ -96,6 +106,12 @@ private:
     Engine& engine_;
     PianoRoll pianoRoll_;
     bool editorDrag_ = false;  // der laufende Ziehvorgang gehoert dem Noten-Editor
+
+    // Plugin-Auswahl: eine Liste, die ueber der Zeitachse aufklappt.
+    PluginHost* pluginHost_ = nullptr;
+    int pickerTrack_ = -1;  // -1 = geschlossen
+    int pickerScroll_ = 0;
+    std::vector<std::wstring> pickerNames_;
 
     float width_ = 1280.0f, height_ = 800.0f;
     double viewStart_ = 0.0;         // Frame am linken Rand der Zeitachse

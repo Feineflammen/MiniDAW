@@ -17,7 +17,7 @@ build\Release\minidaw.exe
 
 Tests ausführen: `ctest --test-dir build -C Release --output-on-failure`
 
-Aktueller Stand: Schritt 6c, Noten-Editor, Tempo, Taktraster und Metronom.
+Aktueller Stand: Schritt 7, VST3-Plugins (ein Plugin je Spur).
 
 ## Bedienung
 
@@ -45,6 +45,8 @@ Am Spurkopf rechts stehen zwei Felder: oben der Eingang der Spur (Audio, MIDI al
 Links neben dem Lineal stehen Taktposition, Tempo (Klick +1, Rechtsklick −1, Mausrad) und der Knopf "Klick" für das Metronom.
 
 Noten-Editor: Doppelklick auf einen MIDI-Clip öffnet ihn, Doppelklick auf eine leere Stelle einer MIDI-Spur legt einen neuen Clip von vier Takten an. Klick setzt eine Note, Ziehen verschiebt sie, Ziehen am rechten Rand ändert die Länge, Rechtsklick oder Entf löscht. Unten lässt sich der Anschlag je Note ziehen. Mausrad scrollt durch die Tonhöhen, Umschalt + Mausrad waagerecht, Strg + Mausrad zoomt. Esc oder × schließt.
+
+Plugins: Das Feld "Plugin …" ganz rechts am Spurkopf öffnet eine Liste der VST3-Plugins aus `C:\Program Files\Common Files\VST3`. Ein Instrument ersetzt den eingebauten Synthesizer der Spur, ein Effekt bearbeitet ihren Klang. "Fenster" öffnet die Oberfläche des Plugins.
 
 Unten rechts zeigt eine LED jede eingehende MIDI-Nachricht, daneben steht im Klartext, was ankam (Kanal, Note, Anschlag). Rot bedeutet einen Übertragungsfehler.
 

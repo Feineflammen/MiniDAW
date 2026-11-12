@@ -3,6 +3,7 @@
 #include "audio/AudioCallback.h"
 #include "disk/RecordSink.h"
 #include "disk/TrackStream.h"
+#include "engine/AudioPlugin.h"
 #include "engine/Synth.h"
 #include "midi/MidiMessage.h"
 #include "util/SpscQueue.h"
@@ -97,6 +98,13 @@ public:
     // Gibt Objekte frei, die der Audio-Thread nicht mehr braucht. Regelmaessig rufen.
     void collectGarbage();
 
+    // Setzt das Plugin einer Spur (nullptr = keins). Ein Instrument bekommt
+    // das MIDI der Spur anstelle des eingebauten Synthesizers, ein Effekt
+    // bearbeitet ihren Klang vor dem Fader. Das bisherige Plugin der Spur
+    // erscheint in popReleasedPlugin(), sobald der Audio-Thread es losgelassen hat.
+    bool setTrackPlugin(int track, AudioPlugin* plugin) noexcept;
+    bool popReleasedPlugin(AudioPlugin*& plugin) noexcept { return releasedPlugins_.pop(plugin); }
+
     // Live-MIDI (Keyboard, Rechnertastatur) fuer die scharfgeschaltete Spur.
     // Darf als einzige Methode aus mehreren Threads gerufen werden, zum
     // Beispiel aus dem Rueckruf des MIDI-Treibers; nie aus dem Audio-Thread.
@@ -169,7 +177,7 @@ private:
         MasterGain,
         ArmTrack, InputMonitor, Record, RecordMidi,
         TrackMidiInput, TrackMidiOutput, TrackMidiSequence,
-        Tempo, Metronome,
+        Tempo, Metronome, TrackPlugin,
     };
 
     struct Command {
@@ -179,6 +187,7 @@ private:
         std::int64_t position = 0;
         RecordSink* sink = nullptr;
         const MidiSequence* sequence = nullptr;
+        AudioPlugin* plugin = nullptr;
     };
 
     struct Track {
@@ -202,6 +211,7 @@ private:
         std::int64_t seqNextPos = -1;    // Position, an der die Wiedergabe fortsetzt
         bool seqDirty = false;           // Sequenz wurde ersetzt
         std::array<std::uint64_t, 2> held{};  // klingende Noten aus der Sequenz
+        AudioPlugin* plugin = nullptr;
     };
 
     struct LiveMidi {
@@ -210,10 +220,7 @@ private:
         std::int64_t micros = 0;  // Zeitpunkt des Eingangs
     };
 
-    struct BlockEvent {
-        int offset = 0;  // Frame innerhalb des Blocks
-        MidiMessage message;
-    };
+    using BlockEvent = PluginMidiEvent;
 
     bool send(const Command& c) noexcept { return commands_.push(c); }
     void drainCommands() noexcept;
@@ -224,6 +231,7 @@ private:
 
     SpscQueue<Command, 1024> commands_;
     SpscQueue<const MidiSequence*, 256> garbage_;  // Audio -> UI: nicht mehr benoetigt
+    SpscQueue<AudioPlugin*, 256> releasedPlugins_;  // Audio -> UI: wird nicht mehr benutzt
 
     // Live-MIDI: mehrere Absender teilen sich die Schreibseite ueber einen Mutex,
     // der Audio-Thread liest ohne Sperre.
@@ -261,6 +269,7 @@ private:
     const float* inR_ = nullptr;
     std::vector<float> masterL_, masterR_;
     std::vector<float> trackL_, trackR_;
+    std::vector<float> pluginL_, pluginR_;
     std::array<TrackStream, kNumTracks> streams_;
     std::array<Synth, kNumTracks> synths_;
     std::array<LiveMidi, 128> liveMidi_{};  // Nachrichten fuer den naechsten Block

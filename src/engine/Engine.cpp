@@ -120,6 +120,13 @@ void Engine::collectGarbage() {
     while (garbage_.pop(old)) delete old;
 }
 
+bool Engine::setTrackPlugin(int track, AudioPlugin* plugin) noexcept {
+    if (!validTrack(track)) return false;
+    Command c{CommandType::TrackPlugin, track};
+    c.plugin = plugin;
+    return send(c);
+}
+
 bool Engine::postMidi(MidiMessage message, bool fromKeyboard) {
     std::lock_guard<std::mutex> lock(midiPostMutex_);
     lastMidi_.store(static_cast<std::uint32_t>(message.status) |
@@ -197,6 +204,8 @@ void Engine::prepare(double sampleRate, int /*numInputs*/, int /*numOutputs*/, i
     masterR_.assign(size, 0.0f);
     trackL_.assign(size, 0.0f);
     trackR_.assign(size, 0.0f);
+    pluginL_.assign(size, 0.0f);
+    pluginR_.assign(size, 0.0f);
 
     for (auto& t : tracks_) {
         t.phase = 0.0;
@@ -311,6 +320,18 @@ void Engine::drainCommands() noexcept {
                 break;
             case CommandType::Metronome:
                 metronome_ = c.value != 0.0f;
+                break;
+            case CommandType::TrackPlugin:
+                if (t) {
+                    if (t->plugin) releasedPlugins_.push(t->plugin);  // der Besitzer darf es jetzt zerstoeren
+                    t->plugin = c.plugin;
+                    // Was bisher klang, verstummt; die Sequenz setzt neu ein.
+                    synths_[static_cast<std::size_t>(c.track)].allNotesOff();
+                    t->held = {};
+                    t->seqDirty = true;
+                } else if (c.plugin) {
+                    releasedPlugins_.push(c.plugin);
+                }
                 break;
             case CommandType::TrackMidiSequence:
                 if (t) {
@@ -433,8 +454,10 @@ void Engine::renderBlock(int numFrames, std::int64_t blockMicros) noexcept {
         raisePeak(inputPeak_, peak);
     }
 
+    // Synthesizer mit klingenden Stimmen und Plugins laufen auch bei stehendem Transport weiter.
     bool anySynth = false;
     for (const auto& synth : synths_) anySynth = anySynth || synth.active();
+    for (const auto& track : tracks_) anySynth = anySynth || track.plugin != nullptr;
     const bool liveMidi = liveMidiCount_ > 0 && armedTrack_ >= 0;
 
     if (!rolling_) {
@@ -480,8 +503,15 @@ void Engine::renderBlock(int numFrames, std::int64_t blockMicros) noexcept {
         const bool hasClips = rolling_ && stream.active();
         const bool hasTone = rolling_ && t.toneHz > 0.0f;
         const bool hasInput = monitoring && static_cast<int>(ti) == armedTrack_;
-        const bool hasSynth = synths_[ti].active() || (midiToSynth && midiCount > 0);
-        if (!hasClips && !hasTone && !hasInput && !hasSynth) { t.curL = t.tgtL; t.curR = t.tgtR; continue; }
+        AudioPlugin* const instrument = (t.plugin && t.plugin->isInstrument()) ? t.plugin : nullptr;
+        AudioPlugin* const effect = (t.plugin && !t.plugin->isInstrument()) ? t.plugin : nullptr;
+        const bool midiToBuiltIn = midiToSynth && instrument == nullptr;
+        const bool hasSynth = synths_[ti].active() || (midiToBuiltIn && midiCount > 0);
+        if (!hasClips && !hasTone && !hasInput && !hasSynth && t.plugin == nullptr) {
+            t.curL = t.tgtL;
+            t.curR = t.tgtR;
+            continue;
+        }
 
         // Quelle der Spur nach tl/tr: Audio-Clips, dazu gegebenenfalls der Testton.
         if (hasClips) {
@@ -524,7 +554,7 @@ void Engine::renderBlock(int numFrames, std::int64_t blockMicros) noexcept {
         if (hasSynth) {
             Synth& synth = synths_[ti];
             int done = 0;
-            if (midiToSynth) {
+            if (midiToBuiltIn) {
                 for (int i = 0; i < midiCount; ++i) {
                     const BlockEvent& e = blockEvents_[static_cast<std::size_t>(i)];
                     const int offset = std::clamp(e.offset, done, numFrames);
@@ -534,6 +564,24 @@ void Engine::renderBlock(int numFrames, std::int64_t blockMicros) noexcept {
                 }
             }
             if (numFrames > done) synth.render(tl + done, tr + done, numFrames - done);
+        }
+
+        // Plugin der Spur: Ein Instrument bekommt das MIDI und kommt zum Klang
+        // der Spur dazu, ein Effekt bearbeitet alles, was bis hier entstanden ist.
+        if (t.plugin != nullptr) {
+            const PluginTransport transport{rolling_ && wantPlay_, position_, tempo_, sampleRate_};
+            if (instrument != nullptr) {
+                std::memset(pluginL_.data(), 0, bytes);
+                std::memset(pluginR_.data(), 0, bytes);
+                instrument->process(pluginL_.data(), pluginR_.data(), numFrames, blockEvents_.data(),
+                                    midiToSynth ? midiCount : 0, transport);
+                for (int i = 0; i < numFrames; ++i) {
+                    tl[i] += pluginL_[static_cast<std::size_t>(i)];
+                    tr[i] += pluginR_[static_cast<std::size_t>(i)];
+                }
+            } else {
+                effect->process(tl, tr, numFrames, nullptr, 0, transport);
+            }
         }
 
         // Fader und Panorama, ueber den Block ueberblendet.

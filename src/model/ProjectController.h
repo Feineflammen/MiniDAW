@@ -48,6 +48,14 @@ public:
     void setTrackInput(int track, int input);
     void setTrackMidiOutput(int track, int output);
 
+    // Setzt das Plugin einer Spur (nullptr = keins). Ein Instrument bekommt das
+    // MIDI der Spur anstelle des eingebauten Synthesizers, ein Effekt bearbeitet
+    // ihren Klang. Das bisherige Plugin bleibt am Leben, bis der Audio-Thread es
+    // nicht mehr benutzt (siehe poll()).
+    void setTrackPlugin(int track, std::shared_ptr<AudioPlugin> plugin, std::wstring name);
+    // Vor dem Beenden rufen, nachdem der Audio-Thread gestoppt ist: gibt alle Plugins frei.
+    void releasePlugins();
+
     // Tempo (Schlaege pro Minute) fuer Raster und Metronom.
     void setBpm(double bpm);
     double bpm() const noexcept { return project_.bpm; }
@@ -122,6 +130,8 @@ private:
     Project project_;
     double sampleRate_ = 44100.0;
     std::vector<std::weak_ptr<AudioFile>> files_;
+    std::array<std::shared_ptr<AudioPlugin>, kProjectTracks> plugins_;
+    std::vector<std::shared_ptr<AudioPlugin>> retiringPlugins_;  // warten auf Rueckmeldung der Engine
 
     int inputChannels_ = 0;
     int armedTrack_ = -1;

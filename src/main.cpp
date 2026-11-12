@@ -13,6 +13,7 @@
 #include "model/ProjectController.h"
 #include "ui/MainView.h"
 #include "ui/MainWindow.h"
+#include "vst3/PluginManager.h"
 
 #include <windows.h>
 #include <objbase.h>
@@ -55,6 +56,17 @@ std::filesystem::path makeDemoFile(const wchar_t* name, double baseHz, double se
     writeWav(path, data.data(), frames, 2, rate, WavFormat::Pcm16, error);
     return path;
 }
+
+// Plugin-Liste fuer den Screenshot-Modus: nur Namen, es wird nichts geladen.
+struct DemoPluginHost final : ui::PluginHost {
+    std::vector<std::wstring> pluginNames() override {
+        return {L"Beispiel-Piano", L"Beispiel-Orgel", L"Beispiel-Hall", L"Beispiel-Kompressor"};
+    }
+    std::wstring pluginFolder() override { return L"C:\\Program Files\\Common Files\\VST3"; }
+    bool load(int, int, std::wstring&) override { return false; }
+    void unload(int) override {}
+    bool openEditor(int, std::wstring&) override { return false; }
+};
 
 int runScreenshot(const std::filesystem::path& output) {
     constexpr int kRate = 44100;
@@ -116,6 +128,9 @@ int runScreenshot(const std::filesystem::path& output) {
     engine->postMidi(MidiMessage::noteOn(60, 100, 0));
     view.selectClip(1, 0);
     view.openPianoRoll(5, 0);
+    DemoPluginHost demoPlugins;
+    view.setPluginHost(&demoPlugins);
+    view.openPluginPicker(1);
     view.tick();
 
     std::string error;
@@ -228,6 +243,9 @@ int runApp(HINSTANCE instance, int showCommand) {
     MidiOutput midiOut(*engine);
     if (!settings.midiOutput.empty()) midiOut.select(settings.midiOutput);
 
+    // VST3-Plugins: geladen wird mit Samplerate und groesster Blocklaenge des Audiogeraets.
+    vst3::PluginManager plugins(controller, device.sampleRate(), device.bufferFrames());
+
     ui::MainView view(controller, *engine);
     wchar_t info[160];
     std::swprintf(info, 160, L"%.0f Hz, Puffer %d Frames (%.1f ms), %ls", device.sampleRate(),
@@ -243,6 +261,7 @@ int runApp(HINSTANCE instance, int showCommand) {
     view.setDeviceInfo(deviceInfo);
     view.setMidiInfo(midi.summary());
     view.setMidiOutInfo(midiOut.current());
+    view.setPluginHost(&plugins);
     view.onCycleMidiOut = [&midiOut, &view] {
         midiOut.cycle();
         view.setMidiOutInfo(midiOut.current());
@@ -253,10 +272,12 @@ int runApp(HINSTANCE instance, int showCommand) {
     window.onPeriodic = [&midi, &view] {
         if (midi.refresh()) view.setMidiInfo(midi.summary());
     };
+    window.onFrame = [&plugins] { plugins.idle(); };
     if (!window.create(instance, showCommand, error)) {
         showError(error);
         return 1;
     }
+    plugins.setOwner(window.hwnd());
     const int result = window.run();
     settings.recordOffsetMs = controller.recordOffsetMs();
     settings.midiOutput = midiOut.current();
@@ -265,9 +286,13 @@ int runApp(HINSTANCE instance, int showCommand) {
 
     // Reihenfolge: erst den Audio-Thread anhalten, dann eine laufende Aufnahme
     // abschliessen (dafuer muss der Disk-Thread noch laufen), dann den Disk-Thread.
+    // Plugins werden erst zerstoert, wenn der Audio-Thread sicher steht.
+    view.setPluginHost(nullptr);
     device.stop();
     controller.finishRecordingOnShutdown();
     disk.stop();
+    plugins.shutdown();
+    controller.releasePlugins();
     return result;
 }
 

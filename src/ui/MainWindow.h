@@ -21,6 +21,10 @@ public:
     bool create(HINSTANCE instance, int showCommand, std::string& error);
     int run();
 
+    HWND hwnd() const { return hwnd_; }
+
+    // Wird bei jedem Bild (etwa 30-mal pro Sekunde) im UI-Thread gerufen.
+    std::function<void()> onFrame;
     // Wird etwa einmal pro Sekunde im UI-Thread gerufen (Geraete neu erkennen und Aehnliches).
     std::function<void()> onPeriodic;
 

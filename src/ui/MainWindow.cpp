@@ -136,6 +136,7 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
         case WM_TIMER:
             if (wParam == kFrameTimer) {
                 view_.tick();
+                if (onFrame) onFrame();
                 if (++frameCount_ >= 30) {
                     frameCount_ = 0;
                     if (onPeriodic) onPeriodic();

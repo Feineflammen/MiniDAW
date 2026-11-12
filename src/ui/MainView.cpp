@@ -13,7 +13,9 @@ namespace {
 // Aufteilung
 constexpr float kTopH = 44.0f;
 constexpr float kRulerH = 24.0f;
-constexpr float kHeaderW = 292.0f;
+constexpr float kHeaderW = 372.0f;
+constexpr float kPickerRowH = 22.0f;
+constexpr int kPickerRows = 16;
 constexpr float kRowH = 44.0f;
 constexpr float kStatusH = 24.0f;
 constexpr float kEditorH = 310.0f;
@@ -165,6 +167,17 @@ Rect MainView::outputRect(int track) const { return {220.0f, rowY(track) + 23.0f
 Rect MainView::editorRect() const {
     return {0.0f, height_ - kStatusH - kEditorH, width_, kEditorH};
 }
+Rect MainView::pluginRect(int track) const { return {290.0f, rowY(track) + 5.0f, 76.0f, 16.0f}; }
+Rect MainView::editorButtonRect(int track) const { return {290.0f, rowY(track) + 23.0f, 76.0f, 16.0f}; }
+
+// Die Liste klappt rechts neben den Spurkoepfen auf, auf Hoehe der Spur, soweit Platz ist.
+Rect MainView::pickerRect() const {
+    const int rows = std::min(kPickerRows, static_cast<int>(pickerNames_.size()) + 1);
+    const float h = 26.0f + static_cast<float>(std::max(rows, 2)) * kPickerRowH + 6.0f;
+    const float top = kTopH + kRulerH + 4.0f;
+    const float y = std::clamp(rowY(std::max(0, pickerTrack_)), top, std::max(top, height_ - kStatusH - h - 4.0f));
+    return {kHeaderW + 6.0f, y, 340.0f, h};
+}
 Rect MainView::midiOutRect() const { return {width_ * 0.36f, height_ - kStatusH + 3.0f, 250.0f, kStatusH - 6.0f}; }
 
 // Abstand der Lineal-Marken in Schlaegen: einzelne Schlaege, wenn Platz ist,
@@ -286,6 +299,7 @@ void MainView::draw(Canvas& c, float width, float height) {
     if (pianoRoll_.isOpen()) pianoRoll_.draw(c, editorRect());
     drawStatusBar(c);
     drawTopBar(c);
+    if (pickerTrack_ >= 0) drawPluginPicker(c);
 }
 
 void MainView::drawSlider(Canvas& c, const Rect& rect, float position, float fillFrom) {
@@ -356,6 +370,78 @@ void MainView::drawTopBar(Canvas& c) {
     } else if (engine_.underruns() > 0) {
         c.text(L"Aussetzer: " + std::to_wstring(engine_.underruns()), right, kTextDim, Font::Small, Align::Right);
     }
+}
+
+// --- Plugin-Auswahl ----------------------------------------------------------
+
+void MainView::openPluginPicker(int track) {
+    if (!pluginHost_ || track < 0 || track >= kProjectTracks) return;
+    pickerNames_ = pluginHost_->pluginNames();
+    pickerTrack_ = track;
+    pickerScroll_ = 0;
+}
+
+void MainView::drawPluginPicker(Canvas& c) {
+    const Rect r = pickerRect();
+    c.fillRounded({r.x + 2.0f, r.y + 3.0f, r.w, r.h}, 6.0f, rgb(0x000000, 0.45f));  // Schatten
+    c.fillRounded(r, 6.0f, rgb(0x2E3037));
+    c.strokeRounded(r, 6.0f, kLine);
+    c.text(L"Plugin f\u00FCr Spur " + std::to_wstring(pickerTrack_ + 1), {r.x + 12.0f, r.y + 2.0f, r.w - 24.0f, 24.0f},
+           kTextDim, Font::Small);
+
+    // Zeile 0 ist immer "kein Plugin", danach die gefundenen Plugins.
+    const int total = static_cast<int>(pickerNames_.size()) + 1;
+    const int visible = std::min(kPickerRows, total);
+    const std::wstring& current = controller_.project().tracks[static_cast<std::size_t>(pickerTrack_)].pluginName;
+    for (int i = 0; i < visible; ++i) {
+        const int item = pickerScroll_ + i;
+        if (item >= total) break;
+        const Rect row{r.x + 6.0f, r.y + 26.0f + static_cast<float>(i) * kPickerRowH, r.w - 12.0f, kPickerRowH - 2.0f};
+        const bool isNone = item == 0;
+        const bool active = isNone ? current.empty() : false;
+        if (active) c.fillRounded(row, 3.0f, kButton);
+        c.text(isNone ? std::wstring(L"Kein Plugin (eingebauter Synthesizer)")
+                      : pickerNames_[static_cast<std::size_t>(item - 1)],
+               {row.x + 8.0f, row.y, row.w - 16.0f, row.h}, isNone ? kTextDim : kText);
+    }
+    if (pickerNames_.empty() && pluginHost_) {
+        c.text(L"Keine Plugins gefunden in " + pluginHost_->pluginFolder(),
+               {r.x + 14.0f, r.y + 26.0f + kPickerRowH, r.w - 28.0f, kPickerRowH}, kMuteOn, Font::Small);
+    } else if (total > visible) {
+        // Rollbalken
+        const float trackH = static_cast<float>(visible) * kPickerRowH;
+        const float barH = std::max(16.0f, trackH * static_cast<float>(visible) / static_cast<float>(total));
+        const float barY = r.y + 26.0f + (trackH - barH) * static_cast<float>(pickerScroll_) /
+                                             static_cast<float>(std::max(1, total - visible));
+        c.fillRounded({r.right() - 5.0f, barY, 3.0f, barH}, 1.5f, kTextDim);
+    }
+}
+
+// Klick bei offener Auswahl. Liefert true, wenn der Klick damit erledigt ist.
+bool MainView::pickerMouseDown(float x, float y) {
+    if (pickerTrack_ < 0) return false;
+    const Rect r = pickerRect();
+    const int track = pickerTrack_;
+    pickerTrack_ = -1;  // jeder Klick schliesst die Liste
+    if (!r.contains(x, y) || !pluginHost_) return true;
+
+    const int row = static_cast<int>(std::floor((y - r.y - 26.0f) / kPickerRowH));
+    const int item = pickerScroll_ + row;
+    if (row < 0 || item < 0 || item > static_cast<int>(pickerNames_.size())) return true;
+
+    if (item == 0) {
+        pluginHost_->unload(track);
+    } else {
+        std::wstring error;
+        if (!pluginHost_->load(track, item - 1, error)) {
+            setStatus(error);
+        } else {
+            // Ein frisch geladenes Plugin zeigt gleich sein Fenster.
+            std::wstring ignored;
+            pluginHost_->openEditor(track, ignored);
+        }
+    }
+    return true;
 }
 
 // Statusleiste unten: links das Audiogeraet, rechts MIDI mit LED.
@@ -649,10 +735,20 @@ void MainView::drawHeaders(Canvas& c) {
         const Rect outBox = outputRect(t);
         c.fillRounded(outBox, 3.0f, kDark);
         const std::wstring outText = track.midiOutput == kTrackOutputSynth
-                                         ? std::wstring(L"\u2192 Synth")
+                                         ? std::wstring(track.pluginIsInstrument ? L"\u2192 Plugin" : L"\u2192 Synth")
                                          : L"\u2192 MIDI " + std::to_wstring(track.midiOutput + 1);
         const bool usesMidi = track.input != kTrackInputAudio || !track.midiClips.empty();
         c.text(outText, outBox, usesMidi ? kText : kTextDim, Font::Small, Align::Center);
+
+        // Plugin der Spur und Knopf fuer sein Fenster.
+        const Rect plug = pluginRect(t);
+        const bool hasPlugin = !track.pluginName.empty();
+        c.fillRounded(plug, 3.0f, pickerTrack_ == t ? kAccent : kDark);
+        c.text(hasPlugin ? track.pluginName : std::wstring(L"Plugin \u2026"), {plug.x + 4.0f, plug.y, plug.w - 8.0f, plug.h},
+               pickerTrack_ == t ? kDark : hasPlugin ? kText : kTextDim, Font::Small, hasPlugin ? Align::Left : Align::Center);
+        const Rect edit = editorButtonRect(t);
+        c.fillRounded(edit, 3.0f, hasPlugin ? kButton : kDark);
+        c.text(L"Fenster", edit, hasPlugin ? kText : rgb(0x55585F), Font::Small, Align::Center);
 
         c.line(0.0f, y + kRowH - 0.5f, kHeaderW, y + kRowH - 0.5f, kLine);
     }
@@ -740,6 +836,7 @@ void MainView::stepOutput(int track, int delta) {
 }
 
 void MainView::rightMouseDown(float x, float y) {
+    if (pickerTrack_ >= 0) { pickerTrack_ = -1; return; }
     if (pianoRoll_.isOpen() && editorRect().contains(x, y)) {
         pianoRoll_.mouseDown(x, y, true);
         return;
@@ -758,6 +855,8 @@ void MainView::mouseDown(float x, float y, bool doubleClick) {
     dragStartX_ = x;
     dragStartY_ = y;
     dragMoved_ = false;
+
+    if (pickerMouseDown(x, y)) return;
 
     // Statusleiste
     if (y >= height_ - kStatusH) {
@@ -821,7 +920,12 @@ void MainView::mouseDown(float x, float y, bool doubleClick) {
         const TrackModel& model = controller_.project().tracks[static_cast<std::size_t>(track)];
         const Rect gain = gainRect(track);
         const Rect pan = panRect(track);
-        if (inputRect(track).contains(x, y)) {
+        if (pluginRect(track).contains(x, y)) {
+            openPluginPicker(track);
+        } else if (editorButtonRect(track).contains(x, y)) {
+            std::wstring error;
+            if (pluginHost_ && !pluginHost_->openEditor(track, error) && !error.empty()) setStatus(error);
+        } else if (inputRect(track).contains(x, y)) {
             stepInput(track, 1);
         } else if (outputRect(track).contains(x, y)) {
             stepOutput(track, 1);
@@ -978,6 +1082,12 @@ void MainView::mouseUp(float x, float y) {
 }
 
 void MainView::wheel(float x, float y, float notches, bool ctrl, bool shift) {
+    // Offene Plugin-Auswahl: das Mausrad rollt die Liste.
+    if (pickerTrack_ >= 0) {
+        const int total = static_cast<int>(pickerNames_.size()) + 1;
+        pickerScroll_ = std::clamp(pickerScroll_ - static_cast<int>(notches * 3.0f), 0, std::max(0, total - kPickerRows));
+        return;
+    }
     if (pianoRoll_.isOpen() && editorRect().contains(x, y)) {
         pianoRoll_.wheel(x, y, notches, ctrl, shift);
         return;
@@ -1022,7 +1132,8 @@ void MainView::key(Key k) {
             viewStart_ = 0.0;
             break;
         case Key::Escape:
-            pianoRoll_.close();
+            if (pickerTrack_ >= 0) pickerTrack_ = -1;
+            else pianoRoll_.close();
             break;
         case Key::Delete:
             // Bei offenem Noten-Editor loescht Entf zuerst die ausgewaehlte Note.

@@ -61,6 +61,8 @@ struct TrackModel {
     bool solo = false;
     int input = kTrackInputAudio;
     int midiOutput = kTrackOutputSynth;
+    std::wstring pluginName;       // Name des geladenen Plugins, leer = keins
+    bool pluginIsInstrument = false;
     std::vector<ClipModel> clips;
     std::vector<MidiClipModel> midiClips;
 };

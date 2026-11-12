@@ -174,7 +174,8 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
             ScreenToClient(hwnd_, &pt);
             view_.wheel(toDip(pt.x), toDip(pt.y),
                         static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam)) / static_cast<float>(WHEEL_DELTA),
-                        (GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL) != 0);
+                        (GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL) != 0,
+                        (GET_KEYSTATE_WPARAM(wParam) & MK_SHIFT) != 0);
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         }
@@ -196,6 +197,7 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
             if (wParam == VK_SPACE) view_.key(Key::Space);
             else if (wParam == VK_HOME) view_.key(Key::Home);
             else if (wParam == VK_DELETE) view_.key(Key::Delete);
+            else if (wParam == VK_ESCAPE) view_.key(Key::Escape);
             else if (wParam == 'R') view_.key(Key::Record);
             else break;
             InvalidateRect(hwnd_, nullptr, FALSE);

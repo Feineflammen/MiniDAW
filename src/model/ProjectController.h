@@ -48,6 +48,16 @@ public:
     void setTrackInput(int track, int input);
     void setTrackMidiOutput(int track, int output);
 
+    // Tempo (Schlaege pro Minute) fuer Raster und Metronom.
+    void setBpm(double bpm);
+    double bpm() const noexcept { return project_.bpm; }
+    double framesPerBeat() const noexcept { return sampleRate_ * 60.0 / project_.bpm; }
+    void setMetronome(bool on);
+    bool metronome() const noexcept { return metronome_; }
+
+    // Ersetzt die Noten eines MIDI-Clips und setzt seine Laenge.
+    bool updateMidiClip(int track, int index, std::vector<MidiNote> notes, std::int64_t length);
+
     // MIDI-Clips
     int addMidiClip(int track, MidiClipModel clip);  // liefert den Index oder -1
     int moveMidiClip(int track, int index, int newTrack, std::int64_t newStart);
@@ -116,6 +126,7 @@ private:
     int inputChannels_ = 0;
     int armedTrack_ = -1;
     bool monitor_ = false;
+    bool metronome_ = false;
     int recordOffsetMs_ = 0;
     std::filesystem::path recordingFolder_;
     std::function<std::int64_t()> latencyProvider_;

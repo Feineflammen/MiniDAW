@@ -137,6 +137,27 @@ void ProjectController::setTrackMidiOutput(int track, int output) {
     engine_.setTrackMidiOutput(track, output);
 }
 
+void ProjectController::setBpm(double bpm) {
+    project_.bpm = std::clamp(bpm, 30.0, 300.0);
+    engine_.setTempo(project_.bpm);
+}
+
+void ProjectController::setMetronome(bool on) {
+    metronome_ = on;
+    engine_.setMetronome(on);
+}
+
+bool ProjectController::updateMidiClip(int track, int index, std::vector<MidiNote> notes, std::int64_t length) {
+    if (!validTrack(track) || length <= 0) return false;
+    auto& clips = project_.tracks[static_cast<std::size_t>(track)].midiClips;
+    if (index < 0 || index >= static_cast<int>(clips.size())) return false;
+    std::sort(notes.begin(), notes.end(), [](const MidiNote& a, const MidiNote& b) { return a.start < b.start; });
+    clips[static_cast<std::size_t>(index)].notes = std::move(notes);
+    clips[static_cast<std::size_t>(index)].length = length;
+    syncMidi(track);
+    return true;
+}
+
 int ProjectController::addMidiClip(int track, MidiClipModel clip) {
     if (!validTrack(track) || clip.length <= 0) return -1;
     clip.start = std::max<std::int64_t>(0, clip.start);

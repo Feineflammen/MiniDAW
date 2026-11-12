@@ -21,6 +21,12 @@ jobs:
           Write-Output "PNGBEGIN"
           for ($i = 0; $i -lt $b.Length; $i += 200) { Write-Output ("PNG:" + $b.Substring($i, [Math]::Min(200, $b.Length - $i))) }
           Write-Output "PNGEND"
+      - name: Pruefsumme der Programmdatei
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash build\Release\minidaw.exe -Algorithm SHA256).Hash
+          Write-Output "SHA256 minidaw.exe: $h"
+          "SHA-256 von minidaw.exe: ``$h``" >> $env:GITHUB_STEP_SUMMARY
       - uses: actions/upload-artifact@v6
         with:
           name: minidaw

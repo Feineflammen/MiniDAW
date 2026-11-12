@@ -75,6 +75,12 @@ bool Engine::setMasterGain(float gain) noexcept {
     return send({CommandType::MasterGain, 0, std::max(0.0f, gain)});
 }
 
+bool Engine::setTempo(double bpm) noexcept {
+    return send({CommandType::Tempo, 0, static_cast<float>(std::clamp(bpm, 20.0, 400.0))});
+}
+
+bool Engine::setMetronome(bool on) noexcept { return send({CommandType::Metronome, 0, on ? 1.0f : 0.0f}); }
+
 bool Engine::setTrackTestTone(int track, float hz) noexcept {
     if (!validTrack(track)) return false;
     return send({CommandType::TrackTestTone, track, std::max(0.0f, hz)});
@@ -299,6 +305,12 @@ void Engine::drainCommands() noexcept {
                     t->midiOutput = static_cast<int>(c.position);
                     t->seqDirty = true;
                 }
+                break;
+            case CommandType::Tempo:
+                tempo_ = static_cast<double>(c.value);
+                break;
+            case CommandType::Metronome:
+                metronome_ = c.value != 0.0f;
                 break;
             case CommandType::TrackMidiSequence:
                 if (t) {
@@ -543,6 +555,33 @@ void Engine::renderBlock(int numFrames, std::int64_t blockMicros) noexcept {
         raisePeak(trackPeak_[ti], peak);
     }
     liveMidiCount_ = 0;
+
+    // Metronom: kurzer Klick auf jedem Schlag, hoeher auf der Eins.
+    if (metronome_ && rolling_ && wantPlay_) {
+        const double framesPerBeat = sampleRate_ * 60.0 / tempo_;
+        auto beat = static_cast<std::int64_t>(std::ceil(static_cast<double>(position_) / framesPerBeat));
+        auto beatFrame = static_cast<std::int64_t>(std::ceil(static_cast<double>(beat) * framesPerBeat));
+        for (int i = 0; i < numFrames; ++i) {
+            if (position_ + i == beatFrame) {
+                clickLength_ = std::max(1, static_cast<int>(0.03 * sampleRate_));
+                clickRemaining_ = clickLength_;
+                clickPhase_ = 0.0;
+                clickPhaseInc_ = kTwoPi * (beat % 4 == 0 ? 1600.0 : 1000.0) / sampleRate_;
+                ++beat;
+                beatFrame = static_cast<std::int64_t>(std::ceil(static_cast<double>(beat) * framesPerBeat));
+            }
+            if (clickRemaining_ > 0) {
+                const float env = static_cast<float>(clickRemaining_) / static_cast<float>(clickLength_);
+                const float s = 0.35f * env * env * static_cast<float>(std::sin(clickPhase_));
+                clickPhase_ += clickPhaseInc_;
+                --clickRemaining_;
+                L[i] += s;
+                R[i] += s;
+            }
+        }
+    } else {
+        clickRemaining_ = 0;
+    }
 
     // Master-Fader.
     const float step = (masterGain_ - masterCur_) * invFrames;

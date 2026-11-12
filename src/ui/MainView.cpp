@@ -16,6 +16,12 @@ constexpr float kRulerH = 24.0f;
 constexpr float kHeaderW = 292.0f;
 constexpr float kRowH = 44.0f;
 constexpr float kStatusH = 24.0f;
+constexpr float kEditorH = 310.0f;
+
+// Feld links neben dem Lineal: Taktposition, Tempo, Metronom.
+const Rect kBarRect{10.0f, 44.0f, 84.0f, 24.0f};
+const Rect kBpmRect{100.0f, 47.0f, 84.0f, 18.0f};
+const Rect kClickRect{192.0f, 47.0f, 50.0f, 18.0f};
 
 const Rect kRewindRect{8.0f, 8.0f, 34.0f, 28.0f};
 const Rect kPlayRect{46.0f, 8.0f, 58.0f, 28.0f};
@@ -126,7 +132,7 @@ std::wstring formatGain(float gain) {
 }  // namespace
 
 MainView::MainView(ProjectController& controller, Engine& engine)
-    : controller_(controller), engine_(engine) {
+    : controller_(controller), engine_(engine), pianoRoll_(controller, engine) {
     framesPerPixel_ = controller_.sampleRate() / 50.0;  // 50 Pixel pro Sekunde
 }
 
@@ -156,16 +162,23 @@ Rect MainView::panRect(int track) const { return {140.0f, rowY(track) + 25.0f, 5
 Rect MainView::meterRect(int track) const { return {204.0f, rowY(track) + 5.0f, 8.0f, 34.0f}; }
 Rect MainView::inputRect(int track) const { return {220.0f, rowY(track) + 5.0f, 66.0f, 16.0f}; }
 Rect MainView::outputRect(int track) const { return {220.0f, rowY(track) + 23.0f, 66.0f, 16.0f}; }
+Rect MainView::editorRect() const {
+    return {0.0f, height_ - kStatusH - kEditorH, width_, kEditorH};
+}
 Rect MainView::midiOutRect() const { return {width_ * 0.36f, height_ - kStatusH + 3.0f, 250.0f, kStatusH - 6.0f}; }
 
-double MainView::rulerStep() const {
-    static constexpr double kSteps[] = {0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1,   2,
-                                        5,    10,   15,   30,  60,  120, 300, 600};
-    const double secondsPerPixel = framesPerPixel_ / controller_.sampleRate();
-    for (double step : kSteps)
-        if (step / secondsPerPixel >= 80.0) return step;
-    return 1200.0;
+// Abstand der Lineal-Marken in Schlaegen: einzelne Schlaege, wenn Platz ist,
+// sonst 1, 2, 4, 8 ... Takte.
+double MainView::rulerBeats() const {
+    const double pixelsPerBeat = controller_.framesPerBeat() / framesPerPixel_;
+    if (pixelsPerBeat >= 60.0) return 1.0;
+    double beats = 4.0;
+    while (beats * pixelsPerBeat < 60.0) beats *= 2.0;
+    return beats;
 }
+
+// Abstand der Lineal-Marken in Sekunden.
+double MainView::rulerStep() const { return rulerBeats() * 60.0 / controller_.bpm(); }
 
 // --- Laufender Betrieb -------------------------------------------------------
 
@@ -270,6 +283,7 @@ void MainView::draw(Canvas& c, float width, float height) {
     drawTimeline(c);
     drawRuler(c);
     drawHeaders(c);
+    if (pianoRoll_.isOpen()) pianoRoll_.draw(c, editorRect());
     drawStatusBar(c);
     drawTopBar(c);
 }
@@ -385,16 +399,37 @@ void MainView::drawRuler(Canvas& c) {
         if (x < kHeaderW - 80.0f) continue;
         c.line(x + 0.5f, kTopH + 14.0f, x + 0.5f, kTopH + kRulerH, kTextDim);
 
-        const int minutes = static_cast<int>(s / 60.0);
+        // Beschriftung in Takten, bei einzelnen Schlaegen als "Takt.Schlag".
+        const auto beatIndex = static_cast<std::int64_t>(std::llround(s * controller_.bpm() / 60.0));
+        const std::int64_t bar = beatIndex / 4 + 1;
+        const std::int64_t beatInBar = beatIndex % 4 + 1;
         wchar_t label[32];
-        if (step < 1.0) std::swprintf(label, 32, L"%d:%05.2f", minutes, s - 60.0 * minutes);
-        else std::swprintf(label, 32, L"%d:%02d", minutes, static_cast<int>(s - 60.0 * minutes + 0.5));
-        c.text(label, {x + 4.0f, kTopH, 80.0f, kRulerH - 4.0f}, kTextDim, Font::Small);
+        if (beatInBar == 1) std::swprintf(label, 32, L"%lld", static_cast<long long>(bar));
+        else std::swprintf(label, 32, L"%lld.%lld", static_cast<long long>(bar), static_cast<long long>(beatInBar));
+        c.text(label, {x + 4.0f, kTopH, 80.0f, kRulerH - 4.0f}, beatInBar == 1 ? kText : kTextDim, Font::Small);
     }
 
     const float px = frameToX(static_cast<double>(engine_.position()));
     c.fill({px - 4.0f, kTopH + kRulerH - 8.0f, 9.0f, 8.0f}, kPlayhead);
     c.popClip();
+
+    // Links daneben: Taktposition, Tempo und Metronom.
+    {
+        const double beats = static_cast<double>(engine_.position()) / controller_.framesPerBeat();
+        const auto whole = static_cast<std::int64_t>(std::floor(beats + 1e-9));
+        wchar_t label[48];
+        std::swprintf(label, 48, L"Takt %lld.%lld", static_cast<long long>(whole / 4 + 1),
+                      static_cast<long long>(whole % 4 + 1));
+        c.text(label, kBarRect, kText, Font::Small);
+
+        c.fillRounded(kBpmRect, 3.0f, kDark);
+        std::swprintf(label, 48, L"%.0f BPM", controller_.bpm());
+        c.text(label, kBpmRect, kText, Font::Small, Align::Center);
+
+        const bool click = controller_.metronome();
+        c.fillRounded(kClickRect, 3.0f, click ? kAccent : kButton);
+        c.text(L"Klick", kClickRect, click ? kDark : kTextDim, Font::Small, Align::Center);
+    }
     c.line(0.0f, kTopH + kRulerH - 0.5f, width_, kTopH + kRulerH - 0.5f, kLine);
 }
 
@@ -648,6 +683,11 @@ std::int64_t MainView::snap(std::int64_t start, std::int64_t length, int skipTra
 
     consider(0, false);
     consider(engine_.position(), true);
+    // Naechster Schlag des Taktrasters.
+    {
+        const double beat = controller_.framesPerBeat();
+        consider(static_cast<std::int64_t>(std::llround(std::round(static_cast<double>(start) / beat) * beat)), false);
+    }
     const Project& project = controller_.project();
     for (int t = 0; t < kProjectTracks; ++t) {
         const auto& clips = project.tracks[static_cast<std::size_t>(t)].clips;
@@ -700,6 +740,14 @@ void MainView::stepOutput(int track, int delta) {
 }
 
 void MainView::rightMouseDown(float x, float y) {
+    if (pianoRoll_.isOpen() && editorRect().contains(x, y)) {
+        pianoRoll_.mouseDown(x, y, true);
+        return;
+    }
+    if (kBpmRect.contains(x, y)) {
+        controller_.setBpm(controller_.bpm() - 1.0);
+        return;
+    }
     const int track = rowAt(y);
     if (track < 0 || x >= kHeaderW) return;
     if (inputRect(track).contains(x, y)) stepInput(track, -1);
@@ -714,6 +762,13 @@ void MainView::mouseDown(float x, float y, bool doubleClick) {
     // Statusleiste
     if (y >= height_ - kStatusH) {
         if (midiOutRect().contains(x, y) && onCycleMidiOut) onCycleMidiOut();
+        return;
+    }
+
+    // Noten-Editor
+    if (pianoRoll_.isOpen() && editorRect().contains(x, y)) {
+        editorDrag_ = true;
+        pianoRoll_.mouseDown(x, y, false);
         return;
     }
 
@@ -747,7 +802,11 @@ void MainView::mouseDown(float x, float y, bool doubleClick) {
 
     // Lineal
     if (y < kTopH + kRulerH) {
-        if (x >= kHeaderW) {
+        if (kBpmRect.contains(x, y)) {
+            controller_.setBpm(controller_.bpm() + 1.0);
+        } else if (kClickRect.contains(x, y)) {
+            controller_.setMetronome(!controller_.metronome());
+        } else if (x >= kHeaderW) {
             drag_ = Drag::Scrub;
             locateTo(x);
         }
@@ -801,6 +860,10 @@ void MainView::mouseDown(float x, float y, bool doubleClick) {
             selTrack_ = track;
             selIndex_ = i;
             selMidi_ = true;
+            if (doubleClick) {  // Doppelklick oeffnet den Noten-Editor
+                pianoRoll_.open(track, i);
+                return;
+            }
             drag_ = Drag::Clip;
             grabOffset_ = frame - clip.start;
             ghostStart_ = clip.start;
@@ -821,6 +884,24 @@ void MainView::mouseDown(float x, float y, bool doubleClick) {
             ghostTrack_ = track;
             return;
         }
+    }
+
+    // Doppelklick auf eine leere Stelle einer MIDI-Spur: neuer Clip von vier
+    // Takten ab dem Taktstrich davor, gleich im Noten-Editor geoeffnet.
+    if (doubleClick && controller_.project().tracks[static_cast<std::size_t>(track)].input != kTrackInputAudio) {
+        const double bar = controller_.framesPerBeat() * 4.0;
+        MidiClipModel clip;
+        clip.name = L"MIDI";
+        clip.start = static_cast<std::int64_t>(std::llround(std::floor(static_cast<double>(frame) / bar) * bar));
+        clip.length = static_cast<std::int64_t>(std::llround(4.0 * bar));
+        const int index = controller_.addMidiClip(track, std::move(clip));
+        if (index >= 0) {
+            selTrack_ = track;
+            selIndex_ = index;
+            selMidi_ = true;
+            pianoRoll_.open(track, index);
+        }
+        return;
     }
 
     // Leere Stelle: Auswahl aufheben und Abspielzeiger setzen.
@@ -863,16 +944,29 @@ void MainView::applyDrag(float x, float y) {
 }
 
 void MainView::mouseMove(float x, float y) {
+    if (editorDrag_) { pianoRoll_.mouseMove(x, y); return; }
     if (drag_ != Drag::None) applyDrag(x, y);
 }
 
 void MainView::mouseUp(float x, float y) {
+    if (editorDrag_) {
+        editorDrag_ = false;
+        pianoRoll_.mouseUp(x, y);
+        return;
+    }
     if (drag_ == Drag::Clip) {
         applyDrag(x, y);
         if (dragMoved_) {
             const int index = selMidi_ ? controller_.moveMidiClip(selTrack_, selIndex_, ghostTrack_, ghostStart_)
                                        : controller_.moveClip(selTrack_, selIndex_, ghostTrack_, ghostStart_);
             if (index >= 0) {
+                // Der Noten-Editor folgt dem verschobenen Clip; andere Indizes koennen sich aendern.
+                const bool editorOnThis = selMidi_ && pianoRoll_.isOpen() && pianoRoll_.track() == selTrack_ &&
+                                          pianoRoll_.index() == selIndex_;
+                if (selMidi_ && pianoRoll_.isOpen() && ghostTrack_ != selTrack_) {
+                    if (editorOnThis) pianoRoll_.open(ghostTrack_, index);
+                    else if (pianoRoll_.track() == selTrack_) pianoRoll_.close();
+                }
                 selTrack_ = ghostTrack_;
                 selIndex_ = index;
             }
@@ -883,7 +977,16 @@ void MainView::mouseUp(float x, float y) {
     dragMoved_ = false;
 }
 
-void MainView::wheel(float x, float y, float notches, bool ctrl) {
+void MainView::wheel(float x, float y, float notches, bool ctrl, bool shift) {
+    if (pianoRoll_.isOpen() && editorRect().contains(x, y)) {
+        pianoRoll_.wheel(x, y, notches, ctrl, shift);
+        return;
+    }
+    // Mausrad ueber dem Tempo: 1 BPM pro Raste.
+    if (kBpmRect.contains(x, y)) {
+        controller_.setBpm(controller_.bpm() + (notches > 0.0f ? 1.0 : -1.0));
+        return;
+    }
     // Mausrad ueber den Feldern am Spurkopf: Eingang oder MIDI-Ausgang weiterschalten.
     if (x < kHeaderW) {
         const int track = rowAt(y);
@@ -918,7 +1021,13 @@ void MainView::key(Key k) {
             engine_.locate(0);
             viewStart_ = 0.0;
             break;
+        case Key::Escape:
+            pianoRoll_.close();
+            break;
         case Key::Delete:
+            // Bei offenem Noten-Editor loescht Entf zuerst die ausgewaehlte Note.
+            if (pianoRoll_.isOpen() && pianoRoll_.deleteSelected()) break;
+            if (selMidi_ && pianoRoll_.isOpen() && pianoRoll_.track() == selTrack_) pianoRoll_.close();
             if (drag_ == Drag::None &&
                 (selMidi_ ? controller_.removeMidiClip(selTrack_, selIndex_)
                           : controller_.removeClip(selTrack_, selIndex_)))

@@ -3,6 +3,7 @@
 #include "engine/Engine.h"
 #include "model/ProjectController.h"
 #include "ui/Canvas.h"
+#include "ui/PianoRoll.h"
 
 #include <array>
 #include <cstdint>
@@ -14,7 +15,7 @@
 
 namespace ui {
 
-enum class Key { Space, Home, Delete, Record };
+enum class Key { Space, Home, Delete, Record, Escape };
 
 // Die gesamte Oberflaeche: Transportleiste, Spurkoepfe, Zeitachse.
 // Kennt kein Fenster. Koordinaten sind geraeteunabhaengige Pixel (96 pro Zoll).
@@ -37,7 +38,9 @@ public:
     void rightMouseDown(float x, float y);
     void mouseMove(float x, float y);
     void mouseUp(float x, float y);
-    void wheel(float x, float y, float notches, bool ctrl);
+    void wheel(float x, float y, float notches, bool ctrl, bool shift = false);
+    // Oeffnet den Noten-Editor fuer einen MIDI-Clip.
+    void openPianoRoll(int track, int index) { pianoRoll_.open(track, index); }
     void key(Key k);
     // Rechnertastatur als Klaviatur: semitone 0 = C. Wirkt nur mit scharfgeschalteter Spur.
     void noteKey(int semitone, bool down);
@@ -62,6 +65,7 @@ private:
     Rect inputRect(int track) const;
     Rect outputRect(int track) const;
     Rect midiOutRect() const;
+    Rect editorRect() const;
 
     // Zeichnen
     void drawTopBar(Canvas& c);
@@ -85,10 +89,13 @@ private:
     bool selectedClip(std::int64_t& start, std::int64_t& length) const;
     std::int64_t snap(std::int64_t start, std::int64_t length, int skipTrack, int skipIndex) const;
     double rulerStep() const;
+    double rulerBeats() const;
     void setStatus(const std::wstring& message);
 
     ProjectController& controller_;
     Engine& engine_;
+    PianoRoll pianoRoll_;
+    bool editorDrag_ = false;  // der laufende Ziehvorgang gehoert dem Noten-Editor
 
     float width_ = 1280.0f, height_ = 800.0f;
     double viewStart_ = 0.0;         // Frame am linken Rand der Zeitachse

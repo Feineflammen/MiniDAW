@@ -68,4 +68,5 @@ struct TrackModel {
 struct Project {
     std::array<TrackModel, kProjectTracks> tracks;
     float masterGain = 1.0f;
+    double bpm = 120.0;  // Tempo fuer Raster und Metronom, Taktart ist 4/4
 };

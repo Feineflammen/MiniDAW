@@ -34,6 +34,7 @@ add_test(NAME engine_test COMMAND engine_test)
 
 # Das Programm selbst gibt es nur fuer Windows.
 if(WIN32)
+    enable_language(RC)
     add_executable(minidaw WIN32
         src/main.cpp
         src/audio/WasapiDevice.cpp
@@ -42,6 +43,9 @@ if(WIN32)
         src/ui/Canvas.cpp
         src/ui/MainView.cpp
         src/ui/MainWindow.cpp
+        src/ui/PianoRoll.cpp
+        src/minidaw.rc
+        src/minidaw.manifest
     )
     target_compile_definitions(minidaw PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(minidaw PRIVATE dawcore ole32 avrt d2d1 dwrite windowscodecs shell32 user32 winmm)

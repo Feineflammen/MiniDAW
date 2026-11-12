@@ -17,7 +17,7 @@ build\Release\minidaw.exe
 
 Tests ausführen: `ctest --test-dir build -C Release --output-on-failure`
 
-Aktueller Stand: Schritt 6b, MIDI-Clips, MIDI-Aufnahme, Kanalwahl je Spur und MIDI-Ausgabe.
+Aktueller Stand: Schritt 6c, Noten-Editor, Tempo, Taktraster und Metronom.
 
 ## Bedienung
 
@@ -41,6 +41,10 @@ Aktueller Stand: Schritt 6b, MIDI-Clips, MIDI-Aufnahme, Kanalwahl je Spur und MI
 | Y / X | Oktave tiefer / höher |
 
 Am Spurkopf rechts stehen zwei Felder: oben der Eingang der Spur (Audio, MIDI alle, MIDI 1 bis 16), unten ihr MIDI-Ausgang (Synth oder MIDI 1 bis 16). Linksklick schaltet weiter, Rechtsklick zurück, das Mausrad geht auch. In der Statusleiste wählt ein Klick auf "MIDI aus" das Ausgabegerät.
+
+Links neben dem Lineal stehen Taktposition, Tempo (Klick +1, Rechtsklick −1, Mausrad) und der Knopf "Klick" für das Metronom.
+
+Noten-Editor: Doppelklick auf einen MIDI-Clip öffnet ihn, Doppelklick auf eine leere Stelle einer MIDI-Spur legt einen neuen Clip von vier Takten an. Klick setzt eine Note, Ziehen verschiebt sie, Ziehen am rechten Rand ändert die Länge, Rechtsklick oder Entf löscht. Unten lässt sich der Anschlag je Note ziehen. Mausrad scrollt durch die Tonhöhen, Umschalt + Mausrad waagerecht, Strg + Mausrad zoomt. Esc oder × schließt.
 
 Unten rechts zeigt eine LED jede eingehende MIDI-Nachricht, daneben steht im Klartext, was ankam (Kanal, Note, Anschlag). Rot bedeutet einen Übertragungsfehler.
 

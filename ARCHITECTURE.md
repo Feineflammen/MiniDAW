@@ -144,6 +144,16 @@ einem kurzen Sprung aus. Sauber löst das erst ASIO oder ein Gerät für beides.
   den Ereignissen stückweise gerechnet. Bei Stopp, Sprung oder neuen Daten
   bekommen klingende Noten ein "Note aus".
 
+### Tempo, Raster, Noten-Editor
+
+- Das Projekt hat ein festes Tempo (BPM) im 4/4-Takt. Es bestimmt Lineal,
+  Raster und Metronom, verschiebt aber keine vorhandenen Noten oder Clips.
+- Das Metronom rechnet die Engine: ein kurzer Klick genau auf jedem Schlag.
+- `ui/PianoRoll` ist der Noten-Editor. Während des Ziehens arbeitet er auf
+  einer Kopie der Noten und übergibt sie beim Loslassen mit
+  `ProjectController::updateMidiClip`. Das Raster richtet sich an der
+  Zeitachse aus, nicht am Clip-Anfang.
+
 ### MIDI-Aufnahme
 
 Der Audio-Thread meldet Live-Noten mit ihrer Zeitachsen-Position über eine
@@ -200,8 +210,8 @@ Windows-Code. Sie bilden die Bibliothek `dawcore`, die auch die Tests benutzen.
 | 4 | Minimale GUI: Spurliste, Timeline, Wellenformen, Transport, Fader | fertig, auf Hardware bedient |
 | 5 | Audio-Aufnahme mit Latenzkorrektur | fertig, mit echtem Eingang getestet; Latenz-Zusatz einstellbar |
 | 6a | MIDI-Eingang, eingebauter Synthesizer, live spielen | fertig, mit Keyboard gespielt |
-| 6b | MIDI-Clips, MIDI-Aufnahme, Kanalwahl je Spur, MIDI-Ausgabegerät | Code und Offline-Tests fertig, Test mit Geräten offen |
-| 6c | Piano Roll, Tempo und Taktraster | offen |
+| 6b | MIDI-Clips, MIDI-Aufnahme, Kanalwahl je Spur, MIDI-Ausgabegerät | Code und Offline-Tests fertig, vom Benutzer NICHT getestet (übersprungen) |
+| 6c | Piano Roll, Tempo, Taktraster, Metronom | Code fertig, per Screenshot geprüft, Bedientest offen |
 | 7 | VST3-Hosting: Laden, Verarbeiten, Editor-Fenster, State | offen |
 | 8 | Mixer komplett: Inserts, Sends, Busse, Pegel, Latenzausgleich | offen |
 | 9 | Projekt speichern und laden, Undo/Redo fertig | offen |

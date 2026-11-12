@@ -1153,6 +1153,51 @@ void testMidiRecording() {
     CHECK(clips.size() == 1);
 }
 
+void testMetronome() {
+    Rig rig;
+    ProjectController controller(*rig.engine);
+    controller.setSampleRate(kRate);
+    controller.setBpm(120.0);  // ein Schlag = 24000 Frames
+    CHECK(controller.framesPerBeat() == 24000.0);
+    controller.setMetronome(true);
+
+    rig.engine->play();
+    std::vector<float> all;
+    for (int b = 0; b < 200; ++b) {  // 51200 Frames: Schlaege bei 0, 24000 und 48000
+        rig.render();
+        all.insert(all.end(), rig.l.begin(), rig.l.end());
+    }
+    const auto loud = [&](std::size_t from, std::size_t to) {
+        float peak = 0.0f;
+        for (std::size_t i = from; i < to; ++i) peak = std::max(peak, std::fabs(all[i]));
+        return peak;
+    };
+    CHECK(loud(0, 1000) > 0.1f);
+    CHECK(loud(2000, 23999) == 0.0f);     // zwischen den Schlaegen still
+    CHECK(all[23999] == 0.0f);
+    CHECK(loud(24000, 25000) > 0.1f);     // der Klick beginnt genau auf dem Schlag
+    CHECK(loud(26000, 47999) == 0.0f);
+    CHECK(loud(48000, 49000) > 0.1f);
+
+    // Abgeschaltet: still.
+    controller.setMetronome(false);
+    rig.engine->locate(0);
+    rig.render();
+    const auto [pl, pr] = rig.render();
+    CHECK(pl == 0.0f && pr == 0.0f);
+
+    // Noten eines Clips ersetzen.
+    MidiClipModel clip;
+    clip.start = 0;
+    clip.length = 1000;
+    CHECK(controller.addMidiClip(0, clip) == 0);
+    CHECK(controller.updateMidiClip(0, 0, {{500, 100, 64, 90}, {0, 100, 60, 100}}, 2000));
+    const auto& stored = controller.project().tracks[0].midiClips[0];
+    CHECK(stored.length == 2000 && stored.notes.size() == 2);
+    CHECK(stored.notes[0].pitch == 60 && stored.notes[1].pitch == 64);  // nach Zeit sortiert
+    CHECK(!controller.updateMidiClip(0, 3, {}, 100));
+}
+
 }  // namespace
 
 int main() {
@@ -1182,6 +1227,7 @@ int main() {
     testMidiChannels();
     testMidiClipPlayback();
     testMidiRecording();
+    testMetronome();
     {
         std::error_code ec;
         std::filesystem::remove_all(tempFile("minidaw_test_aufnahmen"), ec);

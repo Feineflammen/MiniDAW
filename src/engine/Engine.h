@@ -75,6 +75,11 @@ public:
     bool setTrackSolo(int track, bool solo) noexcept;
     bool setMasterGain(float gain) noexcept;
 
+    // Tempo in Schlaegen pro Minute (nur fuer das Metronom) und Metronom an/aus.
+    // Das Metronom klickt waehrend der Wiedergabe auf jedem Schlag, betont auf der Eins (4/4).
+    bool setTempo(double bpm) noexcept;
+    bool setMetronome(bool on) noexcept;
+
     // Testton als Quelle einer Spur (fuer Tests). 0 Hz schaltet ihn aus.
     bool setTrackTestTone(int track, float hz) noexcept;
 
@@ -164,6 +169,7 @@ private:
         MasterGain,
         ArmTrack, InputMonitor, Record, RecordMidi,
         TrackMidiInput, TrackMidiOutput, TrackMidiSequence,
+        Tempo, Metronome,
     };
 
     struct Command {
@@ -244,6 +250,12 @@ private:
     int armedTrack_ = -1;
     bool monitor_ = false;
     bool midiRecording_ = false;
+    double tempo_ = 120.0;
+    bool metronome_ = false;
+    int clickRemaining_ = 0;   // noch zu spielende Frames des aktuellen Klicks
+    int clickLength_ = 1;
+    double clickPhase_ = 0.0;
+    double clickPhaseInc_ = 0.0;
     RecordSink* recordSink_ = nullptr;
     const float* inL_ = nullptr;  // Eingang des aktuellen Blocks oder nullptr
     const float* inR_ = nullptr;

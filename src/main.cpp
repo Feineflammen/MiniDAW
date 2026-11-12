@@ -115,6 +115,7 @@ int runScreenshot(const std::filesystem::path& output) {
     view.setMidiInfo(L"Beispiel-Keyboard");
     engine->postMidi(MidiMessage::noteOn(60, 100, 0));
     view.selectClip(1, 0);
+    view.openPianoRoll(5, 0);
     view.tick();
 
     std::string error;

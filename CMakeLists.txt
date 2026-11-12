@@ -11,11 +11,13 @@ else()
     add_compile_options(-Wall -Wextra)
 endif()
 
-# Plattformunabhaengiger Kern: Engine und Hilfsklassen.
+# Plattformunabhaengiger Kern: Engine, Dateien, Projektmodell.
 add_library(dawcore STATIC
     src/engine/Engine.cpp
+    src/disk/PeakData.cpp
     src/disk/TrackStream.cpp
     src/disk/WavFile.cpp
+    src/model/ProjectController.cpp
 )
 target_include_directories(dawcore PUBLIC src)
 find_package(Threads REQUIRED)
@@ -30,10 +32,13 @@ add_test(NAME engine_test COMMAND engine_test)
 
 # Das Programm selbst gibt es nur fuer Windows.
 if(WIN32)
-    add_executable(minidaw
+    add_executable(minidaw WIN32
         src/main.cpp
         src/audio/WasapiDevice.cpp
+        src/ui/Canvas.cpp
+        src/ui/MainView.cpp
+        src/ui/MainWindow.cpp
     )
-    target_compile_definitions(minidaw PRIVATE UNICODE _UNICODE)
-    target_link_libraries(minidaw PRIVATE dawcore ole32 avrt)
+    target_compile_definitions(minidaw PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(minidaw PRIVATE dawcore ole32 avrt d2d1 dwrite windowscodecs shell32 user32)
 endif()

@@ -9,7 +9,16 @@ jobs:
       - run: cmake -B build
       - run: cmake --build build --config Release
       - run: ctest --test-dir build -C Release --output-on-failure
+      - name: Oberflaeche in ein Bild zeichnen
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath build\Release\minidaw.exe -ArgumentList '--screenshot','screenshot.png' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Screenshot fehlgeschlagen, Code $($p.ExitCode)" }
       - uses: actions/upload-artifact@v6
         with:
           name: minidaw
           path: build/Release/minidaw.exe
+      - uses: actions/upload-artifact@v6
+        with:
+          name: screenshot
+          path: screenshot.png

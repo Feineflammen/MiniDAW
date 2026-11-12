@@ -1,188 +1,163 @@
-// Schritt 3: WAV-Dateien als Clips abspielen, bedient ueber die Konsole.
+// Schritt 4: grafische Oberflaeche.
+//
+// Aufruf ohne Argumente startet die DAW.
+// "minidaw --screenshot bild.png" zeichnet die Oberflaeche mit Beispieldaten
+// in eine Datei, ohne Fenster und ohne Audiogeraet (fuer automatische Pruefungen).
 
 #include "audio/WasapiDevice.h"
 #include "disk/DiskThread.h"
 #include "disk/WavFile.h"
 #include "engine/Engine.h"
+#include "model/ProjectController.h"
+#include "ui/MainView.h"
+#include "ui/MainWindow.h"
 
-#include <fcntl.h>
-#include <io.h>
+#include <windows.h>
 #include <objbase.h>
+#include <shellapi.h>
 
-#include <array>
 #include <cmath>
-#include <cstdio>
+#include <cwchar>
 #include <filesystem>
-#include <iostream>
 #include <memory>
-#include <sstream>
 #include <string>
+#include <vector>
 
 namespace {
 
-void printHelp() {
-    std::cout << "Befehle (Spuren zaehlen von 1 bis " << Engine::kNumTracks << "):\n"
-                 "  l <spur> <datei>  WAV-Datei auf die Spur legen (Datei ins Fenster ziehen geht)\n"
-                 "  l <spur>          Spur leeren\n"
-                 "  p                 Play / Stop\n"
-                 "  z                 zurueck zum Anfang\n"
-                 "  j <sekunden>      zu einer Position springen\n"
-                 "  m <spur>          Mute umschalten\n"
-                 "  s <spur>          Solo umschalten\n"
-                 "  g <spur> <wert>   Lautstaerke der Spur, 1.0 = 0 dB\n"
-                 "  a <spur> <wert>   Panorama, -1 = links, 1 = rechts\n"
-                 "  v <wert>          Master-Lautstaerke\n"
-                 "  t <spur> <hz>     Testton setzen, 0 = aus\n"
-                 "  i                 Position, Pegel und Aussetzer anzeigen\n"
-                 "  h                 diese Hilfe\n"
-                 "  q                 beenden\n";
+void showError(const std::string& text) {
+    const std::wstring wide(text.begin(), text.end());
+    MessageBoxW(nullptr, wide.c_str(), L"MiniDAW", MB_OK | MB_ICONERROR);
 }
 
-double toDb(float linear) {
-    return linear > 0.00001f ? 20.0 * std::log10(static_cast<double>(linear)) : -100.0;
-}
-
-void printInfo(Engine& engine, double sampleRate) {
-    std::printf("%s  Position %.2f s  Master %.1f dB  Aussetzer %u\n",
-                engine.isPlaying() ? "Play" : "Stop",
-                static_cast<double>(engine.position()) / sampleRate,
-                toDb(engine.takeMasterPeak()),
-                engine.underruns());
-    for (int t = 0; t < Engine::kNumTracks; ++t) {
-        const float peak = engine.takeTrackPeak(t);
-        if (peak > 0.0f) std::printf("  Spur %2d  %.1f dB\n", t + 1, toDb(peak));
+// Erzeugt eine kurze Beispieldatei: Tonfolge mit abklingenden Noten.
+std::filesystem::path makeDemoFile(const wchar_t* name, double baseHz, double seconds, int rate) {
+    const auto frames = static_cast<std::int64_t>(seconds * rate);
+    std::vector<float> data(static_cast<std::size_t>(frames) * 2);
+    const double noteLength = 0.5;
+    for (std::int64_t i = 0; i < frames; ++i) {
+        const double t = static_cast<double>(i) / rate;
+        const int note = static_cast<int>(t / noteLength);
+        const double inNote = t - note * noteLength;
+        const double hz = baseHz * (1.0 + 0.25 * (note % 4));
+        const double env = std::exp(-inNote * 5.0) * std::min(1.0, inNote * 200.0);
+        const auto s = static_cast<float>(0.7 * env * std::sin(6.283185307179586 * hz * t));
+        data[static_cast<std::size_t>(2 * i)] = s;
+        data[static_cast<std::size_t>(2 * i + 1)] = s;
     }
+    const auto path = std::filesystem::temp_directory_path() / name;
+    std::string error;
+    writeWav(path, data.data(), frames, 2, rate, WavFormat::Pcm16, error);
+    return path;
 }
 
-// Entfernt Leerraum und umschliessende Anfuehrungszeichen.
-std::wstring cleanPath(std::wstring text) {
-    const auto isSpace = [](wchar_t c) { return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n'; };
-    while (!text.empty() && isSpace(text.back())) text.pop_back();
-    std::size_t first = 0;
-    while (first < text.size() && isSpace(text[first])) ++first;
-    text.erase(0, first);
-    if (text.size() >= 2 && text.front() == L'"' && text.back() == L'"')
-        text = text.substr(1, text.size() - 2);
-    return text;
-}
+int runScreenshot(const std::filesystem::path& output) {
+    constexpr int kRate = 44100;
+    constexpr int kBlock = 512;
 
-bool loadFile(Engine& engine, int track, const std::wstring& pathText, double deviceRate) {
-    if (pathText.empty()) {
-        std::cout << "Spur " << track << " geleert.\n";
-        return engine.setTrackPlaylist(track - 1, {});
+    auto engine = std::make_unique<Engine>();
+    engine->prepare(kRate, 2, kBlock);
+    ProjectController controller(*engine);
+    controller.setSampleRate(kRate);
+
+    const auto drums = makeDemoFile(L"minidaw_demo_a.wav", 110.0, 8.0, kRate);
+    const auto bass = makeDemoFile(L"minidaw_demo_b.wav", 55.0, 6.0, kRate);
+    const auto lead = makeDemoFile(L"minidaw_demo_c.wav", 440.0, 4.0, kRate);
+
+    std::string message;
+    controller.addClip(0, drums, 0, message);
+    controller.addClip(1, bass, kRate * 2, message);
+    controller.addClip(2, lead, 0, message);
+    controller.addClip(2, lead, kRate * 6, message);
+    controller.addClip(4, drums, kRate * 9, message);
+    controller.setTrackGain(0, 0.5f);
+    controller.setTrackPan(1, -0.6f);
+    controller.setTrackPan(2, 0.6f);
+    controller.setTrackMute(4, true);
+    controller.setTrackSolo(5, false);
+
+    while (!controller.peaksIdle()) Sleep(10);
+
+    // Ein Stueck abspielen, damit Abspielzeiger und Pegel etwas zeigen.
+    std::vector<float> left(kBlock), right(kBlock);
+    float* out[2] = {left.data(), right.data()};
+    while (engine->serviceDisk()) {}
+    engine->process(out, 2, kBlock);
+    engine->play();
+    for (int i = 0; i < 280; ++i) {
+        while (engine->serviceDisk()) {}
+        engine->process(out, 2, kBlock);
     }
+
+    ui::MainView view(controller, *engine);
+    view.setDeviceInfo(L"Screenshot-Modus, 44100 Hz");
+    view.selectClip(1, 0);
+    view.tick();
 
     std::string error;
-    auto wav = WavFile::open(std::filesystem::path(pathText), error);
-    if (!wav) {
-        std::cout << "Laden fehlgeschlagen: " << error << "\n";
-        return true;
+    const bool ok = ui::renderToPng(view, 1300, 840, output, error);
+
+    std::error_code ec;
+    for (const auto& file : {drums, bass, lead}) std::filesystem::remove(file, ec);
+    return ok ? 0 : 2;
+}
+
+int runApp(HINSTANCE instance, int showCommand) {
+    auto engine = std::make_unique<Engine>();
+    WasapiDevice device;
+    DiskThread disk;
+    std::string error;
+
+    if (!device.open(error)) {
+        showError("Audiogeraet nicht verfuegbar: " + error);
+        return 1;
     }
 
-    std::printf("Spur %d: %d Hz, %d Bit%s, %d Kanal/Kanaele, %.2f s\n", track, wav->sampleRate(),
-                wav->bitsPerSample(), wav->isFloat() ? " Float" : "", wav->channels(),
-                static_cast<double>(wav->frames()) / wav->sampleRate());
-    if (std::fabs(wav->sampleRate() - deviceRate) > 0.5) {
-        std::printf("Achtung: Das Geraet laeuft mit %.0f Hz. Die Datei klingt deshalb zu %s.\n"
-                    "Eine Umrechnung der Samplerate gibt es noch nicht.\n",
-                    deviceRate, wav->sampleRate() < deviceRate ? "hoch und schnell" : "tief und langsam");
-    }
+    ProjectController controller(*engine);
+    controller.setSampleRate(device.sampleRate());
 
-    const std::int64_t frames = wav->frames();
-    return engine.setTrackPlaylist(track - 1, {Clip{std::move(wav), 0, 0, frames, 1.0f}});
+    if (!device.start(*engine, error)) {
+        showError("Audio-Start fehlgeschlagen: " + error);
+        return 1;
+    }
+    disk.start(*engine);
+
+    ui::MainView view(controller, *engine);
+    wchar_t info[128];
+    std::swprintf(info, 128, L"%.0f Hz, Puffer %d Frames (%.1f ms)", device.sampleRate(),
+                  device.periodFrames(), 1000.0 * device.periodFrames() / device.sampleRate());
+    view.setDeviceInfo(info);
+
+    ui::MainWindow window(view);
+    if (!window.create(instance, showCommand, error)) {
+        showError(error);
+        return 1;
+    }
+    const int result = window.run();
+
+    device.stop();
+    disk.stop();
+    return result;
 }
 
 }  // namespace
 
-int main() {
-    if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
-        std::cerr << "COM nicht initialisierbar\n";
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
+        showError("COM nicht initialisierbar");
         return 1;
     }
 
-    // Eingabe als UTF-16 lesen, damit Dateipfade mit Umlauten funktionieren.
-    _setmode(_fileno(stdin), _O_U16TEXT);
-
     int result = 0;
-    {
-        WasapiDevice device;
-        DiskThread disk;
-        auto engine = std::make_unique<Engine>();
-        std::string error;
-
-        if (!device.open(error) || !device.start(*engine, error)) {
-            std::cerr << "Fehler: " << error << "\n";
-            result = 1;
-        } else {
-            disk.start(*engine);
-            const double rate = device.sampleRate();
-            std::cout << "Geraet: " << rate << " Hz, " << device.numChannels()
-                      << " Kanaele, Periode " << device.periodFrames() << " Frames\n\n";
-            printHelp();
-
-            std::array<bool, Engine::kNumTracks> mute{};
-            std::array<bool, Engine::kNumTracks> solo{};
-
-            std::wstring line;
-            while (std::cout << "> " << std::flush && std::getline(std::wcin, line)) {
-                std::wistringstream in(line);
-                std::wstring cmd;
-                if (!(in >> cmd)) continue;
-
-                int track = 0;
-                float value = 0.0f;
-                bool ok = true;
-                const auto trackValid = [&] { return track >= 1 && track <= Engine::kNumTracks; };
-
-                if (cmd == L"q") {
-                    break;
-                } else if (cmd == L"h") {
-                    printHelp();
-                } else if (cmd == L"p") {
-                    ok = engine->isPlaying() ? engine->stop() : engine->play();
-                } else if (cmd == L"z") {
-                    ok = engine->locate(0);
-                } else if (cmd == L"j" && (in >> value)) {
-                    ok = engine->locate(static_cast<std::int64_t>(static_cast<double>(value) * rate));
-                } else if (cmd == L"i") {
-                    printInfo(*engine, rate);
-                } else if (cmd == L"l" && (in >> track)) {
-                    std::wstring rest;
-                    std::getline(in, rest);
-                    ok = trackValid() && loadFile(*engine, track, cleanPath(rest), rate);
-                } else if (cmd == L"v" && (in >> value)) {
-                    ok = engine->setMasterGain(value);
-                } else if (cmd == L"m" && (in >> track) && trackValid()) {
-                    auto& state = mute[static_cast<std::size_t>(track - 1)];
-                    state = !state;
-                    ok = engine->setTrackMute(track - 1, state);
-                    std::cout << "Spur " << track << (state ? " stumm\n" : " hoerbar\n");
-                } else if (cmd == L"s" && (in >> track) && trackValid()) {
-                    auto& state = solo[static_cast<std::size_t>(track - 1)];
-                    state = !state;
-                    ok = engine->setTrackSolo(track - 1, state);
-                    std::cout << "Spur " << track << (state ? " solo an\n" : " solo aus\n");
-                } else if (cmd == L"g" && (in >> track >> value)) {
-                    ok = engine->setTrackGain(track - 1, value);
-                } else if (cmd == L"a" && (in >> track >> value)) {
-                    ok = engine->setTrackPan(track - 1, value);
-                } else if (cmd == L"t" && (in >> track >> value)) {
-                    ok = engine->setTrackTestTone(track - 1, value);
-                } else {
-                    std::cout << "Unbekannter Befehl, h zeigt die Hilfe.\n";
-                }
-
-                if (!ok) std::cout << "Befehl nicht angenommen (Spurnummer pruefen).\n";
-                if (device.failed()) {
-                    std::cerr << "Der Audio-Thread wurde durch einen Geraetefehler beendet.\n";
-                    result = 1;
-                    break;
-                }
-            }
-            device.stop();
-            disk.stop();
-        }
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (argv && argc >= 3 && std::wcscmp(argv[1], L"--screenshot") == 0) {
+        result = runScreenshot(argv[2]);
+    } else {
+        result = runApp(instance, showCommand);
     }
+    if (argv) LocalFree(argv);
 
     CoUninitialize();
     return result;

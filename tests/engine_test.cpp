@@ -3,6 +3,7 @@
 #include "disk/DiskThread.h"
 #include "disk/WavFile.h"
 #include "engine/Engine.h"
+#include "model/ProjectController.h"
 #include "util/SpscQueue.h"
 
 #include <algorithm>
@@ -522,6 +523,104 @@ void testThreadedSeeking() {
     CHECK(exactBlocks > 200);
 }
 
+// --- Uebersichtsdaten und Projektmodell --------------------------------------
+
+void testPeakData() {
+    auto source = makeSource();
+    if (!source) return;
+    PeakData peaks(source->frames());
+    CHECK(peaks.count == static_cast<std::size_t>((kSourceFrames + 255) / 256));
+
+    std::atomic<bool> cancel{false};
+    buildPeaks(*source, peaks, cancel);
+    CHECK(peaks.complete());
+
+    // Stichproben gegen direkt berechnete Werte, einschliesslich des letzten (kurzen) Abschnitts.
+    bool ok = true;
+    for (const std::size_t b : {std::size_t{0}, std::size_t{7}, std::size_t{500}, peaks.count - 1}) {
+        float lo = 0.0f, hi = 0.0f;
+        for (std::int64_t i = static_cast<std::int64_t>(b) * 256;
+             i < std::min<std::int64_t>(kSourceFrames, static_cast<std::int64_t>(b + 1) * 256); ++i) {
+            lo = std::min({lo, sourceL(i), sourceR(i)});
+            hi = std::max({hi, sourceL(i), sourceR(i)});
+        }
+        if (std::fabs(peaks.lo[b] - lo) > 1e-6f || std::fabs(peaks.hi[b] - hi) > 1e-6f) ok = false;
+    }
+    CHECK(ok);
+}
+
+void testProjectController() {
+    makeSource();  // legt die Testdatei an
+    const auto path = tempFile("minidaw_test_source.wav");
+
+    Rig rig;
+    ProjectController controller(*rig.engine);
+    controller.setSampleRate(kRate);
+
+    std::string message;
+    CHECK(!controller.addClip(0, tempFile("minidaw_gibt_es_nicht.wav"), 0, message));
+    CHECK(!message.empty());
+    CHECK(!controller.addClip(99, path, 0, message));
+
+    CHECK(controller.addClip(0, path, 1024, message));
+    CHECK(message.empty());  // Samplerate passt, kein Hinweis
+    CHECK(controller.addClip(0, path, 400000, message));
+    CHECK(controller.project().tracks[0].clips.size() == 2);
+    CHECK(controller.projectLength() == 400000 + kSourceFrames);
+    // Dieselbe Datei wird nur einmal geoeffnet.
+    CHECK(controller.project().tracks[0].clips[0].file == controller.project().tracks[0].clips[1].file);
+
+    // Der erste Clip muss so klingen, wie das Modell es sagt.
+    Expected expected = [](std::int64_t p) -> std::int64_t {
+        return (p >= 1024 && p < 1024 + kSourceFrames) ? p - 1024 : -1;
+    };
+    rig.service();
+    rig.render();
+    rig.engine->play();
+    rig.render();
+    std::int64_t pos = kBlock;
+    bool allExact = true;
+    for (int b = 0; b < 12; ++b, pos += kBlock) {
+        rig.service();
+        if (!renderAndCompare(rig, pos, expected).exact) allExact = false;
+    }
+    CHECK(allExact);
+
+    // Auf eine andere Spur verschieben: Modell und Klang folgen.
+    const int index = controller.moveClip(0, 0, 3, 2048);
+    CHECK(index == 0);
+    CHECK(controller.project().tracks[0].clips.size() == 1);
+    CHECK(controller.project().tracks[3].clips.size() == 1);
+    CHECK(controller.project().tracks[3].clips[0].start == 2048);
+    CHECK(controller.moveClip(0, 5, 1, 0) == -1);
+
+    expected = [](std::int64_t p) -> std::int64_t { return p >= 2048 ? p - 2048 : -1; };
+    int exactBlocks = 0;
+    bool allValid = true;
+    for (int b = 0; b < 8; ++b, pos += kBlock) {
+        rig.service();
+        const BlockResult r = renderAndCompare(rig, pos, expected);
+        if (!r.valid) allValid = false;
+        if (r.exact) ++exactBlocks;
+    }
+    CHECK(allValid);
+    CHECK(exactBlocks >= 5);
+
+    controller.setTrackMute(3, true);
+    CHECK(controller.project().tracks[3].mute);
+    rig.service();
+    rig.render();
+    const auto [pl, pr] = rig.render();
+    CHECK(pl == 0.0f && pr == 0.0f);
+
+    CHECK(controller.removeClip(3, 0));
+    CHECK(!controller.removeClip(3, 0));
+    CHECK(controller.project().tracks[3].clips.empty());
+
+    while (!controller.peaksIdle()) std::this_thread::yield();
+    CHECK(controller.project().tracks[0].clips[0].file->peaks->complete());
+}
+
 }  // namespace
 
 int main() {
@@ -541,6 +640,8 @@ int main() {
     testUnderrunRecovery();
     testPlaylistChangeWhilePlaying();
     testThreadedSeeking();
+    testPeakData();
+    testProjectController();
     {
         std::error_code ec;
         std::filesystem::remove(tempFile("minidaw_test_source.wav"), ec);

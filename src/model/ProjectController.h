@@ -52,6 +52,16 @@ public:
     // wird eine Aufnahme nach vorn geschoben, damit sie zum Gehoerten passt.
     void setLatencyProvider(std::function<std::int64_t()> provider) { latencyProvider_ = std::move(provider); }
 
+    // Vom Benutzer eingestellter Zusatz zur geschaetzten Latenz, in Millisekunden.
+    // Positiv schiebt Aufnahmen weiter nach vorn. Gleicht Soundkarten aus,
+    // deren Treiber eine falsche Latenz melden.
+    void setRecordOffsetMs(int ms) noexcept { recordOffsetMs_ = ms < -500 ? -500 : ms > 500 ? 500 : ms; }
+    int recordOffsetMs() const noexcept { return recordOffsetMs_; }
+    // Vom Geraet gemeldete Latenz in Frames (ohne den Zusatz).
+    std::int64_t estimatedLatencyFrames() const;
+    // Um so viel werden Aufnahmen tatsaechlich verschoben.
+    std::int64_t appliedLatencyFrames() const;
+
     // Schaltet eine Spur fuer die Aufnahme scharf, -1 = keine. Immer nur eine Spur.
     void armTrack(int track);
     int armedTrack() const noexcept { return armedTrack_; }
@@ -93,6 +103,7 @@ private:
     int inputChannels_ = 0;
     int armedTrack_ = -1;
     bool monitor_ = false;
+    int recordOffsetMs_ = 0;
     std::filesystem::path recordingFolder_;
     std::function<std::int64_t()> latencyProvider_;
     std::shared_ptr<RecordSink> recordSink_;

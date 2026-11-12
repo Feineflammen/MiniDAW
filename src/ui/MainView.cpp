@@ -24,6 +24,9 @@ const Rect kMasterLabelRect{298.0f, 8.0f, 50.0f, 28.0f};
 const Rect kMasterRect{350.0f, 15.0f, 150.0f, 14.0f};
 const Rect kMasterMeterRect{512.0f, 18.0f, 100.0f, 8.0f};
 const Rect kMonitorRect{690.0f, 8.0f, 76.0f, 28.0f};
+const Rect kLatencyMinusRect{778.0f, 12.0f, 20.0f, 20.0f};
+const Rect kLatencyTextRect{800.0f, 8.0f, 112.0f, 28.0f};
+const Rect kLatencyPlusRect{914.0f, 12.0f, 20.0f, 20.0f};
 
 // Farben
 constexpr Color kBg = rgb(0x1B1C1F);
@@ -256,9 +259,25 @@ void MainView::drawTopBar(Canvas& c) {
     c.fillRounded(kMonitorRect, 4.0f, monitor ? kAccent : kButton);
     c.text(L"Mith\u00F6ren", kMonitorRect, monitor ? kDark : kTextDim, Font::Normal, Align::Center);
 
+    // Aufnahme-Latenz: angewendeter Wert, in Klammern der eingestellte Zusatz.
+    c.fillRounded(kLatencyMinusRect, 3.0f, kButton);
+    c.text(L"\u2212", kLatencyMinusRect, kText, Font::Normal, Align::Center);
+    c.fillRounded(kLatencyPlusRect, 3.0f, kButton);
+    c.text(L"+", kLatencyPlusRect, kText, Font::Normal, Align::Center);
+    {
+        const double ms = 1000.0 * static_cast<double>(controller_.appliedLatencyFrames()) / controller_.sampleRate();
+        wchar_t label[64];
+        if (controller_.recordOffsetMs() != 0)
+            std::swprintf(label, 64, L"Latenz %.0f ms (%+d)", ms, controller_.recordOffsetMs());
+        else
+            std::swprintf(label, 64, L"Latenz %.0f ms", ms);
+        c.text(label, kLatencyTextRect, controller_.recordOffsetMs() != 0 ? kText : kTextDim, Font::Small,
+               Align::Center);
+    }
+
     // Rechts: Meldung oder Geraeteinfo mit Aussetzer-Zaehler.
-    const Rect right{kMonitorRect.right() + 14.0f, 8.0f,
-                     std::max(0.0f, width_ - kMonitorRect.right() - 24.0f), 28.0f};
+    const Rect right{kLatencyPlusRect.right() + 14.0f, 8.0f,
+                     std::max(0.0f, width_ - kLatencyPlusRect.right() - 24.0f), 28.0f};
     if (!status_.empty()) {
         c.text(status_, right, kMuteOn, Font::Normal, Align::Right);
     } else {
@@ -502,6 +521,12 @@ void MainView::mouseDown(float x, float y, bool doubleClick) {
             toggleRecord();
         } else if (kMonitorRect.contains(x, y)) {
             controller_.setMonitor(!controller_.monitor());
+        } else if (kLatencyMinusRect.contains(x, y)) {
+            controller_.setRecordOffsetMs(controller_.recordOffsetMs() - 5);
+        } else if (kLatencyPlusRect.contains(x, y)) {
+            controller_.setRecordOffsetMs(controller_.recordOffsetMs() + 5);
+        } else if (kLatencyTextRect.contains(x, y) && doubleClick) {
+            controller_.setRecordOffsetMs(0);
         } else if (x >= kMasterRect.x - 6.0f && x < kMasterRect.right() + 6.0f) {
             if (doubleClick) {
                 controller_.setMasterGain(1.0f);
@@ -632,7 +657,12 @@ void MainView::mouseUp(float x, float y) {
     dragMoved_ = false;
 }
 
-void MainView::wheel(float x, float /*y*/, float notches, bool ctrl) {
+void MainView::wheel(float x, float y, float notches, bool ctrl) {
+    // Mausrad ueber der Latenz-Anzeige: in Schritten von 1 ms verstellen.
+    if (y < kTopH && x >= kLatencyMinusRect.x && x < kLatencyPlusRect.right()) {
+        controller_.setRecordOffsetMs(controller_.recordOffsetMs() + (notches > 0.0f ? 1 : -1));
+        return;
+    }
     if (ctrl) {
         // Zoomen um die Mausposition.
         const float anchorX = std::max(x, kHeaderW);

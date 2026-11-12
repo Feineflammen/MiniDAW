@@ -124,6 +124,15 @@ void ProjectController::setMasterGain(float gain) {
 
 // --- Aufnahme ----------------------------------------------------------------
 
+std::int64_t ProjectController::estimatedLatencyFrames() const {
+    return latencyProvider_ ? std::max<std::int64_t>(0, latencyProvider_()) : 0;
+}
+
+std::int64_t ProjectController::appliedLatencyFrames() const {
+    const auto offset = static_cast<std::int64_t>(recordOffsetMs_ * sampleRate_ / 1000.0);
+    return std::max<std::int64_t>(0, estimatedLatencyFrames() + offset);
+}
+
 void ProjectController::armTrack(int track) {
     if (track != -1 && !validTrack(track)) return;
     if (recordSink_) return;  // waehrend der Aufnahme nicht umschalten
@@ -214,7 +223,7 @@ bool ProjectController::poll(std::string& message) {
 
     // Um die Latenz nach vorn schieben: Was aufgenommen wurde, gehoert zu dem,
     // was der Spieler in dem Moment gehoert hat.
-    const std::int64_t latency = latencyProvider_ ? std::max<std::int64_t>(0, latencyProvider_()) : 0;
+    const std::int64_t latency = appliedLatencyFrames();
     ClipModel clip;
     clip.start = sink->startPosition() - latency;
     clip.offset = 0;

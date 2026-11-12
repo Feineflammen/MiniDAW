@@ -18,8 +18,10 @@
 #include <shlobj.h>
 
 #include <cmath>
+#include <cstdlib>
 #include <cwchar>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -104,6 +106,40 @@ int runScreenshot(const std::filesystem::path& output) {
     return ok ? 0 : 2;
 }
 
+// Einstellungen, die zum Rechner gehoeren und nicht zum Projekt, liegen als
+// einfache Textdatei unter %APPDATA%\MiniDAW.
+std::filesystem::path settingsPath() {
+    std::filesystem::path path;
+    PWSTR appData = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &appData)) && appData)
+        path = std::filesystem::path(appData) / L"MiniDAW" / L"einstellungen.txt";
+    if (appData) CoTaskMemFree(appData);
+    return path;
+}
+
+void loadSettings(ProjectController& controller) {
+    const auto path = settingsPath();
+    if (path.empty()) return;
+    std::ifstream in(path);
+    std::string line;
+    while (std::getline(in, line)) {
+        const auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        const std::string key = line.substr(0, eq);
+        const std::string value = line.substr(eq + 1);
+        if (key == "aufnahme_versatz_ms") controller.setRecordOffsetMs(std::atoi(value.c_str()));
+    }
+}
+
+void saveSettings(const ProjectController& controller) {
+    const auto path = settingsPath();
+    if (path.empty()) return;
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    std::ofstream out(path, std::ios::trunc);
+    out << "aufnahme_versatz_ms=" << controller.recordOffsetMs() << "\n";
+}
+
 int runApp(HINSTANCE instance, int showCommand) {
     auto engine = std::make_unique<Engine>();
     WasapiDevice device;
@@ -121,6 +157,8 @@ int runApp(HINSTANCE instance, int showCommand) {
     controller.setLatencyProvider([&device] {
         return static_cast<std::int64_t>(device.inputLatencyFrames() + device.outputLatencyFrames());
     });
+
+    loadSettings(controller);
 
     // Aufnahmen landen unter Dokumente\MiniDAW\Aufnahmen.
     PWSTR documents = nullptr;
@@ -155,6 +193,7 @@ int runApp(HINSTANCE instance, int showCommand) {
         return 1;
     }
     const int result = window.run();
+    saveSettings(controller);
 
     // Reihenfolge: erst den Audio-Thread anhalten, dann eine laufende Aufnahme
     // abschliessen (dafuer muss der Disk-Thread noch laufen), dann den Disk-Thread.

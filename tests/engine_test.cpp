@@ -807,6 +807,28 @@ void testControllerRecording() {
         CHECK(clips[1].file != clips[0].file);
     }
 
+    // Der einstellbare Zusatz verschiebt weiter: 1000 Frames + 10 ms (480 Frames).
+    controller.setRecordOffsetMs(10);
+    CHECK(controller.estimatedLatencyFrames() == 1000);
+    CHECK(controller.appliedLatencyFrames() == 1480);
+    rig.engine->locate(200000);
+    renderWithInput(rig, counter);
+    CHECK(controller.startRecording(message));
+    for (int b = 0; b < 4; ++b) {
+        renderWithInput(rig, counter);
+        rig.service();
+    }
+    rig.engine->stop();
+    renderWithInput(rig, counter);
+    rig.service();
+    CHECK(controller.poll(message));
+    CHECK(clips.size() == 3);
+    if (clips.size() == 3) CHECK(clips[2].start == 200000 - 1480);
+    controller.setRecordOffsetMs(-5000);  // wird begrenzt, Latenz nie negativ
+    CHECK(controller.recordOffsetMs() == -500);
+    CHECK(controller.appliedLatencyFrames() == 0);
+    controller.setRecordOffsetMs(0);
+
     // Beenden waehrend einer laufenden Aufnahme hinterlaesst einen Clip.
     CHECK(controller.startRecording(message));
     for (int b = 0; b < 5; ++b) renderWithInput(rig, counter);
@@ -815,7 +837,7 @@ void testControllerRecording() {
     controller.finishRecordingOnShutdown();
     disk.stop();
     CHECK(!controller.isRecording());
-    CHECK(clips.size() == 3);
+    CHECK(clips.size() == 4);
 
     while (!controller.peaksIdle()) std::this_thread::yield();
 }

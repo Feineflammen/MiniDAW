@@ -17,7 +17,7 @@ build\Release\minidaw.exe
 
 Tests ausführen: `ctest --test-dir build -C Release --output-on-failure`
 
-Aktueller Stand: Schritt 6a, MIDI live spielen mit eingebautem Synthesizer.
+Aktueller Stand: Schritt 6b, MIDI-Clips, MIDI-Aufnahme, Kanalwahl je Spur und MIDI-Ausgabe.
 
 ## Bedienung
 
@@ -39,6 +39,8 @@ Aktueller Stand: Schritt 6a, MIDI live spielen mit eingebautem Synthesizer.
 | Tasten A S D F G H J K L | weiße Tasten ab C auf der scharfgeschalteten Spur |
 | Tasten W E T Z U O | schwarze Tasten |
 | Y / X | Oktave tiefer / höher |
+
+Am Spurkopf rechts stehen zwei Felder: oben der Eingang der Spur (Audio, MIDI alle, MIDI 1 bis 16), unten ihr MIDI-Ausgang (Synth oder MIDI 1 bis 16). Linksklick schaltet weiter, Rechtsklick zurück, das Mausrad geht auch. In der Statusleiste wählt ein Klick auf "MIDI aus" das Ausgabegerät.
 
 Unten rechts zeigt eine LED jede eingehende MIDI-Nachricht, daneben steht im Klartext, was ankam (Kanal, Note, Anschlag). Rot bedeutet einen Übertragungsfehler.
 

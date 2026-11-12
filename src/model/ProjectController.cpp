@@ -122,6 +122,116 @@ void ProjectController::setMasterGain(float gain) {
     engine_.setMasterGain(gain);
 }
 
+// --- MIDI --------------------------------------------------------------------
+
+void ProjectController::setTrackInput(int track, int input) {
+    if (!validTrack(track) || input < kTrackInputAudio || input > 15) return;
+    if (isRecording()) return;
+    project_.tracks[static_cast<std::size_t>(track)].input = input;
+    engine_.setTrackMidiInput(track, input);
+}
+
+void ProjectController::setTrackMidiOutput(int track, int output) {
+    if (!validTrack(track) || output < kTrackOutputSynth || output > 15) return;
+    project_.tracks[static_cast<std::size_t>(track)].midiOutput = output;
+    engine_.setTrackMidiOutput(track, output);
+}
+
+int ProjectController::addMidiClip(int track, MidiClipModel clip) {
+    if (!validTrack(track) || clip.length <= 0) return -1;
+    clip.start = std::max<std::int64_t>(0, clip.start);
+    auto& clips = project_.tracks[static_cast<std::size_t>(track)].midiClips;
+    clips.push_back(std::move(clip));
+    syncMidi(track);
+    return static_cast<int>(clips.size()) - 1;
+}
+
+int ProjectController::moveMidiClip(int track, int index, int newTrack, std::int64_t newStart) {
+    if (!validTrack(track) || !validTrack(newTrack)) return -1;
+    auto& from = project_.tracks[static_cast<std::size_t>(track)].midiClips;
+    if (index < 0 || index >= static_cast<int>(from.size())) return -1;
+
+    newStart = std::max<std::int64_t>(0, newStart);
+    if (newTrack == track) {
+        from[static_cast<std::size_t>(index)].start = newStart;
+        syncMidi(track);
+        return index;
+    }
+    MidiClipModel clip = std::move(from[static_cast<std::size_t>(index)]);
+    from.erase(from.begin() + index);
+    clip.start = newStart;
+    auto& to = project_.tracks[static_cast<std::size_t>(newTrack)].midiClips;
+    to.push_back(std::move(clip));
+    syncMidi(track);
+    syncMidi(newTrack);
+    return static_cast<int>(to.size()) - 1;
+}
+
+bool ProjectController::removeMidiClip(int track, int index) {
+    if (!validTrack(track)) return false;
+    auto& clips = project_.tracks[static_cast<std::size_t>(track)].midiClips;
+    if (index < 0 || index >= static_cast<int>(clips.size())) return false;
+    clips.erase(clips.begin() + index);
+    syncMidi(track);
+    return true;
+}
+
+// Baut aus allen MIDI-Clips der Spur die sortierte Ereignisliste fuer die Engine.
+void ProjectController::syncMidi(int track) {
+    const auto& clips = project_.tracks[static_cast<std::size_t>(track)].midiClips;
+    if (clips.empty()) {
+        engine_.setTrackMidiSequence(track, nullptr);
+        return;
+    }
+    auto sequence = std::make_unique<MidiSequence>();
+    for (const auto& clip : clips) {
+        for (const auto& note : clip.notes) {
+            if (note.start < 0 || note.start >= clip.length || note.length <= 0) continue;
+            // Noten enden spaetestens am Clip-Ende.
+            const std::int64_t on = clip.start + note.start;
+            const std::int64_t off = clip.start + std::min(note.start + note.length, clip.length);
+            sequence->events.push_back({on, MidiMessage::noteOn(note.pitch, std::max<int>(1, note.velocity))});
+            sequence->events.push_back({off, MidiMessage::noteOff(note.pitch)});
+        }
+    }
+    // Nach Zeit; bei gleicher Zeit erst "Note aus", damit Tonwiederholungen neu anschlagen.
+    std::stable_sort(sequence->events.begin(), sequence->events.end(),
+                     [](const MidiSequence::Event& a, const MidiSequence::Event& b) {
+                         if (a.frame != b.frame) return a.frame < b.frame;
+                         return a.message.isNoteOff() && !b.message.isNoteOff();
+                     });
+    engine_.setTrackMidiSequence(track, std::move(sequence));
+}
+
+// Schliesst die MIDI-Aufnahme ab: offene Noten beenden, Clip anlegen.
+void ProjectController::finishMidiRecording(std::int64_t end) {
+    const int track = recordTrack_;
+    midiRecording_ = false;
+    recordTrack_ = -1;
+    if (!midiRecordBegun_) return;
+    midiRecordBegun_ = false;
+
+    const std::int64_t length = std::max<std::int64_t>(1, end - midiRecordStart_);
+    for (int pitch = 0; pitch < 128; ++pitch) {
+        OpenNote& open = midiRecordOpen_[static_cast<std::size_t>(pitch)];
+        if (!open.open) continue;
+        midiRecordNotes_.push_back({open.start, std::max<std::int64_t>(1, length - open.start),
+                                    static_cast<std::uint8_t>(pitch), open.velocity});
+        open.open = false;
+    }
+    if (midiRecordNotes_.empty() || !validTrack(track)) return;
+
+    MidiClipModel clip;
+    clip.name = L"MIDI";
+    clip.start = midiRecordStart_;
+    clip.length = length;
+    clip.notes = std::move(midiRecordNotes_);
+    midiRecordNotes_.clear();
+    std::sort(clip.notes.begin(), clip.notes.end(),
+              [](const MidiNote& a, const MidiNote& b) { return a.start < b.start; });
+    addMidiClip(track, std::move(clip));
+}
+
 // --- Aufnahme ----------------------------------------------------------------
 
 std::int64_t ProjectController::estimatedLatencyFrames() const {
@@ -147,12 +257,26 @@ void ProjectController::setMonitor(bool on) {
 
 bool ProjectController::startRecording(std::string& message) {
     message.clear();
-    if (recordSink_) { message = "Es l\u00E4uft bereits eine Aufnahme."; return false; }
-    if (inputChannels_ < 1) { message = "Kein Audio-Eingang verf\u00FCgbar."; return false; }
+    if (isRecording()) { message = "Es l\u00E4uft bereits eine Aufnahme."; return false; }
     if (!validTrack(armedTrack_)) {
         message = "Keine Spur scharfgeschaltet. Erst R an einer Spur anklicken.";
         return false;
     }
+
+    // Spur mit MIDI-Eingang: Es werden Noten aufgenommen, keine Audiodatei.
+    if (project_.tracks[static_cast<std::size_t>(armedTrack_)].input != kTrackInputAudio) {
+        MidiRecordEvent stale;
+        while (engine_.popMidiRecord(stale)) {}
+        midiRecordNotes_.clear();
+        midiRecordOpen_ = {};
+        midiRecordBegun_ = false;
+        if (!engine_.recordMidi()) { message = "Aufnahme lie\u00DF sich nicht starten."; return false; }
+        midiRecording_ = true;
+        recordTrack_ = armedTrack_;
+        return true;
+    }
+
+    if (inputChannels_ < 1) { message = "Kein Audio-Eingang verf\u00FCgbar."; return false; }
     if (recordingFolder_.empty()) { message = "Kein Aufnahmeordner festgelegt."; return false; }
 
     std::error_code ec;
@@ -194,6 +318,12 @@ bool ProjectController::startRecording(std::string& message) {
 }
 
 bool ProjectController::recordProgress(std::int64_t& start, std::int64_t& frames) const noexcept {
+    if (midiRecording_) {
+        if (!midiRecordBegun_) return false;
+        start = midiRecordStart_;
+        frames = std::max<std::int64_t>(0, engine_.position() - midiRecordStart_);
+        return true;
+    }
     if (!recordSink_ || !recordSink_->started()) return false;
     start = recordSink_->startPosition();
     frames = recordSink_->framesCaptured();
@@ -202,6 +332,38 @@ bool ProjectController::recordProgress(std::int64_t& start, std::int64_t& frames
 
 bool ProjectController::poll(std::string& message) {
     message.clear();
+    engine_.collectGarbage();
+
+    // MIDI-Aufnahme: Ereignisse abholen, Noten zusammensetzen, am Ende den Clip anlegen.
+    if (midiRecording_) {
+        MidiRecordEvent e;
+        while (midiRecording_ && engine_.popMidiRecord(e)) {
+            if (e.kind == MidiRecordEvent::Kind::Begin) {
+                midiRecordBegun_ = true;
+                midiRecordStart_ = e.position;
+            } else if (e.kind == MidiRecordEvent::Kind::End) {
+                const std::size_t before = validTrack(recordTrack_)
+                    ? project_.tracks[static_cast<std::size_t>(recordTrack_)].midiClips.size() : 0;
+                const int track = recordTrack_;
+                finishMidiRecording(e.position);
+                return validTrack(track) &&
+                       project_.tracks[static_cast<std::size_t>(track)].midiClips.size() != before;
+            } else if (midiRecordBegun_) {
+                const std::int64_t at = std::max<std::int64_t>(0, e.position - midiRecordStart_);
+                OpenNote& open = midiRecordOpen_[e.message.data1];
+                if (e.message.isNoteOn() || e.message.isNoteOff()) {
+                    if (open.open) {  // vorherige Note auf dieser Taste abschliessen
+                        midiRecordNotes_.push_back({open.start, std::max<std::int64_t>(1, at - open.start),
+                                                    e.message.data1, open.velocity});
+                        open.open = false;
+                    }
+                    if (e.message.isNoteOn()) open = {true, at, e.message.data2};
+                }
+            }
+        }
+        return false;
+    }
+
     if (!recordSink_ || !recordSink_->done()) return false;
 
     // Die Datei ist fertig geschrieben: Aufnahme abschliessen und Clip anlegen.
@@ -245,6 +407,7 @@ bool ProjectController::poll(std::string& message) {
 }
 
 void ProjectController::finishRecordingOnShutdown() {
+    midiRecording_ = false;  // eine laufende MIDI-Aufnahme wird verworfen
     if (!recordSink_) return;
     recordSink_->finish();  // der Audio-Thread laeuft nicht mehr, also darf das hier passieren
     std::string message;

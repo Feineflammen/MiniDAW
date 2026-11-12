@@ -14,19 +14,54 @@
 #include <mutex>
 #include <vector>
 
+// Fertig aufbereitete MIDI-Daten einer Spur: alle Ereignisse ihrer MIDI-Clips,
+// nach Zeit sortiert. Wird vom UI-Thread gebaut und danach nicht mehr geaendert.
+struct MidiSequence {
+    struct Event {
+        std::int64_t frame = 0;  // Position auf der Zeitachse
+        MidiMessage message;
+    };
+    std::vector<Event> events;
+};
+
+// Eine MIDI-Nachricht fuer ein externes Geraet, mit dem Zeitpunkt, zu dem sie
+// gesendet werden soll (Mikrosekunden der std::chrono::steady_clock).
+struct MidiOutEvent {
+    MidiMessage message;
+    std::int64_t dueMicros = 0;
+};
+
+// Was der Audio-Thread waehrend einer MIDI-Aufnahme an die UI meldet.
+struct MidiRecordEvent {
+    enum class Kind : std::uint8_t { Message, Begin, End };
+    Kind kind = Kind::Message;
+    MidiMessage message;
+    std::int64_t position = 0;  // Zeitachse, bereits um die Latenz korrigiert
+};
+
 // Die Engine rechnet das Audio. Sie kennt kein Audiogeraet: Sie bekommt nur
 // "rechne N Samples" und laesst sich deshalb auch offline betreiben.
 //
-// Drei Seiten:
+// Die Seiten:
 //  - UI-Thread: die Methoden im ersten Block. Sie schicken Kommandos ueber eine
 //    lock-freie Queue und lesen Zustand ueber Atomics. Genau EIN Thread darf sie rufen.
 //  - Disk-Thread: serviceDisk() liest die Audiodateien der Clips vor und
 //    schreibt laufende Aufnahmen.
+//  - MIDI-Ausgabe-Thread: popMidiOut().
 //  - Audio-Thread: prepare() und process().
 class Engine final : public AudioCallback {
 public:
     static constexpr int kNumTracks = 16;
     static constexpr float kTestToneLevel = 0.15f;
+
+    // Werte fuer den MIDI-Eingang einer Spur; 0..15 waehlt einen einzelnen Kanal.
+    static constexpr int kInputAudio = -2;    // Spur nimmt Audio auf und ignoriert MIDI
+    static constexpr int kInputMidiAll = -1;  // MIDI von allen Kanaelen
+    // Wert fuer den MIDI-Ausgang einer Spur; 0..15 sendet auf diesem Kanal an das MIDI-Geraet.
+    static constexpr int kOutputSynth = -1;
+
+    Engine() = default;
+    ~Engine() override;
 
     // --- UI-Thread -------------------------------------------------------
     // Alle Setter liefern false, wenn der Index ungueltig oder die Queue voll ist.
@@ -46,10 +81,22 @@ public:
     // Ersetzt die Audio-Clips einer Spur. Wirkt, sobald der Disk-Thread sie uebernimmt.
     bool setTrackPlaylist(int track, Playlist playlist);
 
+    // MIDI-Eingang (kInputAudio, kInputMidiAll oder Kanal 0..15) und
+    // MIDI-Ausgang (kOutputSynth oder Kanal 0..15) einer Spur.
+    bool setTrackMidiInput(int track, int input) noexcept;
+    bool setTrackMidiOutput(int track, int output) noexcept;
+
+    // Ersetzt die MIDI-Daten einer Spur (nullptr = keine). Die Engine uebernimmt
+    // den Besitz; die alte Fassung kommt ueber collectGarbage() zurueck.
+    bool setTrackMidiSequence(int track, std::unique_ptr<MidiSequence> sequence);
+    // Gibt Objekte frei, die der Audio-Thread nicht mehr braucht. Regelmaessig rufen.
+    void collectGarbage();
+
     // Live-MIDI (Keyboard, Rechnertastatur) fuer die scharfgeschaltete Spur.
     // Darf als einzige Methode aus mehreren Threads gerufen werden, zum
     // Beispiel aus dem Rueckruf des MIDI-Treibers; nie aus dem Audio-Thread.
-    bool postMidi(MidiMessage message);
+    // fromKeyboard: Nachricht der Rechnertastatur, sie umgeht den Kanalfilter.
+    bool postMidi(MidiMessage message, bool fromKeyboard = false);
     // Meldet eine fehlerhafte Nachricht vom MIDI-Treiber (nur fuer die Anzeige).
     void reportMidiError() noexcept { midiErrors_.fetch_add(1, std::memory_order_relaxed); }
 
@@ -63,7 +110,7 @@ public:
                 static_cast<std::uint8_t>((packed >> 16) & 0xFF)};
     }
 
-    // Spur, die den Eingang bekommt (Pegelanzeige, Mithoeren). -1 = keine.
+    // Spur, die den Eingang bekommt (Pegelanzeige, Mithoeren, Live-MIDI). -1 = keine.
     bool setArmedTrack(int track) noexcept;
     // Eingang ueber die scharfgeschaltete Spur mithoeren.
     bool setInputMonitor(bool on) noexcept;
@@ -73,6 +120,16 @@ public:
     // releaseRecordSink().
     bool record(std::shared_ptr<RecordSink> sink);
     void releaseRecordSink();
+
+    // Startet die Wiedergabe und nimmt das Live-MIDI der scharfgeschalteten
+    // Spur auf, bis stop() kommt. Die Ereignisse holt popMidiRecord() ab.
+    bool recordMidi() noexcept;
+    bool popMidiRecord(MidiRecordEvent& event) noexcept { return midiRecordOut_.pop(event); }
+
+    // Ausgangslatenz des Audiogeraets in Frames. MIDI an externe Geraete wird
+    // um diese Zeit verzoegert gesendet, damit es zum hoerbaren Audio passt;
+    // aufgenommenes MIDI wird um sie nach vorn geschoben.
+    void setOutputLatencyFrames(int frames) noexcept { outputLatency_.store(frames, std::memory_order_relaxed); }
 
     // Anzahl der Bloecke, in denen einer Spur Daten von der Platte fehlten.
     std::uint32_t underruns() const noexcept { return underruns_.load(std::memory_order_relaxed); }
@@ -92,6 +149,9 @@ public:
     // gerufen, in Tests direkt.
     bool serviceDisk();
 
+    // --- MIDI-Ausgabe-Thread ---------------------------------------------
+    bool popMidiOut(MidiOutEvent& event) noexcept { return midiOut_.pop(event); }
+
     // --- Audio-Thread ----------------------------------------------------
     void prepare(double sampleRate, int numInputs, int numOutputs, int maxFrames) override;
     void process(const float* const* in, int numInputs, float* const* out, int numOutputs,
@@ -102,7 +162,8 @@ private:
         Play, Stop, Locate,
         TrackGain, TrackPan, TrackMute, TrackSolo, TrackTestTone,
         MasterGain,
-        ArmTrack, InputMonitor, Record,
+        ArmTrack, InputMonitor, Record, RecordMidi,
+        TrackMidiInput, TrackMidiOutput, TrackMidiSequence,
     };
 
     struct Command {
@@ -111,6 +172,7 @@ private:
         float value = 0.0f;
         std::int64_t position = 0;
         RecordSink* sink = nullptr;
+        const MidiSequence* sequence = nullptr;
     };
 
     struct Track {
@@ -126,22 +188,48 @@ private:
         float toneHz = 0.0f;
         double phase = 0.0;
         double phaseInc = 0.0;
+        // MIDI
+        int midiInput = kInputAudio;
+        int midiOutput = kOutputSynth;
+        const MidiSequence* sequence = nullptr;
+        std::size_t seqIndex = 0;        // naechstes Ereignis der Sequenz
+        std::int64_t seqNextPos = -1;    // Position, an der die Wiedergabe fortsetzt
+        bool seqDirty = false;           // Sequenz wurde ersetzt
+        std::array<std::uint64_t, 2> held{};  // klingende Noten aus der Sequenz
+    };
+
+    struct LiveMidi {
+        MidiMessage message;
+        bool keyboard = false;
+        std::int64_t micros = 0;  // Zeitpunkt des Eingangs
+    };
+
+    struct BlockEvent {
+        int offset = 0;  // Frame innerhalb des Blocks
+        MidiMessage message;
     };
 
     bool send(const Command& c) noexcept { return commands_.push(c); }
     void drainCommands() noexcept;
     void updateTargets() noexcept;
-    void renderBlock(int numFrames) noexcept;
+    void renderBlock(int numFrames, std::int64_t blockMicros) noexcept;
+    int gatherMidi(std::size_t trackIndex, int numFrames, std::int64_t blockMicros) noexcept;
+    void silenceTrack(std::size_t trackIndex, std::int64_t dueMicros) noexcept;
 
     SpscQueue<Command, 1024> commands_;
+    SpscQueue<const MidiSequence*, 256> garbage_;  // Audio -> UI: nicht mehr benoetigt
 
     // Live-MIDI: mehrere Absender teilen sich die Schreibseite ueber einen Mutex,
     // der Audio-Thread liest ohne Sperre.
-    SpscQueue<MidiMessage, 1024> midiIn_;
+    SpscQueue<LiveMidi, 1024> midiIn_;
     std::mutex midiPostMutex_;
     std::atomic<std::uint32_t> midiCount_{0};
     std::atomic<std::uint32_t> midiErrors_{0};
     std::atomic<std::uint32_t> lastMidi_{0};
+
+    SpscQueue<MidiOutEvent, 4096> midiOut_;              // Audio -> MIDI-Ausgabe-Thread
+    SpscQueue<MidiRecordEvent, 4096> midiRecordOut_;     // Audio -> UI
+    std::atomic<int> outputLatency_{0};
 
     // Zustand des Audio-Threads
     double sampleRate_ = 48000.0;
@@ -155,6 +243,7 @@ private:
     std::int64_t position_ = 0;
     int armedTrack_ = -1;
     bool monitor_ = false;
+    bool midiRecording_ = false;
     RecordSink* recordSink_ = nullptr;
     const float* inL_ = nullptr;  // Eingang des aktuellen Blocks oder nullptr
     const float* inR_ = nullptr;
@@ -162,8 +251,9 @@ private:
     std::vector<float> trackL_, trackR_;
     std::array<TrackStream, kNumTracks> streams_;
     std::array<Synth, kNumTracks> synths_;
-    std::array<MidiMessage, 128> liveMidi_{};  // Nachrichten fuer den naechsten Block
+    std::array<LiveMidi, 128> liveMidi_{};  // Nachrichten fuer den naechsten Block
     int liveMidiCount_ = 0;
+    std::array<BlockEvent, 256> blockEvents_{};
 
     // Rueckkanal zur UI
     std::atomic<std::int64_t> positionOut_{0};

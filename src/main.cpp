@@ -9,6 +9,7 @@
 #include "disk/WavFile.h"
 #include "engine/Engine.h"
 #include "midi/MidiInput.h"
+#include "midi/MidiOutput.h"
 #include "model/ProjectController.h"
 #include "ui/MainView.h"
 #include "ui/MainWindow.h"
@@ -81,6 +82,21 @@ int runScreenshot(const std::filesystem::path& output) {
     controller.setInputChannels(2);
     controller.armTrack(3);
 
+    // Beispiel fuer MIDI: ein Clip mit einer kleinen Tonfolge, verschiedene Kanaleinstellungen.
+    MidiClipModel midiClip;
+    midiClip.name = L"MIDI";
+    midiClip.start = kRate * 1;
+    midiClip.length = kRate * 6;
+    const int pitches[] = {57, 60, 64, 67, 69, 67, 64, 60, 57, 62, 65, 69};
+    for (int i = 0; i < 12; ++i)
+        midiClip.notes.push_back({static_cast<std::int64_t>(i) * kRate / 2, kRate * 2 / 5,
+                                  static_cast<std::uint8_t>(pitches[i]), 100});
+    controller.addMidiClip(5, midiClip);
+    controller.setTrackInput(5, kTrackInputMidiAll);
+    controller.setTrackInput(6, 2);
+    controller.setTrackMidiOutput(6, 9);
+    controller.setTrackInput(3, kTrackInputMidiAll);
+
     while (!controller.peaksIdle()) Sleep(10);
 
     // Ein Stueck abspielen, damit Abspielzeiger und Pegel etwas zeigen.
@@ -120,28 +136,56 @@ std::filesystem::path settingsPath() {
     return path;
 }
 
-void loadSettings(ProjectController& controller) {
+std::string toUtf8(const std::wstring& text) {
+    if (text.empty()) return {};
+    const int size = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0,
+                                         nullptr, nullptr);
+    std::string out(static_cast<std::size_t>(size), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), size, nullptr, nullptr);
+    return out;
+}
+
+std::wstring fromUtf8(const std::string& text) {
+    if (text.empty()) return {};
+    const int size = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    std::wstring out(static_cast<std::size_t>(size), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), size);
+    return out;
+}
+
+struct Settings {
+    int recordOffsetMs = 0;
+    std::wstring midiOutput;  // Name des MIDI-Ausgabegeraets, leer = keins
+};
+
+Settings loadSettings() {
+    Settings settings;
     const auto path = settingsPath();
-    if (path.empty()) return;
+    if (path.empty()) return settings;
     std::ifstream in(path);
     std::string line;
     while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
         const auto eq = line.find('=');
         if (eq == std::string::npos) continue;
         const std::string key = line.substr(0, eq);
         const std::string value = line.substr(eq + 1);
-        if (key == "aufnahme_versatz_ms") controller.setRecordOffsetMs(std::atoi(value.c_str()));
+        if (key == "aufnahme_versatz_ms") settings.recordOffsetMs = std::atoi(value.c_str());
+        else if (key == "midi_ausgang") settings.midiOutput = fromUtf8(value);
     }
+    return settings;
 }
 
-void saveSettings(const ProjectController& controller) {
+void saveSettings(const Settings& settings) {
     const auto path = settingsPath();
     if (path.empty()) return;
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
     std::ofstream out(path, std::ios::trunc);
-    out << "aufnahme_versatz_ms=" << controller.recordOffsetMs() << "\n";
+    out << "aufnahme_versatz_ms=" << settings.recordOffsetMs << "\n"
+        << "midi_ausgang=" << toUtf8(settings.midiOutput) << "\n";
 }
+
 
 int runApp(HINSTANCE instance, int showCommand) {
     auto engine = std::make_unique<Engine>();
@@ -161,7 +205,9 @@ int runApp(HINSTANCE instance, int showCommand) {
         return static_cast<std::int64_t>(device.inputLatencyFrames() + device.outputLatencyFrames());
     });
 
-    loadSettings(controller);
+    Settings settings = loadSettings();
+    controller.setRecordOffsetMs(settings.recordOffsetMs);
+    engine->setOutputLatencyFrames(device.outputLatencyFrames());
 
     // Aufnahmen landen unter Dokumente\MiniDAW\Aufnahmen.
     PWSTR documents = nullptr;
@@ -178,6 +224,8 @@ int runApp(HINSTANCE instance, int showCommand) {
 
     MidiInput midi(*engine);
     midi.open();
+    MidiOutput midiOut(*engine);
+    if (!settings.midiOutput.empty()) midiOut.select(settings.midiOutput);
 
     ui::MainView view(controller, *engine);
     wchar_t info[160];
@@ -193,6 +241,11 @@ int runApp(HINSTANCE instance, int showCommand) {
     }
     view.setDeviceInfo(deviceInfo);
     view.setMidiInfo(midi.summary());
+    view.setMidiOutInfo(midiOut.current());
+    view.onCycleMidiOut = [&midiOut, &view] {
+        midiOut.cycle();
+        view.setMidiOutInfo(midiOut.current());
+    };
 
     ui::MainWindow window(view);
     // MIDI-Geraete, die spaeter angesteckt oder abgezogen werden, neu erkennen.
@@ -204,7 +257,9 @@ int runApp(HINSTANCE instance, int showCommand) {
         return 1;
     }
     const int result = window.run();
-    saveSettings(controller);
+    settings.recordOffsetMs = controller.recordOffsetMs();
+    settings.midiOutput = midiOut.current();
+    saveSettings(settings);
     midi.close();
 
     // Reihenfolge: erst den Audio-Thread anhalten, dann eine laufende Aufnahme

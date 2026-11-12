@@ -1,6 +1,7 @@
 #include "engine/Engine.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <utility>
@@ -17,7 +18,27 @@ void raisePeak(std::atomic<float>& peak, float value) noexcept {
         peak.store(value, std::memory_order_relaxed);
 }
 
+// Zeit einer gleichmaessig laufenden Uhr in Mikrosekunden. Wartet nie.
+std::int64_t nowMicros() noexcept {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+MidiMessage onChannel(MidiMessage m, int channel) noexcept {
+    m.status = static_cast<std::uint8_t>((m.status & 0xF0) | (channel & 0x0F));
+    return m;
+}
+
 }  // namespace
+
+Engine::~Engine() {
+    // Alles freigeben, was noch an MIDI-Sequenzen unterwegs ist.
+    for (auto& t : tracks_) delete t.sequence;
+    Command c;
+    while (commands_.pop(c)) delete c.sequence;
+    collectGarbage();
+}
 
 // --- UI-Thread ---------------------------------------------------------------
 
@@ -65,14 +86,42 @@ bool Engine::setTrackPlaylist(int track, Playlist playlist) {
     return true;
 }
 
-bool Engine::postMidi(MidiMessage message) {
+bool Engine::setTrackMidiInput(int track, int input) noexcept {
+    if (!validTrack(track) || input < kInputAudio || input > 15) return false;
+    Command c{CommandType::TrackMidiInput, track};
+    c.position = input;
+    return send(c);
+}
+
+bool Engine::setTrackMidiOutput(int track, int output) noexcept {
+    if (!validTrack(track) || output < kOutputSynth || output > 15) return false;
+    Command c{CommandType::TrackMidiOutput, track};
+    c.position = output;
+    return send(c);
+}
+
+bool Engine::setTrackMidiSequence(int track, std::unique_ptr<MidiSequence> sequence) {
+    if (!validTrack(track)) return false;
+    Command c{CommandType::TrackMidiSequence, track};
+    c.sequence = sequence.release();
+    if (send(c)) return true;
+    delete c.sequence;
+    return false;
+}
+
+void Engine::collectGarbage() {
+    const MidiSequence* old = nullptr;
+    while (garbage_.pop(old)) delete old;
+}
+
+bool Engine::postMidi(MidiMessage message, bool fromKeyboard) {
     std::lock_guard<std::mutex> lock(midiPostMutex_);
     lastMidi_.store(static_cast<std::uint32_t>(message.status) |
                         (static_cast<std::uint32_t>(message.data1) << 8) |
                         (static_cast<std::uint32_t>(message.data2) << 16),
                     std::memory_order_relaxed);
     midiCount_.fetch_add(1, std::memory_order_relaxed);
-    return midiIn_.push(message);
+    return midiIn_.push({message, fromKeyboard, nowMicros()});
 }
 
 bool Engine::setArmedTrack(int track) noexcept {
@@ -101,6 +150,8 @@ void Engine::releaseRecordSink() {
     std::lock_guard<std::mutex> lock(sinkMutex_);
     diskSink_.reset();
 }
+
+bool Engine::recordMidi() noexcept { return send({CommandType::RecordMidi}); }
 
 float Engine::takeTrackPeak(int track) noexcept {
     if (!validTrack(track)) return 0.0f;
@@ -144,6 +195,8 @@ void Engine::prepare(double sampleRate, int /*numInputs*/, int /*numOutputs*/, i
     for (auto& t : tracks_) {
         t.phase = 0.0;
         t.phaseInc = kTwoPi * static_cast<double>(t.toneHz) / sampleRate_;
+        t.held = {};
+        t.seqDirty = true;
     }
     for (auto& synth : synths_) synth.prepare(sampleRate);
     liveMidiCount_ = 0;
@@ -153,7 +206,22 @@ void Engine::prepare(double sampleRate, int /*numInputs*/, int /*numOutputs*/, i
     transportCur_ = wantPlay_ ? 1.0f : 0.0f;
 }
 
+// Laesst alles verstummen, was die Spur gerade per MIDI spielt.
+void Engine::silenceTrack(std::size_t ti, std::int64_t dueMicros) noexcept {
+    Track& t = tracks_[ti];
+    if (t.midiOutput == kOutputSynth) {
+        synths_[ti].allNotesOff();
+    } else {
+        for (int note = 0; note < 128; ++note)
+            if (t.held[static_cast<std::size_t>(note >> 6)] & (std::uint64_t{1} << (note & 63)))
+                midiOut_.push({onChannel(MidiMessage::noteOff(note), t.midiOutput), dueMicros});
+        midiOut_.push({MidiMessage::allNotesOff(t.midiOutput), dueMicros});
+    }
+    t.held = {};
+}
+
 void Engine::drainCommands() noexcept {
+    const std::int64_t now = nowMicros();
     bool mixChanged = false;
     Command c;
     while (commands_.pop(c)) {
@@ -168,6 +236,10 @@ void Engine::drainCommands() noexcept {
                 if (recordSink_) {
                     recordSink_->finish();
                     recordSink_ = nullptr;
+                }
+                if (midiRecording_) {
+                    midiRecordOut_.push({MidiRecordEvent::Kind::End, {}, position_});
+                    midiRecording_ = false;
                 }
                 break;
             case CommandType::Locate:
@@ -196,9 +268,9 @@ void Engine::drainCommands() noexcept {
                 masterGain_ = c.value;
                 break;
             case CommandType::ArmTrack:
-                // Gehaltene Noten der bisherigen Spur ausklingen lassen.
+                // Gehaltene Noten der bisherigen Spur verstummen lassen.
                 if (validTrack(armedTrack_) && armedTrack_ != c.track)
-                    synths_[static_cast<std::size_t>(armedTrack_)].allNotesOff();
+                    silenceTrack(static_cast<std::size_t>(armedTrack_), now);
                 armedTrack_ = c.track;
                 break;
             case CommandType::InputMonitor:
@@ -210,12 +282,39 @@ void Engine::drainCommands() noexcept {
                 wantPlay_ = true;
                 rolling_ = true;
                 break;
+            case CommandType::RecordMidi:
+                if (!midiRecording_) {
+                    midiRecording_ = true;
+                    midiRecordOut_.push({MidiRecordEvent::Kind::Begin, {}, position_});
+                }
+                wantPlay_ = true;
+                rolling_ = true;
+                break;
+            case CommandType::TrackMidiInput:
+                if (t) t->midiInput = static_cast<int>(c.position);
+                break;
+            case CommandType::TrackMidiOutput:
+                if (t && t->midiOutput != static_cast<int>(c.position)) {
+                    silenceTrack(static_cast<std::size_t>(c.track), now);  // am bisherigen Ziel
+                    t->midiOutput = static_cast<int>(c.position);
+                    t->seqDirty = true;
+                }
+                break;
+            case CommandType::TrackMidiSequence:
+                if (t) {
+                    if (t->sequence) garbage_.push(t->sequence);  // gibt der UI-Thread frei
+                    t->sequence = c.sequence;
+                    t->seqDirty = true;
+                } else if (c.sequence) {
+                    garbage_.push(c.sequence);
+                }
+                break;
         }
     }
     if (mixChanged) updateTargets();
 
-    // Live-MIDI einsammeln; angewendet wird es am Anfang des naechsten Blocks.
-    MidiMessage m;
+    // Live-MIDI einsammeln; verteilt wird es im naechsten Block.
+    LiveMidi m;
     while (liveMidiCount_ < static_cast<int>(liveMidi_.size()) && midiIn_.pop(m))
         liveMidi_[static_cast<std::size_t>(liveMidiCount_++)] = m;
 }
@@ -237,7 +336,74 @@ void Engine::updateTargets() noexcept {
     }
 }
 
-void Engine::renderBlock(int numFrames) noexcept {
+// Sammelt die MIDI-Ereignisse einer Spur fuer diesen Block nach blockEvents_,
+// nach Zeit geordnet: live gespielte Noten (am Blockanfang) und die Noten aus
+// den MIDI-Clips (samplegenau). Liefert die Anzahl.
+int Engine::gatherMidi(std::size_t ti, int numFrames, std::int64_t blockMicros) noexcept {
+    Track& t = tracks_[ti];
+    int count = 0;
+    const auto add = [&](int offset, MidiMessage m) {
+        if (count >= static_cast<int>(blockEvents_.size())) return false;
+        blockEvents_[static_cast<std::size_t>(count++)] = {offset, m};
+        return true;
+    };
+    const auto releaseHeld = [&] {
+        for (int note = 0; note < 128; ++note)
+            if (t.held[static_cast<std::size_t>(note >> 6)] & (std::uint64_t{1} << (note & 63)))
+                add(0, MidiMessage::noteOff(note));
+        t.held = {};
+    };
+    const bool anyHeld = (t.held[0] | t.held[1]) != 0;
+
+    // Live-MIDI: nur fuer die scharfgeschaltete Spur und nur, wenn der Kanal passt.
+    if (static_cast<int>(ti) == armedTrack_ && t.midiInput != kInputAudio) {
+        const double framesPerMicro = sampleRate_ / 1'000'000.0;
+        for (int i = 0; i < liveMidiCount_; ++i) {
+            const LiveMidi& live = liveMidi_[static_cast<std::size_t>(i)];
+            const int channel = live.message.status & 0x0F;
+            if (!live.keyboard && t.midiInput != kInputMidiAll && channel != t.midiInput) continue;
+            add(0, live.message);
+
+            if (midiRecording_) {
+                // Zeitachsen-Position der Note: Sie kam etwas vor diesem Block an,
+                // und der Spieler hoert alles um die Ausgangslatenz verzoegert.
+                const std::int64_t age = std::clamp<std::int64_t>(blockMicros - live.micros, 0, 200'000);
+                const auto ageFrames = static_cast<std::int64_t>(static_cast<double>(age) * framesPerMicro);
+                const std::int64_t pos = position_ - ageFrames - outputLatency_.load(std::memory_order_relaxed);
+                midiRecordOut_.push({MidiRecordEvent::Kind::Message, live.message, pos});
+            }
+        }
+    }
+
+    // Noten aus den MIDI-Clips.
+    if (rolling_ && wantPlay_ && t.sequence) {
+        const auto& events = t.sequence->events;
+        if (t.seqDirty || t.seqNextPos != position_) {
+            // Sprung oder neue Daten: klingende Noten beenden und neu einsetzen.
+            if (anyHeld) releaseHeld();
+            const auto it = std::lower_bound(
+                events.begin(), events.end(), position_,
+                [](const MidiSequence::Event& e, std::int64_t pos) { return e.frame < pos; });
+            t.seqIndex = static_cast<std::size_t>(it - events.begin());
+            t.seqDirty = false;
+        }
+        const std::int64_t end = position_ + numFrames;
+        while (t.seqIndex < events.size() && events[t.seqIndex].frame < end) {
+            const MidiSequence::Event& e = events[t.seqIndex++];
+            if (!add(static_cast<int>(e.frame - position_), e.message)) continue;
+            const auto word = static_cast<std::size_t>(e.message.data1 >> 6);
+            const std::uint64_t bit = std::uint64_t{1} << (e.message.data1 & 63);
+            if (e.message.isNoteOn()) t.held[word] |= bit;
+            else if (e.message.isNoteOff()) t.held[word] &= ~bit;
+        }
+        t.seqNextPos = end;
+    } else if (anyHeld) {
+        releaseHeld();  // Stopp oder keine Daten mehr
+    }
+    return count;
+}
+
+void Engine::renderBlock(int numFrames, std::int64_t blockMicros) noexcept {
     float* L = masterL_.data();
     float* R = masterR_.data();
     const std::size_t bytes = static_cast<std::size_t>(numFrames) * sizeof(float);
@@ -255,23 +421,19 @@ void Engine::renderBlock(int numFrames) noexcept {
         raisePeak(inputPeak_, peak);
     }
 
-    // Live-MIDI geht an den Synthesizer der scharfgeschalteten Spur.
-    if (liveMidiCount_ > 0) {
-        if (armedTrack_ >= 0) {
-            Synth& synth = synths_[static_cast<std::size_t>(armedTrack_)];
-            for (int i = 0; i < liveMidiCount_; ++i) synth.handle(liveMidi_[static_cast<std::size_t>(i)]);
-        }
-        liveMidiCount_ = 0;
-    }
     bool anySynth = false;
     for (const auto& synth : synths_) anySynth = anySynth || synth.active();
+    const bool liveMidi = liveMidiCount_ > 0 && armedTrack_ >= 0;
 
     if (!rolling_) {
         // Transport steht: Stroeme auf die aktuelle Position vorbereiten,
         // damit beim Start sofort Daten da sind.
         for (auto& stream : streams_)
             if (stream.active()) stream.prime(position_);
-        if (!monitoring && !anySynth) return;
+        if (!monitoring && !anySynth && !liveMidi) {
+            liveMidiCount_ = 0;
+            return;
+        }
     }
 
     // Aufnahme: den Eingang dieses Blocks an den Disk-Thread weiterreichen.
@@ -281,16 +443,32 @@ void Engine::renderBlock(int numFrames) noexcept {
     const float transportTarget = (rolling_ && wantPlay_) ? 1.0f : 0.0f;
     const float transportStep = (transportTarget - transportCur_) * invFrames;
     const bool transportFading = transportCur_ != 1.0f || transportTarget != 1.0f;
+    const double microsPerFrame = 1'000'000.0 / sampleRate_;
+    const int outputLatency = outputLatency_.load(std::memory_order_relaxed);
     float* tl = trackL_.data();
     float* tr = trackR_.data();
 
     for (std::size_t ti = 0; ti < tracks_.size(); ++ti) {
         Track& t = tracks_[ti];
         TrackStream& stream = streams_[ti];
+
+        // MIDI dieser Spur: an den eingebauten Synthesizer oder an das MIDI-Geraet.
+        const int midiCount = gatherMidi(ti, numFrames, blockMicros);
+        const bool midiToSynth = t.midiOutput == kOutputSynth;
+        if (!midiToSynth) {
+            for (int i = 0; i < midiCount; ++i) {
+                const BlockEvent& e = blockEvents_[static_cast<std::size_t>(i)];
+                // Senden, wenn das zugehoerige Audio aus dem Lautsprecher kommt.
+                const auto due = blockMicros +
+                                 static_cast<std::int64_t>((e.offset + outputLatency) * microsPerFrame);
+                midiOut_.push({onChannel(e.message, t.midiOutput), due});
+            }
+        }
+
         const bool hasClips = rolling_ && stream.active();
         const bool hasTone = rolling_ && t.toneHz > 0.0f;
         const bool hasInput = monitoring && static_cast<int>(ti) == armedTrack_;
-        const bool hasSynth = synths_[ti].active();
+        const bool hasSynth = synths_[ti].active() || (midiToSynth && midiCount > 0);
         if (!hasClips && !hasTone && !hasInput && !hasSynth) { t.curL = t.tgtL; t.curR = t.tgtR; continue; }
 
         // Quelle der Spur nach tl/tr: Audio-Clips, dazu gegebenenfalls der Testton.
@@ -329,8 +507,22 @@ void Engine::renderBlock(int numFrames) noexcept {
             }
         }
 
-        // Synthesizer der Spur (live gespielte Noten klingen auch bei stehendem Transport).
-        if (hasSynth) synths_[ti].render(tl, tr, numFrames);
+        // Synthesizer der Spur. Zwischen den Ereignissen wird stueckweise
+        // gerechnet, damit jede Note auf das Sample genau einsetzt.
+        if (hasSynth) {
+            Synth& synth = synths_[ti];
+            int done = 0;
+            if (midiToSynth) {
+                for (int i = 0; i < midiCount; ++i) {
+                    const BlockEvent& e = blockEvents_[static_cast<std::size_t>(i)];
+                    const int offset = std::clamp(e.offset, done, numFrames);
+                    if (offset > done) synth.render(tl + done, tr + done, offset - done);
+                    done = offset;
+                    synth.handle(e.message);
+                }
+            }
+            if (numFrames > done) synth.render(tl + done, tr + done, numFrames - done);
+        }
 
         // Fader und Panorama, ueber den Block ueberblendet.
         const float stepL = (t.tgtL - t.curL) * invFrames;
@@ -350,6 +542,7 @@ void Engine::renderBlock(int numFrames) noexcept {
         t.curR = t.tgtR;
         raisePeak(trackPeak_[ti], peak);
     }
+    liveMidiCount_ = 0;
 
     // Master-Fader.
     const float step = (masterGain_ - masterCur_) * invFrames;
@@ -373,8 +566,10 @@ void Engine::renderBlock(int numFrames) noexcept {
 
 void Engine::process(const float* const* in, int numInputs, float* const* out, int numOutputs,
                      int numFrames) noexcept {
+    const std::int64_t blockMicros = nowMicros();
     drainCommands();
 
+    const double microsPerFrame = 1'000'000.0 / sampleRate_;
     int done = 0;
     while (done < numFrames) {
         const int n = std::min(numFrames - done, maxFrames_);
@@ -384,7 +579,7 @@ void Engine::process(const float* const* in, int numInputs, float* const* out, i
         } else {
             inL_ = inR_ = nullptr;
         }
-        renderBlock(n);
+        renderBlock(n, blockMicros + static_cast<std::int64_t>(done * microsPerFrame));
 
         const std::size_t bytes = static_cast<std::size_t>(n) * sizeof(float);
         if (numOutputs >= 2) {
@@ -402,5 +597,5 @@ void Engine::process(const float* const* in, int numInputs, float* const* out, i
 
     positionOut_.store(position_, std::memory_order_relaxed);
     playingOut_.store(wantPlay_, std::memory_order_relaxed);
-    recordingOut_.store(recordSink_ != nullptr, std::memory_order_relaxed);
+    recordingOut_.store(recordSink_ != nullptr || midiRecording_, std::memory_order_relaxed);
 }

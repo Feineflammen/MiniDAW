@@ -123,8 +123,43 @@ einem kurzen Sprung aus. Sauber löst das erst ASIO oder ein Gerät für beides.
 - Der Synthesizer läuft durch Fader, Panorama und Pegelanzeige der Spur und
   klingt auch bei stehendem Transport.
 
-Einstellungen, die zum Rechner gehören (bisher der Latenz-Zusatz), liegen in
-`%APPDATA%\MiniDAW\einstellungen.txt`.
+### Eingang und Ausgang je Spur
+
+- **Eingang:** Audio, MIDI alle Kanäle oder ein fester Kanal 1 bis 16. Er
+  bestimmt, was die Spur aufnimmt, und filtert das Live-MIDI. Die
+  Rechnertastatur umgeht den Kanalfilter.
+- **MIDI-Ausgang:** eingebauter Synthesizer oder Kanal 1 bis 16 am
+  MIDI-Ausgabegerät. Der Kanal wird beim Senden umgeschrieben; gespeichert
+  sind Noten ohne Kanal.
+
+### MIDI-Clips
+
+- Noten liegen im Modell in Frames relativ zum Clip-Anfang (wie alle
+  Positionen), nicht in Takten. Das Tempo dient nur dem Raster.
+- Der `ProjectController` baut aus allen MIDI-Clips einer Spur eine sortierte
+  Ereignisliste (`MidiSequence`) und übergibt sie der Engine als Zeiger. Die
+  abgelöste Liste gibt der Audio-Thread über eine Queue an den UI-Thread
+  zurück, der sie freigibt (`collectGarbage`).
+- Die Engine spielt die Ereignisse samplegenau: Der Synthesizer wird zwischen
+  den Ereignissen stückweise gerechnet. Bei Stopp, Sprung oder neuen Daten
+  bekommen klingende Noten ein "Note aus".
+
+### MIDI-Aufnahme
+
+Der Audio-Thread meldet Live-Noten mit ihrer Zeitachsen-Position über eine
+Queue an den UI-Thread. Die Position berücksichtigt, wann die Note eintraf
+(Zeitstempel beim Eingang) und die Ausgangslatenz. Der `ProjectController`
+setzt daraus Noten zusammen und legt am Ende den Clip an.
+
+### MIDI-Ausgabe
+
+`midi/MidiOutput` hat einen eigenen Thread. Die Engine versieht jede
+Nachricht mit dem Zeitpunkt, zu dem das zugehörige Audio hörbar wird
+(Blockzeit + Position im Block + Ausgangslatenz); der Thread sendet sie dann,
+auf etwa 1 ms genau. Der Audio-Thread ruft nie in den MIDI-Treiber.
+
+Einstellungen, die zum Rechner gehören (Latenz-Zusatz, MIDI-Ausgabegerät),
+liegen in `%APPDATA%\MiniDAW\einstellungen.txt`.
 
 ## Modell und Engine
 
@@ -164,8 +199,9 @@ Windows-Code. Sie bilden die Bibliothek `dawcore`, die auch die Tests benutzen.
 | 3 | WAV-Wiedergabe mit Streaming vom Disk-Thread | fertig, auf Hardware gehört |
 | 4 | Minimale GUI: Spurliste, Timeline, Wellenformen, Transport, Fader | fertig, auf Hardware bedient |
 | 5 | Audio-Aufnahme mit Latenzkorrektur | fertig, mit echtem Eingang getestet; Latenz-Zusatz einstellbar |
-| 6a | MIDI-Eingang, eingebauter Synthesizer, live spielen | Code und Offline-Tests fertig, Hörtest offen |
-| 6b | MIDI-Clips, MIDI-Aufnahme, Piano Roll, Tempo und Taktraster | offen |
+| 6a | MIDI-Eingang, eingebauter Synthesizer, live spielen | fertig, mit Keyboard gespielt |
+| 6b | MIDI-Clips, MIDI-Aufnahme, Kanalwahl je Spur, MIDI-Ausgabegerät | Code und Offline-Tests fertig, Test mit Geräten offen |
+| 6c | Piano Roll, Tempo und Taktraster | offen |
 | 7 | VST3-Hosting: Laden, Verarbeiten, Editor-Fenster, State | offen |
 | 8 | Mixer komplett: Inserts, Sends, Busse, Pegel, Latenzausgleich | offen |
 | 9 | Projekt speichern und laden, Undo/Redo fertig | offen |

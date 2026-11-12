@@ -6,6 +6,7 @@
 
 #include <filesystem>
 #include <functional>
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -42,6 +43,16 @@ public:
     void setTrackSolo(int track, bool solo);
     void setMasterGain(float gain);
 
+    // Eingang (kTrackInputAudio, kTrackInputMidiAll oder Kanal 0..15) und
+    // MIDI-Ausgang (kTrackOutputSynth oder Kanal 0..15) einer Spur.
+    void setTrackInput(int track, int input);
+    void setTrackMidiOutput(int track, int output);
+
+    // MIDI-Clips
+    int addMidiClip(int track, MidiClipModel clip);  // liefert den Index oder -1
+    int moveMidiClip(int track, int index, int newTrack, std::int64_t newStart);
+    bool removeMidiClip(int track, int index);
+
     // --- Aufnahme ---
     // Anzahl der Eingangskanaele des Audiogeraets, 0 = kein Eingang.
     void setInputChannels(int channels) noexcept { inputChannels_ = channels; }
@@ -71,7 +82,7 @@ public:
     // Startet Wiedergabe und Aufnahme auf der scharfgeschalteten Spur.
     // Beendet wird mit Engine::stop().
     bool startRecording(std::string& message);
-    bool isRecording() const noexcept { return recordSink_ != nullptr; }
+    bool isRecording() const noexcept { return recordSink_ != nullptr || midiRecording_; }
     int recordTrack() const noexcept { return recordTrack_; }
     // Fuer die Anzeige waehrend der Aufnahme. false, solange noch nichts aufgenommen ist.
     bool recordProgress(std::int64_t& start, std::int64_t& frames) const noexcept;
@@ -94,6 +105,8 @@ private:
     static bool validTrack(int track) noexcept { return track >= 0 && track < kProjectTracks; }
     std::shared_ptr<AudioFile> openFile(const std::filesystem::path& path, std::string& error);
     void syncTrack(int track);
+    void syncMidi(int track);
+    void finishMidiRecording(std::int64_t end);
 
     Engine& engine_;
     Project project_;
@@ -108,6 +121,14 @@ private:
     std::function<std::int64_t()> latencyProvider_;
     std::shared_ptr<RecordSink> recordSink_;
     int recordTrack_ = -1;
+
+    // Laufende MIDI-Aufnahme
+    bool midiRecording_ = false;
+    bool midiRecordBegun_ = false;
+    std::int64_t midiRecordStart_ = 0;
+    std::vector<MidiNote> midiRecordNotes_;
+    struct OpenNote { bool open = false; std::int64_t start = 0; std::uint8_t velocity = 0; };
+    std::array<OpenNote, 128> midiRecordOpen_{};
 
     PeakBuilder peakBuilder_;
 };

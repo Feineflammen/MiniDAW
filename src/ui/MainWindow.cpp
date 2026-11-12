@@ -153,6 +153,11 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
 
+        case WM_RBUTTONDOWN:
+            view_.rightMouseDown(toDip(GET_X_LPARAM(lParam)), toDip(GET_Y_LPARAM(lParam)));
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+
         case WM_MOUSEMOVE:
             view_.mouseMove(toDip(GET_X_LPARAM(lParam)), toDip(GET_Y_LPARAM(lParam)));
             if (wParam & MK_LBUTTON) InvalidateRect(hwnd_, nullptr, FALSE);

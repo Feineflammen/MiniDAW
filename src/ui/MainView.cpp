@@ -13,7 +13,7 @@ namespace {
 // Aufteilung
 constexpr float kTopH = 44.0f;
 constexpr float kRulerH = 24.0f;
-constexpr float kHeaderW = 220.0f;
+constexpr float kHeaderW = 292.0f;
 constexpr float kRowH = 44.0f;
 constexpr float kStatusH = 24.0f;
 
@@ -154,6 +154,9 @@ Rect MainView::soloRect(int track) const { return {110.0f, rowY(track) + 12.0f, 
 Rect MainView::gainRect(int track) const { return {140.0f, rowY(track) + 7.0f, 56.0f, 14.0f}; }
 Rect MainView::panRect(int track) const { return {140.0f, rowY(track) + 25.0f, 56.0f, 12.0f}; }
 Rect MainView::meterRect(int track) const { return {204.0f, rowY(track) + 5.0f, 8.0f, 34.0f}; }
+Rect MainView::inputRect(int track) const { return {220.0f, rowY(track) + 5.0f, 66.0f, 16.0f}; }
+Rect MainView::outputRect(int track) const { return {220.0f, rowY(track) + 23.0f, 66.0f, 16.0f}; }
+Rect MainView::midiOutRect() const { return {width_ * 0.36f, height_ - kStatusH + 3.0f, 250.0f, kStatusH - 6.0f}; }
 
 double MainView::rulerStep() const {
     static constexpr double kSteps[] = {0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1,   2,
@@ -191,9 +194,24 @@ void MainView::tick() {
         midiTextTicks_ = 90;
         const MidiMessage last = engine_.lastMidiMessage();
         midiText_ = describeMidi(last);
-        // Der haeufigste Grund fuer "kein Ton": Es ist keine Spur scharfgeschaltet.
-        if (last.isNoteOn() && controller_.armedTrack() < 0 && status_.empty())
-            setStatus(L"MIDI kommt an, aber keine Spur ist scharfgeschaltet: R an einer Spur anklicken.");
+        // Die haeufigsten Gruende fuer "kein Ton" gleich benennen.
+        if (last.isNoteOn() && status_.empty()) {
+            const int armed = controller_.armedTrack();
+            if (armed < 0) {
+                setStatus(L"MIDI kommt an, aber keine Spur ist scharfgeschaltet: R an einer Spur anklicken.");
+            } else {
+                const TrackModel& track = controller_.project().tracks[static_cast<std::size_t>(armed)];
+                const int channel = last.status & 0x0F;
+                if (track.input == kTrackInputAudio)
+                    setStatus(L"Die scharfe Spur steht auf Audio: Eingang (Feld rechts am Spurkopf) auf MIDI stellen.");
+                else if (track.input >= 0 && track.input != channel && !lastMidiFromKeyboard_)
+                    setStatus(L"Die scharfe Spur h\u00F6rt auf MIDI-Kanal " + std::to_wstring(track.input + 1) +
+                              L", die Note kam auf Kanal " + std::to_wstring(channel + 1) + L".");
+                else if (track.midiOutput >= 0 && midiOutInfo_.empty())
+                    setStatus(L"Die Spur sendet an ein MIDI-Ger\u00E4t, aber es ist keins gew\u00E4hlt (unten \"MIDI aus\" anklicken).");
+            }
+        }
+        lastMidiFromKeyboard_ = false;
     }
     const std::uint32_t midiErrors = engine_.midiErrorCount();
     if (midiErrors != midiErrorsSeen_) {
@@ -206,8 +224,10 @@ void MainView::tick() {
     if (controller_.poll(message)) {
         const int track = controller_.armedTrack();
         if (track >= 0) {
+            const TrackModel& model = controller_.project().tracks[static_cast<std::size_t>(track)];
             selTrack_ = track;
-            selIndex_ = static_cast<int>(controller_.project().tracks[static_cast<std::size_t>(track)].clips.size()) - 1;
+            selMidi_ = model.input != kTrackInputAudio;
+            selIndex_ = static_cast<int>(selMidi_ ? model.midiClips.size() : model.clips.size()) - 1;
         }
     }
     if (!message.empty()) setStatus(widen(message));
@@ -329,7 +349,13 @@ void MainView::drawStatusBar(Canvas& c) {
     const float y = height_ - kStatusH;
     c.fill({0.0f, y, width_, kStatusH}, kPanel);
     c.line(0.0f, y + 0.5f, width_, y + 0.5f, kLine);
-    c.text(deviceInfo_, {10.0f, y, width_ * 0.5f - 10.0f, kStatusH}, kTextDim, Font::Small);
+    c.text(deviceInfo_, {10.0f, y, width_ * 0.36f - 20.0f, kStatusH}, kTextDim, Font::Small);
+
+    // MIDI-Ausgabegeraet: anklicken schaltet zum naechsten weiter.
+    const Rect out = midiOutRect();
+    c.fillRounded(out, 3.0f, kButton);
+    c.text(L"MIDI aus: " + (midiOutInfo_.empty() ? std::wstring(L"kein Ger\u00E4t") : midiOutInfo_),
+           {out.x + 8.0f, out.y, out.w - 16.0f, out.h}, midiOutInfo_.empty() ? kTextDim : kText, Font::Small);
 
     // LED: gruen bei jeder gueltigen Nachricht, rot nach einem Uebertragungsfehler.
     const Rect led{width_ - 22.0f, y + 7.0f, 10.0f, 10.0f};
@@ -337,10 +363,11 @@ void MainView::drawStatusBar(Canvas& c) {
     c.fillRounded(led, 5.0f, ledColor);
     c.strokeRounded(led, 5.0f, kLine);
 
-    std::wstring text = L"MIDI: " + midiInfo_;
+    std::wstring text = L"MIDI ein: " + midiInfo_;
     if (midiErrorTicks_ > 0) text += L"   \u00DCbertragungsfehler";
     else if (!midiText_.empty()) text += L"   " + midiText_;
-    c.text(text, {width_ * 0.5f, y, width_ * 0.5f - 30.0f, kStatusH},
+    const float textX = out.right() + 12.0f;
+    c.text(text, {textX, y, std::max(0.0f, width_ - 30.0f - textX), kStatusH},
            midiText_.empty() ? kTextDim : kText, Font::Small, Align::Right);
 }
 
@@ -426,6 +453,51 @@ void MainView::drawClip(Canvas& c, const ClipModel& clip, int track, std::int64_
     }
 }
 
+// MIDI-Clip: Die Noten erscheinen als kleine Balken, nach Tonhoehe gestaffelt.
+void MainView::drawMidiClip(Canvas& c, const MidiClipModel& clip, int track, std::int64_t start, bool selected,
+                            float alpha) {
+    const float x0 = frameToX(static_cast<double>(start));
+    const float x1 = frameToX(static_cast<double>(start + clip.length));
+    const float visible0 = std::max(x0, kHeaderW);
+    const float visible1 = std::min(x1, width_);
+    if (visible1 <= visible0) return;
+
+    const float rx0 = std::max(x0, kHeaderW - 8.0f);
+    const float rx1 = std::min(x1, width_ + 8.0f);
+    const Rect body{rx0, rowY(track) + 2.0f, std::max(2.0f, rx1 - rx0), kRowH - 4.0f};
+    const unsigned base = kClipColors[static_cast<std::size_t>(track) % std::size(kClipColors)];
+    c.fillRounded(body, 4.0f, rgb(base, 0.40f * alpha));
+
+    int low = 127, high = 0;
+    for (const auto& note : clip.notes) {
+        low = std::min<int>(low, note.pitch);
+        high = std::max<int>(high, note.pitch);
+    }
+    if (low > high) { low = 60; high = 72; }
+    if (high - low < 12) {  // mindestens eine Oktave zeigen, damit einzelne Noten nicht riesig werden
+        const int pad = (12 - (high - low)) / 2;
+        low -= pad;
+        high = low + 12;
+    }
+    const float top = body.y + 15.0f;
+    const float rangeH = body.h - 19.0f;
+    const float noteH = std::max(2.0f, rangeH / static_cast<float>(high - low + 1));
+
+    c.pushClip({visible0, body.y, visible1 - visible0, body.h});
+    for (const auto& note : clip.notes) {
+        const float nx0 = frameToX(static_cast<double>(start + note.start));
+        const float nx1 = frameToX(static_cast<double>(start + std::min(note.start + note.length, clip.length)));
+        if (nx1 < visible0 || nx0 > visible1) continue;
+        const float ny = top + rangeH - static_cast<float>(note.pitch - low + 1) * rangeH / static_cast<float>(high - low + 1);
+        c.fill({nx0, ny, std::max(2.0f, nx1 - nx0 - 1.0f), noteH}, rgb(0xF2F4F8, 0.9f * alpha));
+    }
+    c.popClip();
+
+    c.strokeRounded(body, 4.0f, selected ? rgb(0xFFFFFF, alpha) : rgb(base, alpha), selected ? 2.0f : 1.0f);
+    c.text(clip.name, {visible0 + 5.0f, body.y + 1.0f, std::max(0.0f, visible1 - visible0 - 8.0f), 14.0f},
+           rgb(0xFFFFFF, 0.9f * alpha), Font::Small);
+}
+
 void MainView::drawTimeline(Canvas& c) {
     const float top = kTopH + kRulerH;
     const Rect area{kHeaderW, top, std::max(0.0f, width_ - kHeaderW),
@@ -450,10 +522,19 @@ void MainView::drawTimeline(Canvas& c) {
     for (int t = 0; t < kProjectTracks; ++t) {
         const auto& clips = project.tracks[static_cast<std::size_t>(t)].clips;
         for (int i = 0; i < static_cast<int>(clips.size()); ++i) {
-            const bool selected = t == selTrack_ && i == selIndex_;
+            const bool selected = !selMidi_ && t == selTrack_ && i == selIndex_;
             // Der gezogene Clip bleibt blass an seinem alten Platz stehen.
             drawClip(c, clips[static_cast<std::size_t>(i)], t, clips[static_cast<std::size_t>(i)].start,
                      selected && !draggingClip, (selected && draggingClip) ? 0.35f : 1.0f);
+        }
+    }
+
+    for (int t = 0; t < kProjectTracks; ++t) {
+        const auto& clips = project.tracks[static_cast<std::size_t>(t)].midiClips;
+        for (int i = 0; i < static_cast<int>(clips.size()); ++i) {
+            const bool selected = selMidi_ && t == selTrack_ && i == selIndex_;
+            drawMidiClip(c, clips[static_cast<std::size_t>(i)], t, clips[static_cast<std::size_t>(i)].start,
+                         selected && !draggingClip, (selected && draggingClip) ? 0.35f : 1.0f);
         }
     }
 
@@ -471,10 +552,12 @@ void MainView::drawTimeline(Canvas& c) {
         }
     }
 
-    if (draggingClip && selTrack_ >= 0) {
-        const auto& clips = project.tracks[static_cast<std::size_t>(selTrack_)].clips;
-        if (selIndex_ >= 0 && selIndex_ < static_cast<int>(clips.size()))
-            drawClip(c, clips[static_cast<std::size_t>(selIndex_)], ghostTrack_, ghostStart_, true, 0.9f);
+    if (draggingClip && selTrack_ >= 0 && selIndex_ >= 0) {
+        const TrackModel& model = project.tracks[static_cast<std::size_t>(selTrack_)];
+        if (selMidi_ && selIndex_ < static_cast<int>(model.midiClips.size()))
+            drawMidiClip(c, model.midiClips[static_cast<std::size_t>(selIndex_)], ghostTrack_, ghostStart_, true, 0.9f);
+        else if (!selMidi_ && selIndex_ < static_cast<int>(model.clips.size()))
+            drawClip(c, model.clips[static_cast<std::size_t>(selIndex_)], ghostTrack_, ghostStart_, true, 0.9f);
     }
 
     const float px = frameToX(static_cast<double>(engine_.position()));
@@ -520,6 +603,22 @@ void MainView::drawHeaders(Canvas& c) {
             c.fill({meter.x, meter.bottom() - h, meter.w, h}, peak >= 1.0f ? kMeterHot : kMeter);
         }
 
+        // Eingang und MIDI-Ausgang der Spur.
+        const Rect in = inputRect(t);
+        c.fillRounded(in, 3.0f, kDark);
+        const std::wstring inText = track.input == kTrackInputAudio     ? std::wstring(L"Audio")
+                                    : track.input == kTrackInputMidiAll ? std::wstring(L"MIDI alle")
+                                                                        : L"MIDI " + std::to_wstring(track.input + 1);
+        c.text(inText, in, track.input == kTrackInputAudio ? kTextDim : kText, Font::Small, Align::Center);
+
+        const Rect outBox = outputRect(t);
+        c.fillRounded(outBox, 3.0f, kDark);
+        const std::wstring outText = track.midiOutput == kTrackOutputSynth
+                                         ? std::wstring(L"\u2192 Synth")
+                                         : L"\u2192 MIDI " + std::to_wstring(track.midiOutput + 1);
+        const bool usesMidi = track.input != kTrackInputAudio || !track.midiClips.empty();
+        c.text(outText, outBox, usesMidi ? kText : kTextDim, Font::Small, Align::Center);
+
         c.line(0.0f, y + kRowH - 0.5f, kHeaderW, y + kRowH - 0.5f, kLine);
     }
     c.line(kHeaderW - 0.5f, kTopH, kHeaderW - 0.5f, height_, kLine);
@@ -553,19 +652,70 @@ std::int64_t MainView::snap(std::int64_t start, std::int64_t length, int skipTra
     for (int t = 0; t < kProjectTracks; ++t) {
         const auto& clips = project.tracks[static_cast<std::size_t>(t)].clips;
         for (int i = 0; i < static_cast<int>(clips.size()); ++i) {
-            if (t == skipTrack && i == skipIndex) continue;
+            if (!selMidi_ && t == skipTrack && i == skipIndex) continue;
             const ClipModel& other = clips[static_cast<std::size_t>(i)];
             consider(other.start, true);
             consider(other.start + other.length, true);
         }
+        const auto& midiClips = project.tracks[static_cast<std::size_t>(t)].midiClips;
+        for (int i = 0; i < static_cast<int>(midiClips.size()); ++i) {
+            if (selMidi_ && t == skipTrack && i == skipIndex) continue;
+            consider(midiClips[static_cast<std::size_t>(i)].start, true);
+            consider(midiClips[static_cast<std::size_t>(i)].start + midiClips[static_cast<std::size_t>(i)].length, true);
+        }
     }
     return std::max<std::int64_t>(0, best);
+}
+
+bool MainView::selectedClip(std::int64_t& start, std::int64_t& length) const {
+    if (selTrack_ < 0 || selIndex_ < 0) return false;
+    const TrackModel& model = controller_.project().tracks[static_cast<std::size_t>(selTrack_)];
+    if (selMidi_) {
+        if (selIndex_ >= static_cast<int>(model.midiClips.size())) return false;
+        start = model.midiClips[static_cast<std::size_t>(selIndex_)].start;
+        length = model.midiClips[static_cast<std::size_t>(selIndex_)].length;
+    } else {
+        if (selIndex_ >= static_cast<int>(model.clips.size())) return false;
+        start = model.clips[static_cast<std::size_t>(selIndex_)].start;
+        length = model.clips[static_cast<std::size_t>(selIndex_)].length;
+    }
+    return true;
+}
+
+// Eingang weiterschalten: Audio, MIDI alle, MIDI 1 bis 16 (und wieder von vorn).
+void MainView::stepInput(int track, int delta) {
+    const int current = controller_.project().tracks[static_cast<std::size_t>(track)].input;
+    const int count = 18;  // -2 .. 15
+    const int next = ((current + 2 + delta) % count + count) % count - 2;
+    if (controller_.isRecording()) return;
+    controller_.setTrackInput(track, next);
+    if (controller_.armedTrack() == track) releaseAllNotes();
+}
+
+// MIDI-Ausgang weiterschalten: Synthesizer, MIDI 1 bis 16.
+void MainView::stepOutput(int track, int delta) {
+    const int current = controller_.project().tracks[static_cast<std::size_t>(track)].midiOutput;
+    const int count = 17;  // -1 .. 15
+    controller_.setTrackMidiOutput(track, ((current + 1 + delta) % count + count) % count - 1);
+}
+
+void MainView::rightMouseDown(float x, float y) {
+    const int track = rowAt(y);
+    if (track < 0 || x >= kHeaderW) return;
+    if (inputRect(track).contains(x, y)) stepInput(track, -1);
+    else if (outputRect(track).contains(x, y)) stepOutput(track, -1);
 }
 
 void MainView::mouseDown(float x, float y, bool doubleClick) {
     dragStartX_ = x;
     dragStartY_ = y;
     dragMoved_ = false;
+
+    // Statusleiste
+    if (y >= height_ - kStatusH) {
+        if (midiOutRect().contains(x, y) && onCycleMidiOut) onCycleMidiOut();
+        return;
+    }
 
     // Transportleiste
     if (y < kTopH) {
@@ -612,7 +762,11 @@ void MainView::mouseDown(float x, float y, bool doubleClick) {
         const TrackModel& model = controller_.project().tracks[static_cast<std::size_t>(track)];
         const Rect gain = gainRect(track);
         const Rect pan = panRect(track);
-        if (armRect(track).contains(x, y)) {
+        if (inputRect(track).contains(x, y)) {
+            stepInput(track, 1);
+        } else if (outputRect(track).contains(x, y)) {
+            stepOutput(track, 1);
+        } else if (armRect(track).contains(x, y)) {
             controller_.armTrack(controller_.armedTrack() == track ? -1 : track);
         } else if (muteRect(track).contains(x, y)) {
             controller_.setTrackMute(track, !model.mute);
@@ -640,12 +794,27 @@ void MainView::mouseDown(float x, float y, bool doubleClick) {
 
     // Zeitachse: Clip unter der Maus suchen (der zuletzt angelegte liegt oben).
     const auto frame = static_cast<std::int64_t>(xToFrame(x));
+    const auto& midiClips = controller_.project().tracks[static_cast<std::size_t>(track)].midiClips;
+    for (int i = static_cast<int>(midiClips.size()) - 1; i >= 0; --i) {
+        const MidiClipModel& clip = midiClips[static_cast<std::size_t>(i)];
+        if (frame >= clip.start && frame < clip.start + clip.length) {
+            selTrack_ = track;
+            selIndex_ = i;
+            selMidi_ = true;
+            drag_ = Drag::Clip;
+            grabOffset_ = frame - clip.start;
+            ghostStart_ = clip.start;
+            ghostTrack_ = track;
+            return;
+        }
+    }
     const auto& clips = controller_.project().tracks[static_cast<std::size_t>(track)].clips;
     for (int i = static_cast<int>(clips.size()) - 1; i >= 0; --i) {
         const ClipModel& clip = clips[static_cast<std::size_t>(i)];
         if (frame >= clip.start && frame < clip.start + clip.length) {
             selTrack_ = track;
             selIndex_ = i;
+            selMidi_ = false;
             drag_ = Drag::Clip;
             grabOffset_ = frame - clip.start;
             ghostStart_ = clip.start;
@@ -680,9 +849,8 @@ void MainView::applyDrag(float x, float y) {
         case Drag::Clip: {
             if (!dragMoved_ && std::fabs(x - dragStartX_) < 4.0f && std::fabs(y - dragStartY_) < 4.0f) break;
             dragMoved_ = true;
-            const auto& clips = controller_.project().tracks[static_cast<std::size_t>(selTrack_)].clips;
-            if (selIndex_ < 0 || selIndex_ >= static_cast<int>(clips.size())) break;
-            const std::int64_t length = clips[static_cast<std::size_t>(selIndex_)].length;
+            std::int64_t clipStart = 0, length = 0;
+            if (!selectedClip(clipStart, length)) break;
             const auto wanted = std::max<std::int64_t>(0, static_cast<std::int64_t>(xToFrame(x)) - grabOffset_);
             ghostStart_ = snap(wanted, length, selTrack_, selIndex_);
             const int row = static_cast<int>(std::floor((y - kTopH - kRulerH) / kRowH));
@@ -702,7 +870,8 @@ void MainView::mouseUp(float x, float y) {
     if (drag_ == Drag::Clip) {
         applyDrag(x, y);
         if (dragMoved_) {
-            const int index = controller_.moveClip(selTrack_, selIndex_, ghostTrack_, ghostStart_);
+            const int index = selMidi_ ? controller_.moveMidiClip(selTrack_, selIndex_, ghostTrack_, ghostStart_)
+                                       : controller_.moveClip(selTrack_, selIndex_, ghostTrack_, ghostStart_);
             if (index >= 0) {
                 selTrack_ = ghostTrack_;
                 selIndex_ = index;
@@ -715,6 +884,12 @@ void MainView::mouseUp(float x, float y) {
 }
 
 void MainView::wheel(float x, float y, float notches, bool ctrl) {
+    // Mausrad ueber den Feldern am Spurkopf: Eingang oder MIDI-Ausgang weiterschalten.
+    if (x < kHeaderW) {
+        const int track = rowAt(y);
+        if (track >= 0 && inputRect(track).contains(x, y)) { stepInput(track, notches > 0.0f ? 1 : -1); return; }
+        if (track >= 0 && outputRect(track).contains(x, y)) { stepOutput(track, notches > 0.0f ? 1 : -1); return; }
+    }
     // Mausrad ueber der Latenz-Anzeige: in Schritten von 1 ms verstellen.
     if (y < kTopH && x >= kLatencyMinusRect.x && x < kLatencyPlusRect.right()) {
         controller_.setRecordOffsetMs(controller_.recordOffsetMs() + (notches > 0.0f ? 1 : -1));
@@ -744,7 +919,9 @@ void MainView::key(Key k) {
             viewStart_ = 0.0;
             break;
         case Key::Delete:
-            if (drag_ == Drag::None && controller_.removeClip(selTrack_, selIndex_))
+            if (drag_ == Drag::None &&
+                (selMidi_ ? controller_.removeMidiClip(selTrack_, selIndex_)
+                          : controller_.removeClip(selTrack_, selIndex_)))
                 selTrack_ = selIndex_ = -1;
             break;
     }
@@ -754,7 +931,8 @@ void MainView::noteKey(int semitone, bool down) {
     if (controller_.armedTrack() < 0) return;
     const int note = 12 * (octave_ + 1) + semitone;
     if (note < 0 || note > 127) return;
-    engine_.postMidi(down ? MidiMessage::noteOn(note, 100) : MidiMessage::noteOff(note));
+    lastMidiFromKeyboard_ = true;
+    engine_.postMidi(down ? MidiMessage::noteOn(note, 100) : MidiMessage::noteOff(note), true);
 }
 
 void MainView::shiftOctave(int delta) {
@@ -763,7 +941,7 @@ void MainView::shiftOctave(int delta) {
     setStatus(L"Tastatur-Oktave: C" + std::to_wstring(octave_));
 }
 
-void MainView::releaseAllNotes() { engine_.postMidi(MidiMessage::allNotesOff()); }
+void MainView::releaseAllNotes() { engine_.postMidi(MidiMessage::allNotesOff(), true); }
 
 void MainView::dropFiles(float x, float y, const std::vector<std::filesystem::path>& paths) {
     int track = rowAt(y);
@@ -791,6 +969,7 @@ void MainView::dropFiles(float x, float y, const std::vector<std::filesystem::pa
             }
             selTrack_ = track;
             selIndex_ = index;
+            selMidi_ = false;
             first = false;
             if (!message.empty()) setStatus(widen(message));
             ++track;  // mehrere Dateien landen untereinander

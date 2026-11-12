@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <filesystem>
 #include <functional>
@@ -915,7 +916,15 @@ void testLiveMidi() {
 
     // Mit scharfgeschalteter Spur klingt die Note, auch bei stehendem Transport,
     // und laeuft durch Panorama und Pegelanzeige der Spur.
+    // Eine Spur mit Audio-Eingang ignoriert MIDI.
     rig.engine->setArmedTrack(3);
+    rig.engine->postMidi(MidiMessage::noteOn(60, 100));
+    rig.render();
+    std::tie(pl, pr) = rig.render();
+    CHECK(pl == 0.0f && pr == 0.0f);
+
+    rig.engine->setTrackMidiInput(3, Engine::kInputMidiAll);
+    rig.engine->setTrackMidiInput(5, Engine::kInputMidiAll);
     rig.engine->setTrackPan(3, 1.0f);
     rig.engine->postMidi(MidiMessage::noteOn(60, 100));
     rig.render();
@@ -945,6 +954,205 @@ void testLiveMidi() {
     CHECK(pl > 0.01f && pr > 0.01f);  // die letzte Note wird noch gehalten
 }
 
+// Holt alle MIDI-Nachrichten ab, die die Engine an das MIDI-Geraet schicken will.
+std::vector<MidiMessage> drainMidiOut(Engine& engine) {
+    std::vector<MidiMessage> out;
+    MidiOutEvent e;
+    while (engine.popMidiOut(e)) out.push_back(e.message);
+    return out;
+}
+
+void testMidiChannels() {
+    Rig rig;
+    rig.engine->setArmedTrack(0);
+    rig.engine->setTrackMidiInput(0, 4);  // nur Kanal 5 (gezaehlt ab 0)
+
+    // Falscher Kanal: nichts. Richtiger Kanal: Ton. Rechnertastatur: immer.
+    rig.engine->postMidi(MidiMessage::noteOn(60, 100, 0));
+    rig.render();
+    auto [pl, pr] = rig.render();
+    CHECK(pl == 0.0f);
+    rig.engine->postMidi(MidiMessage::noteOn(60, 100, 4));
+    rig.render();
+    std::tie(pl, pr) = rig.render();
+    CHECK(pl > 0.01f);
+    rig.engine->postMidi(MidiMessage::noteOff(60, 4));
+    for (int b = 0; b < 200; ++b) rig.render();
+    std::tie(pl, pr) = rig.render();
+    CHECK(pl == 0.0f);
+    rig.engine->postMidi(MidiMessage::noteOn(62, 100, 0), true);
+    rig.render();
+    std::tie(pl, pr) = rig.render();
+    CHECK(pl > 0.01f);
+    rig.engine->postMidi(MidiMessage::noteOff(62, 0), true);
+    for (int b = 0; b < 200; ++b) rig.render();
+
+    // Ausgang auf Kanal 10: Der Synthesizer schweigt, die Nachricht geht mit
+    // umgeschriebenem Kanal an das MIDI-Geraet.
+    drainMidiOut(*rig.engine);
+    rig.engine->setTrackMidiOutput(0, 9);
+    rig.render();
+    drainMidiOut(*rig.engine);  // Verstummen-Nachrichten vom Umschalten
+    rig.engine->postMidi(MidiMessage::noteOn(64, 90, 4));
+    rig.render();
+    std::tie(pl, pr) = rig.render();
+    CHECK(pl == 0.0f && pr == 0.0f);
+    auto sent = drainMidiOut(*rig.engine);
+    CHECK(sent.size() == 1);
+    if (sent.size() == 1) {
+        CHECK(sent[0].status == 0x99);  // Note an, Kanal 10
+        CHECK(sent[0].data1 == 64 && sent[0].data2 == 90);
+    }
+
+    // Spurwechsel schickt dem Geraet "alle Noten aus" auf dem Kanal der Spur.
+    rig.engine->setArmedTrack(-1);
+    rig.render();
+    sent = drainMidiOut(*rig.engine);
+    bool sawAllOff = false;
+    for (const auto& m : sent)
+        if (m.status == 0xB9 && m.data1 == 123) sawAllOff = true;
+    CHECK(sawAllOff);
+}
+
+void testMidiClipPlayback() {
+    Rig rig;
+    ProjectController controller(*rig.engine);
+    controller.setSampleRate(kRate);
+
+    // Clip ab Frame 1000 mit zwei Noten; die zweite ragt ueber das Clip-Ende hinaus.
+    MidiClipModel clip;
+    clip.start = 1000;
+    clip.length = 4000;
+    clip.notes = {{100, 1000, 69, 100}, {3000, 5000, 72, 80}};
+    CHECK(controller.addMidiClip(2, clip) == 0);
+    CHECK(controller.addMidiClip(2, MidiClipModel{}) == -1);  // Laenge 0
+
+    // Wiedergabe ueber den eingebauten Synthesizer: Der Einsatz ist samplegenau.
+    rig.engine->play();
+    std::vector<float> all;
+    for (int b = 0; b < 200; ++b) {
+        rig.render();
+        all.insert(all.end(), rig.l.begin(), rig.l.end());
+    }
+    std::int64_t firstSound = -1;
+    for (std::size_t i = 0; i < all.size(); ++i)
+        if (all[i] != 0.0f) { firstSound = static_cast<std::int64_t>(i); break; }
+    // Die Note beginnt bei 1100; das erste Sample ist der Nulldurchgang, hoerbar ab dem zweiten.
+    CHECK(firstSound >= 1100 && firstSound <= 1102);
+    // Nach Clip-Ende (5000) plus Ausklang ist es still.
+    bool silentTail = true;
+    for (std::size_t i = 40000; i < all.size(); ++i)
+        if (all[i] != 0.0f) silentTail = false;
+    CHECK(silentTail);
+
+    // Dieselben Daten an ein MIDI-Geraet auf Kanal 3: Reihenfolge und Kanal stimmen.
+    rig.engine->stop();
+    rig.render();
+    rig.render();
+    controller.setTrackMidiOutput(2, 2);
+    rig.engine->locate(0);
+    rig.render();
+    drainMidiOut(*rig.engine);
+    rig.engine->play();
+    for (int b = 0; b < 40; ++b) rig.render();
+    auto sent = drainMidiOut(*rig.engine);
+    CHECK(sent.size() == 4);
+    if (sent.size() == 4) {
+        CHECK(sent[0].status == 0x92 && sent[0].data1 == 69);
+        CHECK(sent[1].status == 0x82 && sent[1].data1 == 69);
+        CHECK(sent[2].status == 0x92 && sent[2].data1 == 72);
+        CHECK(sent[3].status == 0x82 && sent[3].data1 == 72);  // am Clip-Ende beendet
+    }
+
+    // Stopp mitten in einer Note schickt "Note aus".
+    rig.engine->stop();
+    rig.render();
+    rig.engine->locate(1000);
+    rig.render();
+    drainMidiOut(*rig.engine);
+    rig.engine->play();
+    rig.render();  // 1000..1255: Note 69 beginnt bei 1100
+    rig.engine->stop();
+    rig.render();
+    sent = drainMidiOut(*rig.engine);
+    CHECK(sent.size() == 2);
+    if (sent.size() == 2) CHECK(sent[0].isNoteOn() && sent[1].isNoteOff() && sent[1].data1 == 69);
+
+    // Verschieben und Loeschen.
+    CHECK(controller.moveMidiClip(2, 0, 6, 0) == 0);
+    CHECK(controller.project().tracks[2].midiClips.empty());
+    CHECK(controller.project().tracks[6].midiClips.size() == 1);
+    CHECK(controller.removeMidiClip(6, 0));
+    CHECK(!controller.removeMidiClip(6, 0));
+    std::string message;
+    rig.render();
+    controller.poll(message);  // gibt die alten Sequenzen frei (ASan prueft auf Lecks)
+}
+
+void testMidiRecording() {
+    Rig rig;
+    ProjectController controller(*rig.engine);
+    controller.setSampleRate(kRate);
+    std::string message;
+
+    controller.armTrack(1);
+    controller.setTrackInput(1, kTrackInputMidiAll);
+    rig.engine->locate(10000);
+    rig.render();
+
+    // Spur mit MIDI-Eingang: Aufnahme braucht weder Audio-Eingang noch Ordner.
+    CHECK(controller.startRecording(message));
+    CHECK(controller.isRecording());
+    rig.render();  // Aufnahme beginnt bei 10000
+    controller.poll(message);
+    std::int64_t start = 0, frames = 0;
+    CHECK(controller.recordProgress(start, frames));
+    CHECK(start == 10000);
+
+    for (int b = 0; b < 4; ++b) rig.render();          // bis 11280
+    rig.engine->postMidi(MidiMessage::noteOn(60, 90));
+    rig.render();                                       // Note an bei etwa 11280
+    for (int b = 0; b < 9; ++b) rig.render();          // bis 13840
+    rig.engine->postMidi(MidiMessage::noteOff(60));
+    rig.engine->postMidi(MidiMessage::noteOn(64, 70));  // bleibt bis zum Ende gedrueckt
+    rig.render();
+    for (int b = 0; b < 3; ++b) rig.render();
+    CHECK(!controller.poll(message));
+
+    rig.engine->stop();
+    rig.render();
+    CHECK(controller.poll(message));
+    CHECK(!controller.isRecording());
+
+    const auto& clips = controller.project().tracks[1].midiClips;
+    CHECK(clips.size() == 1);
+    CHECK(controller.project().tracks[1].clips.empty());  // keine Audiodatei
+    if (clips.size() == 1) {
+        const MidiClipModel& clip = clips[0];
+        CHECK(clip.start == 10000);
+        CHECK(clip.length == 19 * kBlock);
+        CHECK(clip.notes.size() == 2);
+        if (clip.notes.size() == 2) {
+            // Die Positionen stimmen bis auf die Zeit zwischen Eingang und Block (hier fast null).
+            CHECK(clip.notes[0].pitch == 60 && clip.notes[0].velocity == 90);
+            CHECK(std::llabs(clip.notes[0].start - 5 * kBlock) <= 64);
+            CHECK(std::llabs(clip.notes[0].length - 10 * kBlock) <= 64);
+            CHECK(clip.notes[1].pitch == 64);
+            CHECK(std::llabs(clip.notes[1].start - 15 * kBlock) <= 64);
+            CHECK(clip.notes[1].start + clip.notes[1].length == clip.length);  // am Ende abgeschlossen
+        }
+    }
+
+    // Aufnahme ohne Noten hinterlaesst keinen Clip.
+    CHECK(controller.startRecording(message));
+    for (int b = 0; b < 3; ++b) rig.render();
+    rig.engine->stop();
+    rig.render();
+    CHECK(!controller.poll(message));
+    CHECK(!controller.isRecording());
+    CHECK(clips.size() == 1);
+}
+
 }  // namespace
 
 int main() {
@@ -971,6 +1179,9 @@ int main() {
     testControllerRecording();
     testSynth();
     testLiveMidi();
+    testMidiChannels();
+    testMidiClipPlayback();
+    testMidiRecording();
     {
         std::error_code ec;
         std::filesystem::remove_all(tempFile("minidaw_test_aufnahmen"), ec);

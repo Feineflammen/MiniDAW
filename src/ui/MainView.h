@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -23,12 +24,17 @@ public:
 
     void setDeviceInfo(std::wstring info) { deviceInfo_ = std::move(info); }
     void setMidiInfo(std::wstring info) { midiInfo_ = std::move(info); }
-    void selectClip(int track, int index) { selTrack_ = track; selIndex_ = index; }
+    // Name des MIDI-Ausgabegeraets, leer = keins.
+    void setMidiOutInfo(std::wstring name) { midiOutInfo_ = std::move(name); }
+    // Wird gerufen, wenn der Benutzer das MIDI-Ausgabegeraet weiterschalten will.
+    std::function<void()> onCycleMidiOut;
+    void selectClip(int track, int index, bool midi = false) { selTrack_ = track; selIndex_ = index; selMidi_ = midi; }
 
     void tick();  // einmal pro Bild: Pegel abholen, Ansicht nachfuehren
     void draw(Canvas& canvas, float width, float height);
 
     void mouseDown(float x, float y, bool doubleClick);
+    void rightMouseDown(float x, float y);
     void mouseMove(float x, float y);
     void mouseUp(float x, float y);
     void wheel(float x, float y, float notches, bool ctrl);
@@ -53,6 +59,9 @@ private:
     Rect gainRect(int track) const;
     Rect panRect(int track) const;
     Rect meterRect(int track) const;
+    Rect inputRect(int track) const;
+    Rect outputRect(int track) const;
+    Rect midiOutRect() const;
 
     // Zeichnen
     void drawTopBar(Canvas& c);
@@ -62,6 +71,8 @@ private:
     void drawStatusBar(Canvas& c);
     void drawClip(Canvas& c, const ClipModel& clip, int track, std::int64_t start, bool selected,
                   float alpha);
+    void drawMidiClip(Canvas& c, const MidiClipModel& clip, int track, std::int64_t start, bool selected,
+                      float alpha);
     void drawSlider(Canvas& c, const Rect& rect, float position, float fillFrom);
 
     // Bedienung
@@ -69,6 +80,9 @@ private:
     void locateTo(float x);
     void togglePlay();
     void toggleRecord();
+    void stepInput(int track, int delta);
+    void stepOutput(int track, int delta);
+    bool selectedClip(std::int64_t& start, std::int64_t& length) const;
     std::int64_t snap(std::int64_t start, std::int64_t length, int skipTrack, int skipIndex) const;
     double rulerStep() const;
     void setStatus(const std::wstring& message);
@@ -81,6 +95,7 @@ private:
     double framesPerPixel_ = 882.0;  // Zoom
 
     int selTrack_ = -1, selIndex_ = -1;
+    bool selMidi_ = false;  // die Auswahl meint einen MIDI-Clip
 
     Drag drag_ = Drag::None;
     int dragTrack_ = -1;
@@ -97,12 +112,14 @@ private:
 
     std::wstring deviceInfo_;
     std::wstring midiInfo_;
+    std::wstring midiOutInfo_;
     std::uint32_t midiSeen_ = 0;       // zuletzt gesehener Zaehlerstand der Engine
     std::uint32_t midiErrorsSeen_ = 0;
     int midiLedTicks_ = 0;             // LED leuchtet, solange > 0
     int midiErrorTicks_ = 0;
     int midiTextTicks_ = 0;            // so lange bleibt die letzte Nachricht stehen
     std::wstring midiText_;
+    bool lastMidiFromKeyboard_ = false;
     std::wstring status_;
     int statusTicks_ = 0;
 };

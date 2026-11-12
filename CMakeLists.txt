@@ -38,6 +38,7 @@ if(WIN32)
         src/main.cpp
         src/audio/WasapiDevice.cpp
         src/midi/MidiInput.cpp
+        src/midi/MidiOutput.cpp
         src/ui/Canvas.cpp
         src/ui/MainView.cpp
         src/ui/MainWindow.cpp

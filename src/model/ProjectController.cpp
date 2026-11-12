@@ -432,6 +432,11 @@ std::int64_t ProjectController::estimatedLatencyFrames() const {
     return latencyProvider_ ? std::max<std::int64_t>(0, latencyProvider_()) : 0;
 }
 
+void ProjectController::applyMeasuredLatency(double frames) {
+    const double ms = (frames - static_cast<double>(estimatedLatencyFrames())) * 1000.0 / sampleRate_;
+    setRecordOffsetMs(static_cast<int>(std::lround(ms)));
+}
+
 std::int64_t ProjectController::appliedLatencyFrames() const {
     const auto offset = static_cast<std::int64_t>(recordOffsetMs_ * sampleRate_ / 1000.0);
     return std::max<std::int64_t>(0, estimatedLatencyFrames() + offset);

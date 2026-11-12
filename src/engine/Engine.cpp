@@ -79,6 +79,13 @@ bool Engine::setTempo(double bpm) noexcept {
     return send({CommandType::Tempo, 0, static_cast<float>(std::clamp(bpm, 20.0, 400.0))});
 }
 
+bool Engine::startLatencyProbe(LatencyProbe* probe) noexcept {
+    if (!probe) return false;
+    Command c{CommandType::Probe};
+    c.probe = probe;
+    return send(c);
+}
+
 bool Engine::setOffline(bool on) noexcept { return send({CommandType::Offline, 0, on ? 1.0f : 0.0f}); }
 
 bool Engine::setMetronome(bool on) noexcept { return send({CommandType::Metronome, 0, on ? 1.0f : 0.0f}); }
@@ -319,6 +326,9 @@ void Engine::drainCommands() noexcept {
                 break;
             case CommandType::Tempo:
                 tempo_ = static_cast<double>(c.value);
+                break;
+            case CommandType::Probe:
+                probe_ = c.probe;
                 break;
             case CommandType::Offline:
                 offline_ = c.value != 0.0f;
@@ -687,6 +697,14 @@ void Engine::process(const float* const* in, int numInputs, float* const* out, i
         done += n;
     }
     inL_ = inR_ = nullptr;
+
+    // Latenzmessung: Das Testsignal ersetzt alles, was die Engine sonst ausgibt.
+    if (probe_ && numOutputs > 0) {
+        const float* probeL = (in != nullptr && numInputs > 0) ? in[0] : nullptr;
+        const float* probeR = (in != nullptr && numInputs > 1) ? in[1] : probeL;
+        probe_->process(probeL, probeR, out[0], numOutputs > 1 ? out[1] : nullptr, numFrames);
+        if (probe_->done()) probe_ = nullptr;
+    }
 
     positionOut_.store(position_, std::memory_order_relaxed);
     playingOut_.store(wantPlay_, std::memory_order_relaxed);

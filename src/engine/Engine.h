@@ -4,6 +4,7 @@
 #include "disk/RecordSink.h"
 #include "disk/TrackStream.h"
 #include "engine/AudioPlugin.h"
+#include "engine/LatencyProbe.h"
 #include "engine/Synth.h"
 #include "midi/MidiMessage.h"
 #include "util/SpscQueue.h"
@@ -80,6 +81,10 @@ public:
     // Das Metronom klickt waehrend der Wiedergabe auf jedem Schlag, betont auf der Eins (4/4).
     bool setTempo(double bpm) noexcept;
     bool setMetronome(bool on) noexcept;
+
+    // Latenzmessung: Solange die Sonde laeuft, gibt die Engine nur ihr
+    // Testsignal aus. Der Aufrufer haelt probe am Leben, bis probe->done() gilt.
+    bool startLatencyProbe(LatencyProbe* probe) noexcept;
 
     // Offline-Rechnen (Export): Start und Stopp werden nicht ein- und
     // ausgeblendet, damit der Anfang der Datei unveraendert bleibt.
@@ -181,7 +186,7 @@ private:
         MasterGain,
         ArmTrack, InputMonitor, Record, RecordMidi,
         TrackMidiInput, TrackMidiOutput, TrackMidiSequence,
-        Tempo, Metronome, TrackPlugin, Offline,
+        Tempo, Metronome, TrackPlugin, Offline, Probe,
     };
 
     struct Command {
@@ -192,6 +197,7 @@ private:
         RecordSink* sink = nullptr;
         const MidiSequence* sequence = nullptr;
         AudioPlugin* plugin = nullptr;
+        LatencyProbe* probe = nullptr;
     };
 
     struct Track {
@@ -265,6 +271,7 @@ private:
     double tempo_ = 120.0;
     bool metronome_ = false;
     bool offline_ = false;
+    LatencyProbe* probe_ = nullptr;
     int clickRemaining_ = 0;   // noch zu spielende Frames des aktuellen Klicks
     int clickLength_ = 1;
     double clickPhase_ = 0.0;

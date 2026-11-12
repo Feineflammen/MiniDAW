@@ -40,6 +40,8 @@ Aktueller Stand: Projekte speichern, laden und als WAV exportieren.
 | Tasten W E T Z U O | schwarze Tasten |
 | Y / X | Oktave tiefer / höher |
 
+Menü "Extras" → "Latenz messen …": Mit einem Kabel von Ausgang 1 oder 2 der Soundkarte in einen Eingang misst die DAW die tatsächliche Verzögerung und stellt die Aufnahme-Latenz darauf ein.
+
 Menü "Datei": Neu (Strg+N), Öffnen (Strg+O), Speichern (Strg+S), Speichern unter (Strg+Umschalt+S), Als WAV exportieren (Strg+E). Projekte haben die Endung `.mdaw` und sind lesbare Textdateien; die Audiodateien bleiben an ihrem Ort.
 
 Am Spurkopf rechts stehen zwei Felder: oben der Eingang der Spur (Audio, MIDI alle, MIDI 1 bis 16), unten ihr MIDI-Ausgang (Synth oder MIDI 1 bis 16). Linksklick schaltet weiter, Rechtsklick zurück, das Mausrad geht auch. In der Statusleiste wählt ein Klick auf "MIDI aus" das Ausgabegerät.

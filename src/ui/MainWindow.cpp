@@ -82,8 +82,11 @@ bool MainWindow::create(HINSTANCE instance, int showCommand, std::string& error)
     AppendMenuW(file, MF_STRING, kFileExport, L"Als WAV &exportieren \u2026\tStrg+E");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, kFileQuit, L"&Beenden");
+    const HMENU tools = CreatePopupMenu();
+    AppendMenuW(tools, MF_STRING, kToolsMeasureLatency, L"&Latenz messen \u2026");
     const HMENU bar = CreateMenu();
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"&Datei");
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(tools), L"E&xtras");
 
     hwnd_ = CreateWindowExW(0, kClassName, L"MiniDAW", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                             1300, 880, nullptr, bar, instance, this);

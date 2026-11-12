@@ -27,6 +27,7 @@ endif()
 # Plattformunabhaengiger Kern: Engine, Dateien, Projektmodell.
 add_library(dawcore STATIC
     src/engine/Engine.cpp
+    src/engine/LatencyProbe.cpp
     src/engine/OfflineRender.cpp
     src/engine/Synth.cpp
     src/disk/PeakData.cpp

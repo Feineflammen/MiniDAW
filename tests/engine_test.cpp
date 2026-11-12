@@ -1603,6 +1603,131 @@ void testOfflineRender() {
     while (!controller.peaksIdle()) std::this_thread::yield();
 }
 
+// --- Latenzmessung -----------------------------------------------------------
+
+// Simuliert ein Kabel vom Ausgang in den Eingang: Was die Engine ausgibt, kommt
+// delay Frames spaeter am Eingang an, mit Faktor gain und etwas Rauschen.
+// Mit delayAfter/afterPulse aendert sich die Verzoegerung mitten in der Messung.
+struct Loopback {
+    std::vector<float> history;  // alle bisherigen Ausgaben (links)
+    int delay = 1234;
+    float gain = -0.3f;          // auch umgedrehte Polaritaet muss erkannt werden
+    float noise = 0.001f;
+    bool rightOnly = false;      // Kabel steckt im rechten Eingang
+    std::int64_t switchAt = -1;  // ab diesem Frame gilt delayAfter
+    int delayAfter = 0;
+    std::uint32_t seed = 1;
+
+    float noiseSample() {
+        seed = seed * 1664525u + 1013904223u;
+        return noise * (static_cast<float>(seed >> 8) / 8388608.0f - 1.0f);
+    }
+
+    // Rechnet einen Block: Eingang aus der Vergangenheit, dann Ausgabe merken.
+    void run(Rig& rig) {
+        const auto start = static_cast<std::int64_t>(history.size());
+        rig.inL.assign(kBlock, 0.0f);
+        rig.inR.assign(kBlock, 0.0f);
+        for (int i = 0; i < kBlock; ++i) {
+            const std::int64_t f = start + i;
+            const int d = (switchAt >= 0 && f >= switchAt) ? delayAfter : delay;
+            const float s = (f - d >= 0 && f - d < start) ? gain * history[static_cast<std::size_t>(f - d)] : 0.0f;
+            (rightOnly ? rig.inR : rig.inL)[static_cast<std::size_t>(i)] = s + noiseSample();
+            (rightOnly ? rig.inL : rig.inR)[static_cast<std::size_t>(i)] = noiseSample();
+        }
+        rig.render();
+        history.insert(history.end(), rig.l.begin(), rig.l.end());
+    }
+};
+
+LatencyProbe::Result measure(Loopback loop, Rig& rig) {
+    auto probe = std::make_unique<LatencyProbe>(kRate);
+    CHECK(rig.engine->startLatencyProbe(probe.get()));
+    for (int b = 0; b < 2000 && !probe->done(); ++b) loop.run(rig);
+    CHECK(probe->done());
+    return probe->analyze();
+}
+
+void testLatencyProbe() {
+    {
+        Rig rig;
+        // Waehrend der Messung ist nur das Testsignal zu hoeren, nicht der Testton der Spur.
+        rig.engine->setTrackTestTone(0, 440.0f);
+        rig.engine->play();
+        rig.render();
+        auto probe = std::make_unique<LatencyProbe>(kRate);
+        rig.engine->startLatencyProbe(probe.get());
+        rig.render();
+        CHECK(rig.l[0] == 0.0f && rig.r[100] == 0.0f);  // vor dem ersten Sweep: Stille
+        while (!probe->done()) rig.render();
+        rig.render();
+        CHECK(std::fabs(rig.render().first) > 0.05f);  // danach wieder der Testton
+    }
+
+    // Verschiedene Verzoegerungen, auch kleiner als ein Block, umgedrehte Polaritaet, leise.
+    for (const int delay : {300, 1234, 9000}) {
+        Rig rig;
+        Loopback loop;
+        loop.delay = delay;
+        const auto result = measure(loop, rig);
+        CHECK(result.ok);
+        CHECK(result.frames == delay);
+        CHECK(result.validPulses == LatencyProbe::kPulses);
+        if (!result.ok) std::printf("  Meldung: %s\n", result.message.c_str());
+    }
+    {
+        Rig rig;
+        Loopback loop;
+        loop.delay = 2000;
+        loop.gain = 0.02f;  // sehr leise, Rauschen bleibt
+        loop.rightOnly = true;
+        const auto result = measure(loop, rig);
+        CHECK(result.ok && result.frames == 2000);
+    }
+
+    // Kein Kabel: verstaendliche Meldung statt einer Zahl.
+    {
+        Rig rig;
+        Loopback loop;
+        loop.gain = 0.0f;
+        loop.noise = 0.0f;
+        const auto result = measure(loop, rig);
+        CHECK(!result.ok && !result.message.empty());
+    }
+    // Nur Rauschen: nichts sicher erkannt.
+    {
+        Rig rig;
+        Loopback loop;
+        loop.gain = 0.0f;
+        loop.noise = 0.05f;
+        const auto result = measure(loop, rig);
+        CHECK(!result.ok && result.validPulses < 4);
+    }
+    // Verzoegerung springt mitten in der Messung: wird als unzuverlaessig gemeldet.
+    {
+        Rig rig;
+        Loopback loop;
+        loop.delay = 1000;
+        loop.switchAt = static_cast<std::int64_t>(2.0 * kRate);
+        loop.delayAfter = 1400;
+        const auto result = measure(loop, rig);
+        CHECK(!result.ok && result.spread >= 300);
+    }
+
+    // Uebernahme in den Controller: Zusatz so, dass die angewandte Latenz der Messung entspricht.
+    {
+        Rig rig;
+        ProjectController controller(*rig.engine);
+        controller.setSampleRate(kRate);
+        controller.setLatencyProvider([] { return std::int64_t{960}; });  // Schaetzung 20 ms
+        controller.applyMeasuredLatency(1440.0);                           // gemessen 30 ms
+        CHECK(controller.recordOffsetMs() == 10);
+        CHECK(controller.appliedLatencyFrames() == 1440);
+        controller.applyMeasuredLatency(480.0);
+        CHECK(controller.recordOffsetMs() == -10);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1637,6 +1762,7 @@ int main() {
     testControllerPlugins();
     testProjectFile();
     testOfflineRender();
+    testLatencyProbe();
     {
         std::error_code ec;
         std::filesystem::remove_all(tempFile("minidaw_test_aufnahmen"), ec);

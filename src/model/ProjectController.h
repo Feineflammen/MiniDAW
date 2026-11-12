@@ -118,6 +118,9 @@ public:
     // deren Treiber eine falsche Latenz melden.
     void setRecordOffsetMs(int ms) noexcept { recordOffsetMs_ = ms < -500 ? -500 : ms > 500 ? 500 : ms; }
     int recordOffsetMs() const noexcept { return recordOffsetMs_; }
+    // Uebernimmt eine gemessene Latenz (Frames): Der Zusatz wird so gesetzt,
+    // dass Aufnahmen genau um diesen Betrag verschoben werden.
+    void applyMeasuredLatency(double frames);
     // Vom Geraet gemeldete Latenz in Frames (ohne den Zusatz).
     std::int64_t estimatedLatencyFrames() const;
     // Um so viel werden Aufnahmen tatsaechlich verschoben.

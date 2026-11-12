@@ -104,8 +104,25 @@ Clip-Grenzen, Überblendung bei Sprüngen während der Wiedergabe.
 - Immer nur eine Spur ist scharfgeschaltet. Mithören führt den Eingang durch
   Fader und Panorama dieser Spur, auch bei stehendem Transport.
 
-Bekannte Grenzen: Die Latenz ist eine Schätzung aus den Angaben des Treibers
-und dem Füllstand des Ringpuffers, kein Messwert. Haben Ein- und Ausgang
+Ausrichtung des Eingangs: Jedes Aufnahmepaket trägt einen Zeitstempel des
+Geräts. Beim Start (und nach einer Störung) legt der Wiedergabe-Thread den
+Lesezeiger so, dass ein Eingangs-Sample genau eine Ausgabeperiode plus zwei
+Aufnahmeperioden alt ist, wenn es gelesen wird. Damit ist der Abstand zwischen
+Ein- und Ausgang bei jedem Programmstart gleich. Ohne Zeitstempel wird wie
+früher nach Füllstand ausgerichtet; dann schwankt die Latenz von Start zu
+Start um bis zu eine Aufnahmeperiode.
+
+Latenzmessung (`engine/LatencyProbe`, Menü Extras): Mit einem Kabel vom
+Ausgang in einen Eingang gibt die Engine sechs kurze Sweeps aus und nimmt
+gleichzeitig auf. Ausgabe und Aufnahme laufen über denselben Zähler wie bei
+einer echten Aufnahme; die Verschiebung, unter der die Sweeps im Eingang
+wieder auftauchen (Kreuzkorrelation, Median der Einzelmessungen), ist genau
+die Latenz, um die Aufnahmen verschoben werden müssen. Übernommen wird sie
+als Zusatz zur Schätzung des Treibers. Weichen die Einzelmessungen
+voneinander ab, wird das gemeldet statt eine Zahl zu liefern.
+
+Bekannte Grenzen: Ohne Messung ist die Latenz eine Schätzung aus den Angaben
+des Treibers. Wandler und USB-Übertragung fehlen darin. Haben Ein- und Ausgang
 getrennte Taktgeber (zum Beispiel USB-Mikrofon und Onboard-Ausgang), laufen
 sie langsam auseinander; der Ringpuffer gleicht das alle paar Minuten mit
 einem kurzen Sprung aus. Sauber löst das erst ASIO oder ein Gerät für beides.

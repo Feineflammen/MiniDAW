@@ -8,6 +8,7 @@
 #include "disk/DiskThread.h"
 #include "disk/WavFile.h"
 #include "engine/Engine.h"
+#include "engine/LatencyProbe.h"
 #include "engine/OfflineRender.h"
 #include "midi/MidiInput.h"
 #include "midi/MidiOutput.h"
@@ -21,6 +22,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cwchar>
@@ -191,6 +193,16 @@ const wchar_t* const kProjectFilter = L"MiniDAW-Projekt (*.mdaw)\0*.mdaw\0Alle D
 const wchar_t* const kExportFilter =
     L"WAV, 24 Bit (*.wav)\0*.wav\0WAV, 16 Bit (*.wav)\0*.wav\0WAV, 32 Bit Float (*.wav)\0*.wav\0";
 
+// Zahl mit einer Nachkommastelle und deutschem Komma.
+std::wstring decimal(double value) {
+    wchar_t buffer[32];
+    std::swprintf(buffer, 32, L"%.1f", value);
+    std::wstring text = buffer;
+    for (auto& c : text)
+        if (c == L'.') c = L',';
+    return text;
+}
+
 int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& initialProject) {
     auto engine = std::make_unique<Engine>();
     WasapiDevice device;
@@ -306,7 +318,95 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
         if (!message.empty())
             MessageBoxW(window.hwnd(), fromUtf8(message).c_str(), L"MiniDAW", MB_OK | MB_ICONWARNING);
     };
+    // --- Latenzmessung ---
+    std::unique_ptr<LatencyProbe> probe;
+    std::chrono::steady_clock::time_point probeStarted;
+    // Sonden, deren Messung nie fertig wurde: Die Engine koennte sie noch
+    // anfassen, deshalb werden sie erst beim Beenden freigegeben.
+    std::vector<std::unique_ptr<LatencyProbe>> abandonedProbes;
+
+    const auto measureLatency = [&] {
+        if (probe) return;
+        if (controller.isRecording()) {
+            view.showMessage(L"W\u00E4hrend einer Aufnahme l\u00E4sst sich nicht messen.");
+            return;
+        }
+        if (device.inputChannels() == 0) {
+            MessageBoxW(window.hwnd(),
+                        L"Es ist kein Aufnahmeger\u00E4t ge\u00F6ffnet. In den Windows-Soundeinstellungen die "
+                        L"Soundkarte als Standard-Aufnahmeger\u00E4t w\u00E4hlen und MiniDAW neu starten.",
+                        L"Latenz messen", MB_OK | MB_ICONWARNING);
+            return;
+        }
+        const int answer = MessageBoxW(
+            window.hwnd(),
+            L"So wird gemessen:\n\n"
+            L"1.  Ein Kabel von Ausgang 1 oder 2 der Soundkarte in einen Eingang stecken. Beim Behringer "
+            L"UMC404HD eignen sich die PLAYBACK OUTPUTS 1/2 auf der R\u00FCckseite.\n\n"
+            L"2.  Den MIX-Regler (Direct Monitoring) ganz auf Wiedergabe drehen. Sonst kann die Schleife "
+            L"aus Kabel und Mith\u00F6ren pfeifen.\n\n"
+            L"3.  Gain des Eingangs niedrig, Lautsprecher und Kopfh\u00F6rer leise: Es ert\u00F6nen sechs "
+            L"kurze Sweeps.\n\n"
+            L"Die Messung dauert etwa f\u00FCnf Sekunden. Starten?",
+            L"Latenz messen", MB_OKCANCEL | MB_ICONINFORMATION);
+        if (answer != IDOK) return;
+
+        engine->stop();
+        probe = std::make_unique<LatencyProbe>(device.sampleRate());
+        if (!engine->startLatencyProbe(probe.get())) {
+            probe.reset();
+            view.showMessage(L"Die Messung lie\u00DF sich nicht starten.");
+            return;
+        }
+        probeStarted = std::chrono::steady_clock::now();
+        view.showMessage(L"Latenzmessung l\u00E4uft \u2026");
+    };
+
+    // Einmal pro Bild: Ist die Messung fertig, auswerten und Ergebnis zeigen.
+    const auto checkLatencyProbe = [&] {
+        if (!probe) return;
+        if (!probe->done()) {
+            if (std::chrono::steady_clock::now() - probeStarted > std::chrono::seconds(15)) {
+                abandonedProbes.push_back(std::move(probe));
+                MessageBoxW(window.hwnd(), L"Die Messung ist nicht fertig geworden. L\u00E4uft das Audioger\u00E4t?",
+                            L"Latenz messen", MB_OK | MB_ICONERROR);
+            }
+            return;
+        }
+        // Vor dem Dialog aus der Variable nehmen: Waehrend der Dialog offen ist, laeuft diese Funktion weiter.
+        const std::unique_ptr<LatencyProbe> finished = std::move(probe);
+        const LatencyProbe::Result result = finished->analyze();
+        if (!result.ok) {
+            MessageBoxW(window.hwnd(), (L"Messung fehlgeschlagen.\n\n" + fromUtf8(result.message)).c_str(),
+                        L"Latenz messen", MB_OK | MB_ICONWARNING);
+            return;
+        }
+        const double rate = device.sampleRate();
+        const double measuredMs = 1000.0 * result.frames / rate;
+        const double estimatedMs = 1000.0 * static_cast<double>(controller.estimatedLatencyFrames()) / rate;
+        const double appliedMs = 1000.0 * static_cast<double>(controller.appliedLatencyFrames()) / rate;
+        std::wstring text = L"Gemessene Latenz: " + decimal(measuredMs) + L" ms (" +
+                            std::to_wstring(static_cast<long long>(result.frames)) + L" Samples bei " +
+                            std::to_wstring(static_cast<int>(rate)) + L" Hz)\n\n" +
+                            L"Vom Treiber gemeldet: " + decimal(estimatedMs) + L" ms\n" +
+                            L"Derzeit eingestellt: " + decimal(appliedMs) + L" ms\n" +
+                            L"Streuung der " + std::to_wstring(result.validPulses) + L" Einzelmessungen: " +
+                            std::to_wstring(result.spread) + L" Samples\n";
+        if (!result.message.empty()) text += L"\n" + fromUtf8(result.message) + L"\n";
+        text += L"\nDie gemessene Latenz f\u00FCr Aufnahmen \u00FCbernehmen?";
+        if (MessageBoxW(window.hwnd(), text.c_str(), L"Latenz messen", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+            controller.applyMeasuredLatency(result.frames);
+            view.showMessage(L"Aufnahme-Latenz auf " +
+                             decimal(1000.0 * static_cast<double>(controller.appliedLatencyFrames()) / rate) +
+                             L" ms gesetzt.");
+        }
+    };
+
     const auto exportWav = [&] {
+        if (probe) {
+            view.showMessage(L"Erst die Latenzmessung abwarten.");
+            return;
+        }
         if (controller.isRecording()) {
             view.showMessage(L"W\u00E4hrend einer Aufnahme l\u00E4sst sich nicht exportieren.");
             return;
@@ -376,6 +476,7 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
             case ui::kFileSave: save(); break;
             case ui::kFileSaveAs: saveAs(); break;
             case ui::kFileExport: exportWav(); break;
+            case ui::kToolsMeasureLatency: measureLatency(); break;
             default: break;
         }
         updateTitle();
@@ -387,7 +488,10 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
         if (midi.refresh()) view.setMidiInfo(midi.summary());
         updateTitle();
     };
-    window.onFrame = [&plugins] { plugins.idle(); };
+    window.onFrame = [&] {
+        plugins.idle();
+        checkLatencyProbe();
+    };
     if (!window.create(instance, showCommand, error)) {
         showError(error);
         return 1;

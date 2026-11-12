@@ -14,6 +14,8 @@ namespace ui {
 
 // Befehle des Menues "Datei".
 enum MenuCommand { kFileNew = 1001, kFileOpen, kFileSave, kFileSaveAs, kFileExport, kFileQuit };
+// Befehle des Menues "Extras".
+enum ToolsCommand { kToolsMeasureLatency = 1101 };
 
 // Das Win32-Fenster. Reicht Eingaben an die MainView weiter und zeichnet sie
 // mit Direct2D, etwa 30-mal pro Sekunde.

@@ -16,6 +16,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <thread>
@@ -95,6 +97,18 @@ struct WasapiDevice::Impl {
     std::atomic<int> ringLatency{0};
     std::atomic<unsigned> inGlitches{0};
 
+    // Zeitstempel des zuletzt eingetroffenen Aufnahmepakets: Ringpuffer-Index
+    // seines ersten Frames und der Zeitpunkt, zu dem das Geraet diesen Frame
+    // aufgenommen hat (100-ns-Einheiten). Geschuetzt durch einen Zaehler
+    // (ungerade = wird gerade geschrieben), damit der Leser nie wartet.
+    std::atomic<std::uint64_t> stampSeq{0};
+    std::atomic<std::uint64_t> stampIndex{0};
+    std::atomic<std::int64_t> stampTime{0};
+    std::atomic<bool> stampsUsed{false};  // der Eingang ist ueber Zeitstempel ausgerichtet
+    int targetAgeFrames = 0;              // so alt ist ein Eingangs-Sample, wenn es gelesen wird
+    int expectedPadding = 0;              // ueblicher Fuellstand der Ausgabe beim Rueckruf
+    std::int64_t qpcFrequency = 1;
+
     std::vector<std::vector<float>> inPlanar;
     std::vector<const float*> inPtrs;
 
@@ -102,7 +116,9 @@ struct WasapiDevice::Impl {
     void closeInput();
     void renderThread();
     void captureThread();
-    void pullInput(UINT32 frames) noexcept;
+    void pullInput(UINT32 frames, UINT32 padding) noexcept;
+    bool alignFromTimestamp(std::size_t n, UINT32 padding, std::size_t& r) noexcept;
+    std::int64_t now100ns() const noexcept;
 };
 
 WasapiDevice::WasapiDevice() : d(std::make_unique<Impl>()) {}
@@ -265,6 +281,17 @@ void WasapiDevice::Impl::openInput(IMMDeviceEnumerator* enumerator) {
     fillAverage = 0.0f;
     ringLatency.store(2 * inPeriodFrames);
 
+    // Ein Eingangs-Sample wird gelesen, wenn es eine Ausgabeperiode plus zwei
+    // Aufnahmeperioden alt ist. Das reicht, damit bei jedem Rueckruf genug
+    // Daten da sind, und haengt nicht davon ab, wann die Pakete eintreffen.
+    targetAgeFrames = periodFrames + 2 * inPeriodFrames;
+    expectedPadding = static_cast<int>(bufferFrames) - periodFrames;
+    stampSeq.store(0);
+    stampsUsed.store(false);
+    LARGE_INTEGER frequency{};
+    QueryPerformanceFrequency(&frequency);
+    qpcFrequency = frequency.QuadPart > 0 ? frequency.QuadPart : 1;
+
     inPlanar.assign(static_cast<std::size_t>(inChannels), std::vector<float>(bufferFrames, 0.0f));
     inPtrs.clear();
     for (auto& ch : inPlanar) inPtrs.push_back(ch.data());
@@ -327,12 +354,54 @@ unsigned WasapiDevice::inputGlitches() const { return d->inGlitches.load(std::me
 
 int WasapiDevice::inputLatencyFrames() const {
     if (d->inChannels == 0) return 0;
+    // Ueber Zeitstempel ausgerichtet: immer gleich, unabhaengig vom Programmstart.
+    if (d->stampsUsed.load(std::memory_order_relaxed)) return d->targetAgeFrames;
     // Geraet + eine Aufnahmeperiode + Verweildauer im Ringpuffer.
     return d->inStreamLatency + d->inPeriodFrames + d->ringLatency.load(std::memory_order_relaxed);
 }
 
+std::int64_t WasapiDevice::Impl::now100ns() const noexcept {
+    LARGE_INTEGER counter{};
+    QueryPerformanceCounter(&counter);
+    const std::int64_t c = counter.QuadPart;
+    return (c / qpcFrequency) * 10'000'000 + (c % qpcFrequency) * 10'000'000 / qpcFrequency;
+}
+
+// Legt den Lesezeiger so, dass das naechste gelesene Sample genau
+// targetAgeFrames alt ist, gemessen an den Zeitstempeln des Geraets. So ist
+// der Abstand zwischen Ein- und Ausgang bei jedem Start gleich und eine
+// gemessene Latenz bleibt gueltig. Liefert false, solange das nicht geht.
+bool WasapiDevice::Impl::alignFromTimestamp(std::size_t n, UINT32 padding, std::size_t& r) noexcept {
+    std::uint64_t index = 0;
+    std::int64_t time = 0;
+    bool consistent = false;
+    for (int attempt = 0; attempt < 4 && !consistent; ++attempt) {
+        const std::uint64_t before = stampSeq.load(std::memory_order_acquire);
+        if (before == 0 || (before & 1)) continue;
+        index = stampIndex.load(std::memory_order_relaxed);
+        time = stampTime.load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        consistent = stampSeq.load(std::memory_order_relaxed) == before;
+    }
+    if (!consistent) return false;
+
+    // Index des Samples, das das Geraet gerade jetzt aufnimmt ...
+    const double recordedSince = static_cast<double>(now100ns() - time) * sampleRate / 10'000'000.0;
+    // ... minus das Zielalter. Kommt der Rueckruf frueher als sonst (mehr in der
+    // Ausgabe vorgemerkt), wird das Gelesene entsprechend spaeter hoerbar.
+    const double age = targetAgeFrames - (static_cast<double>(padding) - expectedPadding);
+    const auto want = static_cast<std::int64_t>(std::llround(static_cast<double>(index) + recordedSince - age));
+
+    const std::size_t w = ringWrite.load(std::memory_order_acquire);
+    if (want < 0 || static_cast<std::size_t>(want) < r) return false;  // noch nicht weit genug
+    if (static_cast<std::size_t>(want) + n > w) return false;          // Daten noch nicht da
+    r = static_cast<std::size_t>(want);
+    stampsUsed.store(true, std::memory_order_relaxed);
+    return true;
+}
+
 // Holt frames Eingangs-Frames aus dem Ringpuffer nach inPlanar (Wiedergabe-Thread).
-void WasapiDevice::Impl::pullInput(UINT32 frames) noexcept {
+void WasapiDevice::Impl::pullInput(UINT32 frames, UINT32 padding) noexcept {
     const std::size_t n = frames;
     const std::size_t target = static_cast<std::size_t>(2 * inPeriodFrames);  // Polster gegen Schwankungen
     const auto ch = static_cast<std::size_t>(inChannels);
@@ -347,7 +416,17 @@ void WasapiDevice::Impl::pullInput(UINT32 frames) noexcept {
         inGlitches.fetch_add(1, std::memory_order_relaxed);
     }
 
-    if (!primed && avail >= target + n) primed = true;
+    if (!primed) {
+        if (stampSeq.load(std::memory_order_acquire) != 0) {
+            // Das Geraet liefert Zeitstempel: danach ausrichten.
+            if (alignFromTimestamp(n, padding, r)) {
+                primed = true;
+                avail = ringWrite.load(std::memory_order_acquire) - r;
+            }
+        } else if (avail >= target + n) {
+            primed = true;  // ohne Zeitstempel: nach Fuellstand
+        }
+    }
 
     if (primed && avail >= n) {
         for (std::size_t i = 0; i < n; ++i) {
@@ -396,7 +475,7 @@ void WasapiDevice::Impl::renderThread() {
             std::memset(planarPtrs[static_cast<size_t>(c)], 0, frames * sizeof(float));
 
         if (inChannels > 0) {
-            pullInput(frames);
+            pullInput(frames, padding);
             callback->process(inPtrs.data(), inChannels, planarPtrs.data(), ch, static_cast<int>(frames));
         } else {
             callback->process(nullptr, 0, planarPtrs.data(), ch, static_cast<int>(frames));
@@ -439,7 +518,8 @@ void WasapiDevice::Impl::captureThread() {
             BYTE* data = nullptr;
             UINT32 frames = 0;
             DWORD flags = 0;
-            if (FAILED(capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) { ok = false; break; }
+            UINT64 devicePosition = 0, qpcPosition = 0;
+            if (FAILED(capture->GetBuffer(&data, &frames, &flags, &devicePosition, &qpcPosition))) { ok = false; break; }
 
             const std::size_t w = ringWrite.load(std::memory_order_relaxed);
             const std::size_t space = kInputRingFrames - (w - ringRead.load(std::memory_order_acquire));
@@ -451,6 +531,16 @@ void WasapiDevice::Impl::captureThread() {
                     for (std::size_t c = 0; c < ch; ++c) ring[idx + c] = silent ? 0.0f : src[i * ch + c];
                 }
                 ringWrite.store(w + frames, std::memory_order_release);
+
+                // Zeitstempel dieses Pakets fuer die Ausrichtung im Wiedergabe-Thread.
+                if ((flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) == 0 && qpcPosition != 0) {
+                    const std::uint64_t seq = stampSeq.load(std::memory_order_relaxed);
+                    stampSeq.store(seq + 1, std::memory_order_relaxed);
+                    std::atomic_thread_fence(std::memory_order_release);
+                    stampIndex.store(w, std::memory_order_relaxed);
+                    stampTime.store(static_cast<std::int64_t>(qpcPosition), std::memory_order_relaxed);
+                    stampSeq.store(seq + 2, std::memory_order_release);
+                }
             }  // sonst: Ringpuffer voll (die Wiedergabe steht), Paket verwerfen
 
             capture->ReleaseBuffer(frames);

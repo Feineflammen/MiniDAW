@@ -14,11 +14,14 @@ endif()
 # Plattformunabhaengiger Kern: Engine und Hilfsklassen.
 add_library(dawcore STATIC
     src/engine/Engine.cpp
+    src/disk/TrackStream.cpp
+    src/disk/WavFile.cpp
 )
 target_include_directories(dawcore PUBLIC src)
+find_package(Threads REQUIRED)
+target_link_libraries(dawcore PUBLIC Threads::Threads)
 
 # Offline-Tests, laufen ohne Audiogeraet.
-find_package(Threads REQUIRED)
 add_executable(engine_test tests/engine_test.cpp)
 target_link_libraries(engine_test PRIVATE dawcore Threads::Threads)
 

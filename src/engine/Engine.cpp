@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <utility>
 
 namespace {
 
@@ -58,6 +59,12 @@ bool Engine::setTrackTestTone(int track, float hz) noexcept {
     return send({CommandType::TrackTestTone, track, std::max(0.0f, hz)});
 }
 
+bool Engine::setTrackPlaylist(int track, Playlist playlist) {
+    if (!validTrack(track)) return false;
+    streams_[static_cast<std::size_t>(track)].setPlaylist(std::move(playlist));
+    return true;
+}
+
 float Engine::takeTrackPeak(int track) noexcept {
     if (!validTrack(track)) return 0.0f;
     return trackPeak_[static_cast<std::size_t>(track)].exchange(0.0f, std::memory_order_relaxed);
@@ -67,6 +74,14 @@ float Engine::takeMasterPeak() noexcept {
     return masterPeak_.exchange(0.0f, std::memory_order_relaxed);
 }
 
+// --- Disk-Thread -------------------------------------------------------------
+
+bool Engine::serviceDisk() {
+    bool worked = false;
+    for (auto& stream : streams_) worked = stream.service() || worked;
+    return worked;
+}
+
 // --- Audio-Thread ------------------------------------------------------------
 
 void Engine::prepare(double sampleRate, int /*numChannels*/, int maxFrames) {
@@ -74,6 +89,8 @@ void Engine::prepare(double sampleRate, int /*numChannels*/, int maxFrames) {
     maxFrames_ = std::max(1, maxFrames);
     masterL_.assign(static_cast<std::size_t>(maxFrames_), 0.0f);
     masterR_.assign(static_cast<std::size_t>(maxFrames_), 0.0f);
+    trackL_.assign(static_cast<std::size_t>(maxFrames_), 0.0f);
+    trackR_.assign(static_cast<std::size_t>(maxFrames_), 0.0f);
 
     for (auto& t : tracks_) {
         t.phase = 0.0;
@@ -151,28 +168,53 @@ void Engine::renderBlock(int numFrames) noexcept {
     std::memset(L, 0, bytes);
     std::memset(R, 0, bytes);
 
-    if (!rolling_) return;
+    if (!rolling_) {
+        // Transport steht: Stroeme auf die aktuelle Position vorbereiten,
+        // damit beim Start sofort Daten da sind.
+        for (auto& stream : streams_)
+            if (stream.active()) stream.prime(position_);
+        return;
+    }
 
     const float invFrames = 1.0f / static_cast<float>(numFrames);
+    float* tl = trackL_.data();
+    float* tr = trackR_.data();
 
     for (std::size_t ti = 0; ti < tracks_.size(); ++ti) {
         Track& t = tracks_[ti];
-        if (t.toneHz <= 0.0f) { t.curL = t.tgtL; t.curR = t.tgtR; continue; }
+        TrackStream& stream = streams_[ti];
+        const bool hasClips = stream.active();
+        const bool hasTone = t.toneHz > 0.0f;
+        if (!hasClips && !hasTone) { t.curL = t.tgtL; t.curR = t.tgtR; continue; }
 
+        // Quelle der Spur nach tl/tr: Audio-Clips, dazu gegebenenfalls der Testton.
+        if (hasClips) {
+            if (stream.read(position_, tl, tr, numFrames) < numFrames)
+                underruns_.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            std::memset(tl, 0, bytes);
+            std::memset(tr, 0, bytes);
+        }
+        if (hasTone) {
+            for (int i = 0; i < numFrames; ++i) {
+                const float s = kTestToneLevel * static_cast<float>(std::sin(t.phase));
+                t.phase += t.phaseInc;
+                if (t.phase >= kTwoPi) t.phase -= kTwoPi;
+                tl[i] += s;
+                tr[i] += s;
+            }
+        }
+
+        // Fader und Panorama, ueber den Block ueberblendet.
         const float stepL = (t.tgtL - t.curL) * invFrames;
         const float stepR = (t.tgtR - t.curR) * invFrames;
         float gl = t.curL, gr = t.curR;
         float peak = 0.0f;
-
         for (int i = 0; i < numFrames; ++i) {
-            const float s = kTestToneLevel * static_cast<float>(std::sin(t.phase));
-            t.phase += t.phaseInc;
-            if (t.phase >= kTwoPi) t.phase -= kTwoPi;
-
             gl += stepL;
             gr += stepR;
-            const float l = s * gl;
-            const float r = s * gr;
+            const float l = tl[i] * gl;
+            const float r = tr[i] * gr;
             L[i] += l;
             R[i] += r;
             peak = std::max(peak, std::max(std::fabs(l), std::fabs(r)));

@@ -17,4 +17,4 @@ build\Release\minidaw.exe
 
 Tests ausführen: `ctest --test-dir build -C Release --output-on-failure`
 
-Aktueller Stand: Schritt 2, Engine mit Transport und Mixer, bedient über die Konsole.
+Aktueller Stand: Schritt 3, WAV-Dateien als Clips abspielen, bedient über die Konsole.

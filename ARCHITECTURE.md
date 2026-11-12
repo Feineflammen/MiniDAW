@@ -71,6 +71,23 @@ Busse senden nicht an andere Busse. Dadurch sind Rückkopplungen ausgeschlossen
 und der Latenzausgleich bleibt einfach: Jeder Pfad wird auf die Latenz des
 längsten Pfads verzögert.
 
+## Audio-Clips und Streaming
+
+Jede Spur hat einen `TrackStream` mit einem Ringpuffer (65536 Frames Stereo).
+
+- Der UI-Thread übergibt die Clips einer Spur als fertige Liste (`Playlist`).
+- Der Disk-Thread liest die Dateien, mischt die Clips der Spur und füllt den
+  Ringpuffer fortlaufend entlang der Zeitachse. Zwischen Clips kommt Stille.
+- Der Audio-Thread entnimmt nur fertige Frames. Clips und Dateien sieht er nie.
+
+Sprung und Clip-Änderung laufen über denselben Weg: Der Disk-Thread setzt an
+einer Position neu an und meldet, bis wohin der alte Pufferinhalt verfällt.
+Fehlen Daten, liefert die Spur Stille und holt danach samplegenau wieder auf.
+Falsches Material darf nie zu hören sein; das prüfen die Tests.
+
+Noch offen (spätere Schritte): Samplerate-Umrechnung beim Import, Fades an
+Clip-Grenzen, Überblendung bei Sprüngen während der Wiedergabe.
+
 ## Modell und Engine
 
 - Das **Projektmodell** (Spuren, Clips, Noten, Plugin-Zuordnung, Mixerwerte)
@@ -105,8 +122,8 @@ Windows-Code. Sie bilden die Bibliothek `dawcore`, die auch die Tests benutzen.
 | Schritt | Inhalt | Stand |
 |---|---|---|
 | 1 | Audio-Callback über WASAPI, Sinus-Test | fertig, auf Hardware gehört |
-| 2 | Engine-Gerüst: Transport, Spuren-Array, Summierung, Kommando-Queue | Code und Offline-Tests fertig, Hörtest offen |
-| 3 | WAV-Wiedergabe mit Streaming vom Disk-Thread | offen |
+| 2 | Engine-Gerüst: Transport, Spuren-Array, Summierung, Kommando-Queue | fertig, auf Hardware gehört |
+| 3 | WAV-Wiedergabe mit Streaming vom Disk-Thread | Code und Offline-Tests fertig, Hörtest offen |
 | 4 | Minimale GUI: Spurliste, Timeline, Wellenformen, Transport, Fader | offen |
 | 5 | Audio-Aufnahme mit Latenzkorrektur | offen |
 | 6 | MIDI-Eingang, MIDI-Clips, Piano Roll | offen |

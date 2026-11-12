@@ -1,6 +1,7 @@
 #pragma once
 
 #include "audio/AudioCallback.h"
+#include "disk/TrackStream.h"
 #include "util/SpscQueue.h"
 
 #include <array>
@@ -14,6 +15,7 @@
 // Zwei Seiten:
 //  - UI-Thread: die Methoden im ersten Block. Sie schicken Kommandos ueber eine
 //    lock-freie Queue und lesen Zustand ueber Atomics. Genau EIN Thread darf sie rufen.
+//  - Disk-Thread: serviceDisk() liest die Audiodateien der Clips vor.
 //  - Audio-Thread: prepare() und process().
 class Engine final : public AudioCallback {
 public:
@@ -35,12 +37,23 @@ public:
     // Platzhalter-Quelle bis Schritt 3 (Audio-Clips). 0 Hz schaltet den Ton aus.
     bool setTrackTestTone(int track, float hz) noexcept;
 
+    // Ersetzt die Audio-Clips einer Spur. Wirkt, sobald der Disk-Thread sie uebernimmt.
+    bool setTrackPlaylist(int track, Playlist playlist);
+
+    // Anzahl der Bloecke, in denen einer Spur Daten von der Platte fehlten.
+    std::uint32_t underruns() const noexcept { return underruns_.load(std::memory_order_relaxed); }
+
     std::int64_t position() const noexcept { return positionOut_.load(std::memory_order_relaxed); }
     bool isPlaying() const noexcept { return playingOut_.load(std::memory_order_relaxed); }
 
     // Liefert den hoechsten Pegel seit dem letzten Aufruf und setzt ihn zurueck.
     float takeTrackPeak(int track) noexcept;
     float takeMasterPeak() noexcept;
+
+    // --- Disk-Thread -----------------------------------------------------
+    // Liest Audiodaten fuer alle Spuren vor. true, wenn etwas zu tun war.
+    // Wird von DiskThread in einer Schleife gerufen, in Tests direkt.
+    bool serviceDisk();
 
     // --- Audio-Thread ----------------------------------------------------
     void prepare(double sampleRate, int numChannels, int maxFrames) override;
@@ -92,10 +105,13 @@ private:
     bool rolling_ = false;   // Transport laeuft (auch noch waehrend des Ausblendens)
     std::int64_t position_ = 0;
     std::vector<float> masterL_, masterR_;
+    std::vector<float> trackL_, trackR_;
+    std::array<TrackStream, kNumTracks> streams_;
 
     // Rueckkanal zur UI
     std::atomic<std::int64_t> positionOut_{0};
     std::atomic<bool> playingOut_{false};
     std::array<std::atomic<float>, kNumTracks> trackPeak_{};
     std::atomic<float> masterPeak_{0.0f};
+    std::atomic<std::uint32_t> underruns_{0};
 };

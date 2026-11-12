@@ -96,6 +96,8 @@ int runScreenshot(const std::filesystem::path& output) {
 
     ui::MainView view(controller, *engine);
     view.setDeviceInfo(L"Screenshot-Modus, 44100 Hz");
+    view.setMidiInfo(L"Beispiel-Keyboard");
+    engine->postMidi(MidiMessage::noteOn(60, 100, 0));
     view.selectClip(1, 0);
     view.tick();
 
@@ -189,10 +191,14 @@ int runApp(HINSTANCE instance, int showCommand) {
         const std::string& reason = device.inputError();  // reines ASCII
         deviceInfo += L" (" + std::wstring(reason.begin(), reason.end()) + L")";
     }
-    deviceInfo += midi.names().empty() ? L", kein MIDI-Ger\u00E4t" : L", MIDI: " + midi.names();
     view.setDeviceInfo(deviceInfo);
+    view.setMidiInfo(midi.summary());
 
     ui::MainWindow window(view);
+    // MIDI-Geraete, die spaeter angesteckt oder abgezogen werden, neu erkennen.
+    window.onPeriodic = [&midi, &view] {
+        if (midi.refresh()) view.setMidiInfo(midi.summary());
+    };
     if (!window.create(instance, showCommand, error)) {
         showError(error);
         return 1;

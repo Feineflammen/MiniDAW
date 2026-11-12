@@ -67,6 +67,11 @@ bool Engine::setTrackPlaylist(int track, Playlist playlist) {
 
 bool Engine::postMidi(MidiMessage message) {
     std::lock_guard<std::mutex> lock(midiPostMutex_);
+    lastMidi_.store(static_cast<std::uint32_t>(message.status) |
+                        (static_cast<std::uint32_t>(message.data1) << 8) |
+                        (static_cast<std::uint32_t>(message.data2) << 16),
+                    std::memory_order_relaxed);
+    midiCount_.fetch_add(1, std::memory_order_relaxed);
     return midiIn_.push(message);
 }
 

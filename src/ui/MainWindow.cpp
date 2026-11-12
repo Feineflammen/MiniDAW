@@ -136,6 +136,10 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
         case WM_TIMER:
             if (wParam == kFrameTimer) {
                 view_.tick();
+                if (++frameCount_ >= 30) {
+                    frameCount_ = 0;
+                    if (onPeriodic) onPeriodic();
+                }
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
             return 0;

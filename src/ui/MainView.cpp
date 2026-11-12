@@ -15,6 +15,7 @@ constexpr float kTopH = 44.0f;
 constexpr float kRulerH = 24.0f;
 constexpr float kHeaderW = 220.0f;
 constexpr float kRowH = 44.0f;
+constexpr float kStatusH = 24.0f;
 
 const Rect kRewindRect{8.0f, 8.0f, 34.0f, 28.0f};
 const Rect kPlayRect{46.0f, 8.0f, 58.0f, 28.0f};
@@ -99,6 +100,22 @@ std::wstring widen(const std::string& text) {
     return out;
 }
 
+// Beschreibt eine MIDI-Nachricht in Klartext, zum Beispiel "Kanal 1: Note C4 an (Anschlag 100)".
+std::wstring describeMidi(MidiMessage m) {
+    static const wchar_t* const kNames[] = {L"C", L"C#", L"D", L"D#", L"E", L"F",
+                                            L"F#", L"G", L"G#", L"A", L"A#", L"H"};
+    const int channel = (m.status & 0x0F) + 1;
+    const std::wstring note = std::wstring(kNames[m.data1 % 12]) + std::to_wstring(m.data1 / 12 - 1);
+    wchar_t buffer[96];
+    if (m.isNoteOn()) std::swprintf(buffer, 96, L"Kanal %d: Note %ls an (Anschlag %d)", channel, note.c_str(), m.data2);
+    else if (m.isNoteOff()) std::swprintf(buffer, 96, L"Kanal %d: Note %ls aus", channel, note.c_str());
+    else if (m.type() == 0xB0) std::swprintf(buffer, 96, L"Kanal %d: Regler %d = %d", channel, m.data1, m.data2);
+    else if (m.type() == 0xE0) std::swprintf(buffer, 96, L"Kanal %d: Pitchbend", channel);
+    else if (m.type() == 0xC0) std::swprintf(buffer, 96, L"Kanal %d: Programm %d", channel, m.data1 + 1);
+    else std::swprintf(buffer, 96, L"Kanal %d: Aftertouch", channel);
+    return buffer;
+}
+
 std::wstring formatGain(float gain) {
     if (gain <= 0.0f) return L"-inf";
     wchar_t buffer[32];
@@ -163,6 +180,27 @@ void MainView::tick() {
 
     if (statusTicks_ > 0 && --statusTicks_ == 0) status_.clear();
 
+    // MIDI-Anzeige: LED kurz aufleuchten lassen, letzte Nachricht merken.
+    if (midiLedTicks_ > 0) --midiLedTicks_;
+    if (midiErrorTicks_ > 0) --midiErrorTicks_;
+    if (midiTextTicks_ > 0 && --midiTextTicks_ == 0) midiText_.clear();
+    const std::uint32_t midiCount = engine_.midiMessageCount();
+    if (midiCount != midiSeen_) {
+        midiSeen_ = midiCount;
+        midiLedTicks_ = 4;
+        midiTextTicks_ = 90;
+        const MidiMessage last = engine_.lastMidiMessage();
+        midiText_ = describeMidi(last);
+        // Der haeufigste Grund fuer "kein Ton": Es ist keine Spur scharfgeschaltet.
+        if (last.isNoteOn() && controller_.armedTrack() < 0 && status_.empty())
+            setStatus(L"MIDI kommt an, aber keine Spur ist scharfgeschaltet: R an einer Spur anklicken.");
+    }
+    const std::uint32_t midiErrors = engine_.midiErrorCount();
+    if (midiErrors != midiErrorsSeen_) {
+        midiErrorsSeen_ = midiErrors;
+        midiErrorTicks_ = 30;
+    }
+
     // Fertig geschriebene Aufnahmen als Clip uebernehmen.
     std::string message;
     if (controller_.poll(message)) {
@@ -212,6 +250,7 @@ void MainView::draw(Canvas& c, float width, float height) {
     drawTimeline(c);
     drawRuler(c);
     drawHeaders(c);
+    drawStatusBar(c);
     drawTopBar(c);
 }
 
@@ -279,13 +318,30 @@ void MainView::drawTopBar(Canvas& c) {
     const Rect right{kLatencyPlusRect.right() + 14.0f, 8.0f,
                      std::max(0.0f, width_ - kLatencyPlusRect.right() - 24.0f), 28.0f};
     if (!status_.empty()) {
-        c.text(status_, right, kMuteOn, Font::Normal, Align::Right);
-    } else {
-        std::wstring info = deviceInfo_;
-        const auto underruns = engine_.underruns();
-        if (underruns > 0) info += L"   Aussetzer: " + std::to_wstring(underruns);
-        c.text(info, right, kTextDim, Font::Small, Align::Right);
+        c.text(status_, right, kMuteOn, Font::Small, Align::Right);
+    } else if (engine_.underruns() > 0) {
+        c.text(L"Aussetzer: " + std::to_wstring(engine_.underruns()), right, kTextDim, Font::Small, Align::Right);
     }
+}
+
+// Statusleiste unten: links das Audiogeraet, rechts MIDI mit LED.
+void MainView::drawStatusBar(Canvas& c) {
+    const float y = height_ - kStatusH;
+    c.fill({0.0f, y, width_, kStatusH}, kPanel);
+    c.line(0.0f, y + 0.5f, width_, y + 0.5f, kLine);
+    c.text(deviceInfo_, {10.0f, y, width_ * 0.5f - 10.0f, kStatusH}, kTextDim, Font::Small);
+
+    // LED: gruen bei jeder gueltigen Nachricht, rot nach einem Uebertragungsfehler.
+    const Rect led{width_ - 22.0f, y + 7.0f, 10.0f, 10.0f};
+    const Color ledColor = midiErrorTicks_ > 0 ? kPlayhead : midiLedTicks_ > 0 ? kMeter : kDark;
+    c.fillRounded(led, 5.0f, ledColor);
+    c.strokeRounded(led, 5.0f, kLine);
+
+    std::wstring text = L"MIDI: " + midiInfo_;
+    if (midiErrorTicks_ > 0) text += L"   \u00DCbertragungsfehler";
+    else if (!midiText_.empty()) text += L"   " + midiText_;
+    c.text(text, {width_ * 0.5f, y, width_ * 0.5f - 30.0f, kStatusH},
+           midiText_.empty() ? kTextDim : kText, Font::Small, Align::Right);
 }
 
 void MainView::drawRuler(Canvas& c) {
@@ -372,7 +428,8 @@ void MainView::drawClip(Canvas& c, const ClipModel& clip, int track, std::int64_
 
 void MainView::drawTimeline(Canvas& c) {
     const float top = kTopH + kRulerH;
-    const Rect area{kHeaderW, top, std::max(0.0f, width_ - kHeaderW), std::max(0.0f, height_ - top)};
+    const Rect area{kHeaderW, top, std::max(0.0f, width_ - kHeaderW),
+                    std::max(0.0f, height_ - kStatusH - top)};
     c.pushClip(area);
 
     for (int t = 0; t < kProjectTracks; ++t)
@@ -421,7 +478,7 @@ void MainView::drawTimeline(Canvas& c) {
     }
 
     const float px = frameToX(static_cast<double>(engine_.position()));
-    c.line(px + 0.5f, top, px + 0.5f, height_, kPlayhead);
+    c.line(px + 0.5f, top, px + 0.5f, height_ - kStatusH, kPlayhead);
     c.popClip();
 }
 

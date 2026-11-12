@@ -22,6 +22,7 @@ public:
     MainView(ProjectController& controller, Engine& engine);
 
     void setDeviceInfo(std::wstring info) { deviceInfo_ = std::move(info); }
+    void setMidiInfo(std::wstring info) { midiInfo_ = std::move(info); }
     void selectClip(int track, int index) { selTrack_ = track; selIndex_ = index; }
 
     void tick();  // einmal pro Bild: Pegel abholen, Ansicht nachfuehren
@@ -58,6 +59,7 @@ private:
     void drawRuler(Canvas& c);
     void drawTimeline(Canvas& c);
     void drawHeaders(Canvas& c);
+    void drawStatusBar(Canvas& c);
     void drawClip(Canvas& c, const ClipModel& clip, int track, std::int64_t start, bool selected,
                   float alpha);
     void drawSlider(Canvas& c, const Rect& rect, float position, float fillFrom);
@@ -94,6 +96,13 @@ private:
     int octave_ = 4;  // Oktave der Rechnertastatur, 4 = C ist das mittlere C (Note 60)
 
     std::wstring deviceInfo_;
+    std::wstring midiInfo_;
+    std::uint32_t midiSeen_ = 0;       // zuletzt gesehener Zaehlerstand der Engine
+    std::uint32_t midiErrorsSeen_ = 0;
+    int midiLedTicks_ = 0;             // LED leuchtet, solange > 0
+    int midiErrorTicks_ = 0;
+    int midiTextTicks_ = 0;            // so lange bleibt die letzte Nachricht stehen
+    std::wstring midiText_;
     std::wstring status_;
     int statusTicks_ = 0;
 };

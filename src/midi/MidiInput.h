@@ -21,8 +21,12 @@ public:
     int open();
     void close();
 
-    // Namen der geoeffneten Geraete, durch Komma getrennt.
-    const std::wstring& names() const { return names_; }
+    // Regelmaessig aufrufen: oeffnet neu, wenn Geraete dazugekommen oder
+    // verschwunden sind. true, wenn sich etwas geaendert hat.
+    bool refresh();
+
+    // Lesbare Uebersicht fuer die Anzeige: Namen der Geraete, bei Problemen mit Grund.
+    const std::wstring& summary() const { return summary_; }
 
 private:
     static void CALLBACK callback(HMIDIIN handle, UINT message, DWORD_PTR instance, DWORD_PTR param1,
@@ -30,5 +34,6 @@ private:
 
     Engine& engine_;
     std::vector<HMIDIIN> handles_;
-    std::wstring names_;
+    std::wstring summary_ = L"kein MIDI-Ger\u00E4t";
+    UINT knownDevices_ = 0;
 };

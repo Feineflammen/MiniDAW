@@ -40,4 +40,6 @@ Aktueller Stand: Schritt 6a, MIDI live spielen mit eingebautem Synthesizer.
 | Tasten W E T Z U O | schwarze Tasten |
 | Y / X | Oktave tiefer / höher |
 
+Unten rechts zeigt eine LED jede eingehende MIDI-Nachricht, daneben steht im Klartext, was ankam (Kanal, Note, Anschlag). Rot bedeutet einen Übertragungsfehler.
+
 Aufnahmen landen unter `Dokumente\MiniDAW\Aufnahmen`.

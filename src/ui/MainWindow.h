@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -20,6 +21,9 @@ public:
     bool create(HINSTANCE instance, int showCommand, std::string& error);
     int run();
 
+    // Wird etwa einmal pro Sekunde im UI-Thread gerufen (Geraete neu erkennen und Aehnliches).
+    std::function<void()> onPeriodic;
+
 private:
     static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     LRESULT handle(UINT message, WPARAM wParam, LPARAM lParam);
@@ -29,6 +33,7 @@ private:
     MainView& view_;
     HWND hwnd_ = nullptr;
     float dpi_ = 96.0f;
+    int frameCount_ = 0;
     Microsoft::WRL::ComPtr<ID2D1Factory> d2d_;
     Microsoft::WRL::ComPtr<IDWriteFactory> dwrite_;
     Microsoft::WRL::ComPtr<ID2D1HwndRenderTarget> target_;

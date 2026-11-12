@@ -50,6 +50,18 @@ public:
     // Darf als einzige Methode aus mehreren Threads gerufen werden, zum
     // Beispiel aus dem Rueckruf des MIDI-Treibers; nie aus dem Audio-Thread.
     bool postMidi(MidiMessage message);
+    // Meldet eine fehlerhafte Nachricht vom MIDI-Treiber (nur fuer die Anzeige).
+    void reportMidiError() noexcept { midiErrors_.fetch_add(1, std::memory_order_relaxed); }
+
+    // Fuer die MIDI-Anzeige: Anzahl aller bisher eingegangenen Nachrichten,
+    // die zuletzt eingegangene und die Anzahl der Fehler.
+    std::uint32_t midiMessageCount() const noexcept { return midiCount_.load(std::memory_order_relaxed); }
+    std::uint32_t midiErrorCount() const noexcept { return midiErrors_.load(std::memory_order_relaxed); }
+    MidiMessage lastMidiMessage() const noexcept {
+        const std::uint32_t packed = lastMidi_.load(std::memory_order_relaxed);
+        return {static_cast<std::uint8_t>(packed & 0xFF), static_cast<std::uint8_t>((packed >> 8) & 0xFF),
+                static_cast<std::uint8_t>((packed >> 16) & 0xFF)};
+    }
 
     // Spur, die den Eingang bekommt (Pegelanzeige, Mithoeren). -1 = keine.
     bool setArmedTrack(int track) noexcept;
@@ -127,6 +139,9 @@ private:
     // der Audio-Thread liest ohne Sperre.
     SpscQueue<MidiMessage, 1024> midiIn_;
     std::mutex midiPostMutex_;
+    std::atomic<std::uint32_t> midiCount_{0};
+    std::atomic<std::uint32_t> midiErrors_{0};
+    std::atomic<std::uint32_t> lastMidi_{0};
 
     // Zustand des Audio-Threads
     double sampleRate_ = 48000.0;

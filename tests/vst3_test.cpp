@@ -52,14 +52,14 @@ struct TestSynth final : IComponent, IAudioProcessor, IEditController, IMidiMapp
     TestSynth() { ++liveObjects; }
     ~TestSynth() { --liveObjects; }
 
-    tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
+    tresult PLUGIN_API queryInterface(const TUID interfaceId, void** obj) override {
         *obj = nullptr;
-        if (FUnknownPrivate::iidEqual(iid, IComponent::iid) || FUnknownPrivate::iidEqual(iid, IPluginBase::iid) ||
-            FUnknownPrivate::iidEqual(iid, FUnknown::iid))
+        if (FUnknownPrivate::iidEqual(interfaceId, IComponent::iid) || FUnknownPrivate::iidEqual(interfaceId, IPluginBase::iid) ||
+            FUnknownPrivate::iidEqual(interfaceId, FUnknown::iid))
             *obj = static_cast<IComponent*>(this);
-        else if (FUnknownPrivate::iidEqual(iid, IAudioProcessor::iid)) *obj = static_cast<IAudioProcessor*>(this);
-        else if (FUnknownPrivate::iidEqual(iid, IEditController::iid)) *obj = static_cast<IEditController*>(this);
-        else if (FUnknownPrivate::iidEqual(iid, IMidiMapping::iid)) *obj = static_cast<IMidiMapping*>(this);
+        else if (FUnknownPrivate::iidEqual(interfaceId, IAudioProcessor::iid)) *obj = static_cast<IAudioProcessor*>(this);
+        else if (FUnknownPrivate::iidEqual(interfaceId, IEditController::iid)) *obj = static_cast<IEditController*>(this);
+        else if (FUnknownPrivate::iidEqual(interfaceId, IMidiMapping::iid)) *obj = static_cast<IMidiMapping*>(this);
         if (!*obj) return kNoInterface;
         ++refs;
         return kResultOk;
@@ -252,12 +252,12 @@ struct TestFactory final : IPluginFactory {
     tresult PLUGIN_API getFactoryInfo(PFactoryInfo*) override { return kNotImplemented; }
     int32 PLUGIN_API countClasses() override { return 1; }
     tresult PLUGIN_API getClassInfo(int32, PClassInfo*) override { return kNotImplemented; }
-    tresult PLUGIN_API createInstance(FIDString cid, FIDString iid, void** obj) override {
+    tresult PLUGIN_API createInstance(FIDString cid, FIDString interfaceId, void** obj) override {
         *obj = nullptr;
         if (!FUnknownPrivate::iidEqual(cid, kSynthClass)) return kNoInterface;
         auto* synth = new TestSynth();
         lastSynth = synth;
-        const tresult result = synth->queryInterface(iid, obj);
+        const tresult result = synth->queryInterface(interfaceId, obj);
         synth->release();
         return result;
     }

@@ -22,7 +22,7 @@ public:
     bool isOpen() const { return hwnd_ != nullptr; }
 
     // --- IPlugFrame: Das Plugin moechte eine andere Fenstergroesse ---
-    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID iid, void** obj) override;
+    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID interfaceId, void** obj) override;
     Steinberg::uint32 PLUGIN_API addRef() override { return 1; }
     Steinberg::uint32 PLUGIN_API release() override { return 1; }
     Steinberg::tresult PLUGIN_API resizeView(Steinberg::IPlugView* view, Steinberg::ViewRect* newSize) override;

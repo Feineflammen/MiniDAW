@@ -30,7 +30,7 @@ namespace vst3 {
 // Speicherstrom fuer Plugin-Zustaende.
 class MemoryStream final : public Steinberg::IBStream {
 public:
-    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID iid, void** obj) override;
+    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID interfaceId, void** obj) override;
     Steinberg::uint32 PLUGIN_API addRef() override { return 1; }
     Steinberg::uint32 PLUGIN_API release() override { return 1; }
 
@@ -53,7 +53,7 @@ private:
 // Ereignisliste fester Groesse fuer einen Block.
 class EventList final : public Steinberg::Vst::IEventList {
 public:
-    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID iid, void** obj) override;
+    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID interfaceId, void** obj) override;
     Steinberg::uint32 PLUGIN_API addRef() override { return 1; }
     Steinberg::uint32 PLUGIN_API release() override { return 1; }
 
@@ -71,7 +71,7 @@ private:
 // Wertverlauf eines Parameters innerhalb eines Blocks.
 class ParamQueue final : public Steinberg::Vst::IParamValueQueue {
 public:
-    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID iid, void** obj) override;
+    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID interfaceId, void** obj) override;
     Steinberg::uint32 PLUGIN_API addRef() override { return 1; }
     Steinberg::uint32 PLUGIN_API release() override { return 1; }
 
@@ -97,7 +97,7 @@ private:
 // Alle Parameteraenderungen eines Blocks, feste Groesse.
 class ParamChanges final : public Steinberg::Vst::IParameterChanges {
 public:
-    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID iid, void** obj) override;
+    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID interfaceId, void** obj) override;
     Steinberg::uint32 PLUGIN_API addRef() override { return 1; }
     Steinberg::uint32 PLUGIN_API release() override { return 1; }
 
@@ -144,7 +144,7 @@ public:
                  const PluginTransport& transport) noexcept override;
 
     // --- IComponentHandler (UI-Thread, gerufen vom Plugin) ---
-    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID iid, void** obj) override;
+    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID interfaceId, void** obj) override;
     Steinberg::uint32 PLUGIN_API addRef() override { return 1; }
     Steinberg::uint32 PLUGIN_API release() override { return 1; }
     Steinberg::tresult PLUGIN_API beginEdit(Steinberg::Vst::ParamID id) override;

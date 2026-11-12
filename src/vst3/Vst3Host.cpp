@@ -26,8 +26,8 @@ bool same(const TUID a, const TUID b) { return FUnknownPrivate::iidEqual(a, b); 
 // Attributliste fuer Nachrichten zwischen den beiden Haelften eines Plugins.
 class HostAttributeList final : public IAttributeList {
 public:
-    tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
-        if (same(iid, IAttributeList::iid) || same(iid, FUnknown::iid)) {
+    tresult PLUGIN_API queryInterface(const TUID interfaceId, void** obj) override {
+        if (same(interfaceId, IAttributeList::iid) || same(interfaceId, FUnknown::iid)) {
             addRef();
             *obj = static_cast<IAttributeList*>(this);
             return kResultOk;
@@ -128,8 +128,8 @@ class HostMessage final : public IMessage {
 public:
     HostMessage() : attributes_(new HostAttributeList()) {}
 
-    tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
-        if (same(iid, IMessage::iid) || same(iid, FUnknown::iid)) {
+    tresult PLUGIN_API queryInterface(const TUID interfaceId, void** obj) override {
+        if (same(interfaceId, IMessage::iid) || same(interfaceId, FUnknown::iid)) {
             addRef();
             *obj = static_cast<IMessage*>(this);
             return kResultOk;
@@ -160,8 +160,8 @@ private:
 // Der Host selbst, wie ihn das Plugin sieht.
 class HostApplication final : public IHostApplication {
 public:
-    tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
-        if (same(iid, IHostApplication::iid) || same(iid, FUnknown::iid)) {
+    tresult PLUGIN_API queryInterface(const TUID interfaceId, void** obj) override {
+        if (same(interfaceId, IHostApplication::iid) || same(interfaceId, FUnknown::iid)) {
             *obj = static_cast<IHostApplication*>(this);
             return kResultOk;
         }
@@ -177,13 +177,13 @@ public:
         std::memcpy(name, kName, sizeof kName);
         return kResultOk;
     }
-    tresult PLUGIN_API createInstance(TUID cid, TUID iid, void** obj) override {
+    tresult PLUGIN_API createInstance(TUID cid, TUID interfaceId, void** obj) override {
         if (!obj) return kInvalidArgument;
-        if (same(cid, IMessage::iid) && same(iid, IMessage::iid)) {
+        if (same(cid, IMessage::iid) && same(interfaceId, IMessage::iid)) {
             *obj = static_cast<IMessage*>(new HostMessage());
             return kResultOk;
         }
-        if (same(cid, IAttributeList::iid) && same(iid, IAttributeList::iid)) {
+        if (same(cid, IAttributeList::iid) && same(interfaceId, IAttributeList::iid)) {
             *obj = static_cast<IAttributeList*>(new HostAttributeList());
             return kResultOk;
         }
@@ -201,8 +201,8 @@ HostApplication& hostApplication() {
 
 // --- MemoryStream ------------------------------------------------------------
 
-tresult PLUGIN_API MemoryStream::queryInterface(const TUID iid, void** obj) {
-    if (same(iid, IBStream::iid) || same(iid, FUnknown::iid)) {
+tresult PLUGIN_API MemoryStream::queryInterface(const TUID interfaceId, void** obj) {
+    if (same(interfaceId, IBStream::iid) || same(interfaceId, FUnknown::iid)) {
         *obj = static_cast<IBStream*>(this);
         return kResultOk;
     }
@@ -248,8 +248,8 @@ tresult PLUGIN_API MemoryStream::tell(int64* pos) {
 
 // --- EventList, ParamQueue, ParamChanges -------------------------------------
 
-tresult PLUGIN_API EventList::queryInterface(const TUID iid, void** obj) {
-    if (same(iid, IEventList::iid) || same(iid, FUnknown::iid)) {
+tresult PLUGIN_API EventList::queryInterface(const TUID interfaceId, void** obj) {
+    if (same(interfaceId, IEventList::iid) || same(interfaceId, FUnknown::iid)) {
         *obj = static_cast<IEventList*>(this);
         return kResultOk;
     }
@@ -269,8 +269,8 @@ tresult PLUGIN_API EventList::addEvent(Event& e) {
     return kResultOk;
 }
 
-tresult PLUGIN_API ParamQueue::queryInterface(const TUID iid, void** obj) {
-    if (same(iid, IParamValueQueue::iid) || same(iid, FUnknown::iid)) {
+tresult PLUGIN_API ParamQueue::queryInterface(const TUID interfaceId, void** obj) {
+    if (same(interfaceId, IParamValueQueue::iid) || same(interfaceId, FUnknown::iid)) {
         *obj = static_cast<IParamValueQueue*>(this);
         return kResultOk;
     }
@@ -297,8 +297,8 @@ tresult PLUGIN_API ParamQueue::addPoint(int32 sampleOffset, ParamValue value, in
     return kResultOk;
 }
 
-tresult PLUGIN_API ParamChanges::queryInterface(const TUID iid, void** obj) {
-    if (same(iid, IParameterChanges::iid) || same(iid, FUnknown::iid)) {
+tresult PLUGIN_API ParamChanges::queryInterface(const TUID interfaceId, void** obj) {
+    if (same(interfaceId, IParameterChanges::iid) || same(interfaceId, FUnknown::iid)) {
         *obj = static_cast<IParameterChanges*>(this);
         return kResultOk;
     }
@@ -510,8 +510,8 @@ void Vst3Plugin::idle() {
 
 // --- Vst3Plugin: IComponentHandler (UI-Thread) -------------------------------
 
-tresult PLUGIN_API Vst3Plugin::queryInterface(const TUID iid, void** obj) {
-    if (same(iid, IComponentHandler::iid) || same(iid, FUnknown::iid)) {
+tresult PLUGIN_API Vst3Plugin::queryInterface(const TUID interfaceId, void** obj) {
+    if (same(interfaceId, IComponentHandler::iid) || same(interfaceId, FUnknown::iid)) {
         *obj = static_cast<IComponentHandler*>(this);
         return kResultOk;
     }

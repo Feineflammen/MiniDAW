@@ -110,8 +110,8 @@ void PluginWindow::setClientSize(int width, int height) {
     resizing_ = false;
 }
 
-tresult PLUGIN_API PluginWindow::queryInterface(const TUID iid, void** obj) {
-    if (FUnknownPrivate::iidEqual(iid, IPlugFrame::iid) || FUnknownPrivate::iidEqual(iid, FUnknown::iid)) {
+tresult PLUGIN_API PluginWindow::queryInterface(const TUID interfaceId, void** obj) {
+    if (FUnknownPrivate::iidEqual(interfaceId, IPlugFrame::iid) || FUnknownPrivate::iidEqual(interfaceId, FUnknown::iid)) {
         *obj = static_cast<IPlugFrame*>(this);
         return kResultOk;
     }

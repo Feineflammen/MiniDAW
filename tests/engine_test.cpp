@@ -41,7 +41,10 @@ struct Rig {
     float lastL = 0.0f, lastR = 0.0f;
     float maxJump = 0.0f;  // groesster Sprung zwischen zwei Samples, ueber alle Bloecke
 
-    explicit Rig(int maxFrames = kBlock) { engine->prepare(kRate, 2, maxFrames); }
+    explicit Rig(int maxFrames = kBlock) { engine->prepare(kRate, 2, 2, maxFrames); }
+
+    // Eingangssignal fuer den naechsten render()-Aufruf; leer = kein Eingang.
+    std::vector<float> inL, inR;
 
     // Spielt den Disk-Thread: liest vor, bis nichts mehr zu tun ist.
     void service() {
@@ -53,7 +56,12 @@ struct Rig {
         l.assign(static_cast<std::size_t>(frames), 0.0f);
         r.assign(static_cast<std::size_t>(frames), 0.0f);
         float* out[2] = {l.data(), r.data()};
-        engine->process(out, 2, frames);
+        if (inL.size() >= static_cast<std::size_t>(frames) && inR.size() >= static_cast<std::size_t>(frames)) {
+            const float* in[2] = {inL.data(), inR.data()};
+            engine->process(in, 2, out, 2, frames);
+        } else {
+            engine->process(nullptr, 0, out, 2, frames);
+        }
 
         float peakL = 0.0f, peakR = 0.0f;
         for (int i = 0; i < frames; ++i) {
@@ -621,6 +629,197 @@ void testProjectController() {
     CHECK(controller.project().tracks[0].clips[0].file->peaks->complete());
 }
 
+// --- Aufnahme ----------------------------------------------------------------
+
+// Eingangssignal: fuer jeden Frame seit Testbeginn eindeutig berechenbar.
+float inputL(std::int64_t i) { return 0.4f * static_cast<float>(std::sin(0.02 * static_cast<double>(i))); }
+float inputR(std::int64_t i) { return 0.3f * static_cast<float>(std::cos(0.017 * static_cast<double>(i))); }
+
+// Rendert einen Block mit Eingangssignal ab dem laufenden Zaehler.
+void renderWithInput(Rig& rig, std::int64_t& counter) {
+    rig.inL.resize(kBlock);
+    rig.inR.resize(kBlock);
+    for (int i = 0; i < kBlock; ++i) {
+        rig.inL[static_cast<std::size_t>(i)] = inputL(counter + i);
+        rig.inR[static_cast<std::size_t>(i)] = inputR(counter + i);
+    }
+    rig.render();
+    counter += kBlock;
+}
+
+void testRecording() {
+    const auto path = tempFile("minidaw_test_record.wav");
+    std::string error;
+    auto sink = RecordSink::create(path, 2, 48000, error);
+    CHECK(sink != nullptr);
+    if (!sink) return;
+
+    Rig rig;
+    std::int64_t counter = 0;
+    rig.engine->setArmedTrack(2);
+    rig.engine->locate(5000);
+    renderWithInput(rig, counter);  // Transport steht noch
+    CHECK(!rig.engine->isRecording());
+    CHECK(rig.engine->takeInputPeak() > 0.2f);  // Eingangspegel wird schon angezeigt
+
+    const std::int64_t firstRecorded = counter;
+    CHECK(rig.engine->record(sink));
+    constexpr int kBlocks = 40;
+    for (int b = 0; b < kBlocks; ++b) {
+        renderWithInput(rig, counter);
+        if (b % 3 == 0) rig.service();
+    }
+    CHECK(rig.engine->isRecording());
+    CHECK(rig.engine->isPlaying());
+    CHECK(!sink->done());
+
+    rig.engine->stop();
+    renderWithInput(rig, counter);  // Ausblend-Block, wird nicht mehr aufgenommen
+    renderWithInput(rig, counter);
+    CHECK(!rig.engine->isRecording());
+    rig.service();
+    CHECK(sink->done());
+    CHECK(sink->startPosition() == 5000);
+    CHECK(sink->framesCaptured() == kBlocks * kBlock);
+    CHECK(sink->overruns() == 0);
+    rig.engine->releaseRecordSink();
+
+    // Die Datei muss genau das Eingangssignal der aufgenommenen Bloecke enthalten.
+    auto wav = WavFile::open(path, error);
+    CHECK(wav != nullptr);
+    if (wav) {
+        CHECK(wav->frames() == kBlocks * kBlock);
+        CHECK(wav->channels() == 2);
+        std::vector<float> data(static_cast<std::size_t>(2 * wav->frames()));
+        wav->readStereo(0, static_cast<int>(wav->frames()), data.data());
+        bool ok = true;
+        for (std::int64_t i = 0; i < wav->frames(); ++i) {
+            if (data[static_cast<std::size_t>(2 * i)] != inputL(firstRecorded + i) ||
+                data[static_cast<std::size_t>(2 * i + 1)] != inputR(firstRecorded + i))
+                ok = false;
+        }
+        CHECK(ok);
+    }
+    wav.reset();
+    sink.reset();
+    std::filesystem::remove(path);
+}
+
+void testInputMonitor() {
+    Rig rig;
+    std::int64_t counter = 0;
+    rig.engine->setArmedTrack(1);
+    rig.engine->setTrackPan(1, -1.0f);  // ganz links: Verstaerkung links 1, rechts 0
+    renderWithInput(rig, counter);
+    // Ohne Mithoeren bleibt der Ausgang still.
+    bool silent = true;
+    for (int i = 0; i < kBlock; ++i)
+        if (rig.l[static_cast<std::size_t>(i)] != 0.0f || rig.r[static_cast<std::size_t>(i)] != 0.0f) silent = false;
+    CHECK(silent);
+
+    rig.engine->setInputMonitor(true);
+    renderWithInput(rig, counter);
+    const std::int64_t blockStart = counter;
+    renderWithInput(rig, counter);
+    bool ok = true;
+    for (int i = 0; i < kBlock; ++i) {
+        if (std::fabs(rig.l[static_cast<std::size_t>(i)] - inputL(blockStart + i)) > 1e-6f) ok = false;
+        if (rig.r[static_cast<std::size_t>(i)] != 0.0f) ok = false;
+    }
+    CHECK(ok);  // Eingang laeuft bei stehendem Transport durch Fader und Panorama
+    CHECK(rig.engine->position() == 0);
+
+    rig.engine->setArmedTrack(-1);
+    renderWithInput(rig, counter);
+    silent = true;
+    for (int i = 0; i < kBlock; ++i)
+        if (rig.l[static_cast<std::size_t>(i)] != 0.0f) silent = false;
+    CHECK(silent);
+}
+
+void testControllerRecording() {
+    const auto folder = tempFile("minidaw_test_aufnahmen");
+    std::error_code ec;
+    std::filesystem::remove_all(folder, ec);
+
+    Rig rig;
+    ProjectController controller(*rig.engine);
+    controller.setSampleRate(kRate);
+    std::int64_t counter = 0;
+    std::string message;
+
+    // Voraussetzungen werden geprueft und verstaendlich gemeldet.
+    CHECK(!controller.startRecording(message));  // kein Eingang
+    CHECK(!message.empty());
+    controller.setInputChannels(2);
+    CHECK(!controller.startRecording(message));  // keine Spur scharf
+    controller.armTrack(4);
+    CHECK(!controller.startRecording(message));  // kein Ordner
+    controller.setRecordingFolder(folder);
+    controller.setLatencyProvider([] { return std::int64_t{1000}; });
+
+    // Erste Aufnahme ab Position 0: Der Clip wuerde vor dem Nullpunkt beginnen
+    // und wird vorn um die Latenz gekuerzt.
+    CHECK(controller.startRecording(message));
+    CHECK(controller.isRecording());
+    CHECK(!controller.startRecording(message));  // laeuft schon
+    for (int b = 0; b < 20; ++b) {
+        renderWithInput(rig, counter);
+        rig.service();
+    }
+    std::int64_t start = -1, frames = -1;
+    CHECK(controller.recordProgress(start, frames));
+    CHECK(start == 0 && frames == 20 * kBlock);
+    CHECK(!controller.poll(message));  // noch nicht beendet
+
+    rig.engine->stop();
+    renderWithInput(rig, counter);
+    renderWithInput(rig, counter);
+    rig.service();
+    CHECK(controller.poll(message));
+    CHECK(!controller.isRecording());
+    const auto& clips = controller.project().tracks[4].clips;
+    CHECK(clips.size() == 1);
+    if (clips.size() == 1) {
+        CHECK(clips[0].start == 0);
+        CHECK(clips[0].offset == 1000);
+        CHECK(clips[0].length == 20 * kBlock - 1000);
+        CHECK(std::filesystem::exists(clips[0].file->path));
+    }
+
+    // Zweite Aufnahme ab Position 50000: Der Clip liegt um die Latenz frueher.
+    rig.engine->locate(50000);
+    renderWithInput(rig, counter);
+    CHECK(controller.startRecording(message));
+    for (int b = 0; b < 10; ++b) {
+        renderWithInput(rig, counter);
+        rig.service();
+    }
+    rig.engine->stop();
+    renderWithInput(rig, counter);
+    rig.service();
+    CHECK(controller.poll(message));
+    CHECK(clips.size() == 2);
+    if (clips.size() == 2) {
+        CHECK(clips[1].start == 49000);
+        CHECK(clips[1].offset == 0);
+        CHECK(clips[1].length == 10 * kBlock);
+        CHECK(clips[1].file != clips[0].file);
+    }
+
+    // Beenden waehrend einer laufenden Aufnahme hinterlaesst einen Clip.
+    CHECK(controller.startRecording(message));
+    for (int b = 0; b < 5; ++b) renderWithInput(rig, counter);
+    DiskThread disk;
+    disk.start(*rig.engine);
+    controller.finishRecordingOnShutdown();
+    disk.stop();
+    CHECK(!controller.isRecording());
+    CHECK(clips.size() == 3);
+
+    while (!controller.peaksIdle()) std::this_thread::yield();
+}
+
 }  // namespace
 
 int main() {
@@ -642,6 +841,13 @@ int main() {
     testThreadedSeeking();
     testPeakData();
     testProjectController();
+    testRecording();
+    testInputMonitor();
+    testControllerRecording();
+    {
+        std::error_code ec;
+        std::filesystem::remove_all(tempFile("minidaw_test_aufnahmen"), ec);
+    }
     {
         std::error_code ec;
         std::filesystem::remove(tempFile("minidaw_test_source.wav"), ec);

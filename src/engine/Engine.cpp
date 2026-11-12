@@ -65,6 +65,33 @@ bool Engine::setTrackPlaylist(int track, Playlist playlist) {
     return true;
 }
 
+bool Engine::setArmedTrack(int track) noexcept {
+    if (track != -1 && !validTrack(track)) return false;
+    return send({CommandType::ArmTrack, track});
+}
+
+bool Engine::setInputMonitor(bool on) noexcept {
+    return send({CommandType::InputMonitor, 0, on ? 1.0f : 0.0f});
+}
+
+bool Engine::record(std::shared_ptr<RecordSink> sink) {
+    if (!sink) return false;
+    Command c{CommandType::Record};
+    c.sink = sink.get();
+    {
+        std::lock_guard<std::mutex> lock(sinkMutex_);
+        diskSink_ = std::move(sink);
+    }
+    if (send(c)) return true;
+    releaseRecordSink();
+    return false;
+}
+
+void Engine::releaseRecordSink() {
+    std::lock_guard<std::mutex> lock(sinkMutex_);
+    diskSink_.reset();
+}
+
 float Engine::takeTrackPeak(int track) noexcept {
     if (!validTrack(track)) return 0.0f;
     return trackPeak_[static_cast<std::size_t>(track)].exchange(0.0f, std::memory_order_relaxed);
@@ -74,23 +101,35 @@ float Engine::takeMasterPeak() noexcept {
     return masterPeak_.exchange(0.0f, std::memory_order_relaxed);
 }
 
+float Engine::takeInputPeak() noexcept {
+    return inputPeak_.exchange(0.0f, std::memory_order_relaxed);
+}
+
 // --- Disk-Thread -------------------------------------------------------------
 
 bool Engine::serviceDisk() {
     bool worked = false;
     for (auto& stream : streams_) worked = stream.service() || worked;
+
+    std::shared_ptr<RecordSink> sink;
+    {
+        std::lock_guard<std::mutex> lock(sinkMutex_);
+        sink = diskSink_;
+    }
+    if (sink) worked = sink->service() || worked;
     return worked;
 }
 
 // --- Audio-Thread ------------------------------------------------------------
 
-void Engine::prepare(double sampleRate, int /*numChannels*/, int maxFrames) {
+void Engine::prepare(double sampleRate, int /*numInputs*/, int /*numOutputs*/, int maxFrames) {
     sampleRate_ = sampleRate;
     maxFrames_ = std::max(1, maxFrames);
-    masterL_.assign(static_cast<std::size_t>(maxFrames_), 0.0f);
-    masterR_.assign(static_cast<std::size_t>(maxFrames_), 0.0f);
-    trackL_.assign(static_cast<std::size_t>(maxFrames_), 0.0f);
-    trackR_.assign(static_cast<std::size_t>(maxFrames_), 0.0f);
+    const auto size = static_cast<std::size_t>(maxFrames_);
+    masterL_.assign(size, 0.0f);
+    masterR_.assign(size, 0.0f);
+    trackL_.assign(size, 0.0f);
+    trackR_.assign(size, 0.0f);
 
     for (auto& t : tracks_) {
         t.phase = 0.0;
@@ -98,7 +137,8 @@ void Engine::prepare(double sampleRate, int /*numChannels*/, int maxFrames) {
     }
     updateTargets();
     for (auto& t : tracks_) { t.curL = t.tgtL; t.curR = t.tgtR; }
-    masterCur_ = wantPlay_ ? masterGain_ : 0.0f;
+    masterCur_ = masterGain_;
+    transportCur_ = wantPlay_ ? 1.0f : 0.0f;
 }
 
 void Engine::drainCommands() noexcept {
@@ -113,6 +153,10 @@ void Engine::drainCommands() noexcept {
                 break;
             case CommandType::Stop:
                 wantPlay_ = false;  // rolling_ endet nach dem Ausblenden
+                if (recordSink_) {
+                    recordSink_->finish();
+                    recordSink_ = nullptr;
+                }
                 break;
             case CommandType::Locate:
                 position_ = c.position;
@@ -138,6 +182,18 @@ void Engine::drainCommands() noexcept {
                 break;
             case CommandType::MasterGain:
                 masterGain_ = c.value;
+                break;
+            case CommandType::ArmTrack:
+                armedTrack_ = c.track;
+                break;
+            case CommandType::InputMonitor:
+                monitor_ = c.value != 0.0f;
+                break;
+            case CommandType::Record:
+                if (recordSink_) recordSink_->finish();
+                recordSink_ = c.sink;
+                wantPlay_ = true;
+                rolling_ = true;
                 break;
         }
     }
@@ -168,24 +224,42 @@ void Engine::renderBlock(int numFrames) noexcept {
     std::memset(L, 0, bytes);
     std::memset(R, 0, bytes);
 
+    const bool haveInput = inL_ != nullptr;
+    const bool monitoring = monitor_ && haveInput && armedTrack_ >= 0;
+
+    // Eingangspegel fuer die Anzeige der scharfgeschalteten Spur.
+    if (haveInput && armedTrack_ >= 0) {
+        float peak = 0.0f;
+        for (int i = 0; i < numFrames; ++i)
+            peak = std::max(peak, std::max(std::fabs(inL_[i]), std::fabs(inR_[i])));
+        raisePeak(inputPeak_, peak);
+    }
+
     if (!rolling_) {
         // Transport steht: Stroeme auf die aktuelle Position vorbereiten,
         // damit beim Start sofort Daten da sind.
         for (auto& stream : streams_)
             if (stream.active()) stream.prime(position_);
-        return;
+        if (!monitoring) return;
     }
 
+    // Aufnahme: den Eingang dieses Blocks an den Disk-Thread weiterreichen.
+    if (rolling_ && recordSink_ && haveInput) recordSink_->push(position_, inL_, inR_, numFrames);
+
     const float invFrames = 1.0f / static_cast<float>(numFrames);
+    const float transportTarget = (rolling_ && wantPlay_) ? 1.0f : 0.0f;
+    const float transportStep = (transportTarget - transportCur_) * invFrames;
+    const bool transportFading = transportCur_ != 1.0f || transportTarget != 1.0f;
     float* tl = trackL_.data();
     float* tr = trackR_.data();
 
     for (std::size_t ti = 0; ti < tracks_.size(); ++ti) {
         Track& t = tracks_[ti];
         TrackStream& stream = streams_[ti];
-        const bool hasClips = stream.active();
-        const bool hasTone = t.toneHz > 0.0f;
-        if (!hasClips && !hasTone) { t.curL = t.tgtL; t.curR = t.tgtR; continue; }
+        const bool hasClips = rolling_ && stream.active();
+        const bool hasTone = rolling_ && t.toneHz > 0.0f;
+        const bool hasInput = monitoring && static_cast<int>(ti) == armedTrack_;
+        if (!hasClips && !hasTone && !hasInput) { t.curL = t.tgtL; t.curR = t.tgtR; continue; }
 
         // Quelle der Spur nach tl/tr: Audio-Clips, dazu gegebenenfalls der Testton.
         if (hasClips) {
@@ -202,6 +276,24 @@ void Engine::renderBlock(int numFrames) noexcept {
                 if (t.phase >= kTwoPi) t.phase -= kTwoPi;
                 tl[i] += s;
                 tr[i] += s;
+            }
+        }
+
+        // Start und Stopp blenden das abgespielte Material ueber einen Block.
+        if ((hasClips || hasTone) && transportFading) {
+            float g = transportCur_;
+            for (int i = 0; i < numFrames; ++i) {
+                g += transportStep;
+                tl[i] *= g;
+                tr[i] *= g;
+            }
+        }
+
+        // Mithoeren: Der Eingang laeuft durch Fader und Panorama der Spur.
+        if (hasInput) {
+            for (int i = 0; i < numFrames; ++i) {
+                tl[i] += inL_[i];
+                tr[i] += inR_[i];
             }
         }
 
@@ -224,9 +316,8 @@ void Engine::renderBlock(int numFrames) noexcept {
         raisePeak(trackPeak_[ti], peak);
     }
 
-    // Master-Fader. Start und Stopp blenden hier ueber einen Block ein und aus.
-    const float masterTarget = wantPlay_ ? masterGain_ : 0.0f;
-    const float step = (masterTarget - masterCur_) * invFrames;
+    // Master-Fader.
+    const float step = (masterGain_ - masterCur_) * invFrames;
     float g = masterCur_;
     float peak = 0.0f;
     for (int i = 0; i < numFrames; ++i) {
@@ -235,34 +326,46 @@ void Engine::renderBlock(int numFrames) noexcept {
         R[i] *= g;
         peak = std::max(peak, std::max(std::fabs(L[i]), std::fabs(R[i])));
     }
-    masterCur_ = masterTarget;
+    masterCur_ = masterGain_;
     raisePeak(masterPeak_, peak);
 
-    position_ += numFrames;
-    if (!wantPlay_) rolling_ = false;  // ausgeblendet, Transport steht
+    if (rolling_) {
+        transportCur_ = transportTarget;
+        position_ += numFrames;
+        if (!wantPlay_) rolling_ = false;  // ausgeblendet, Transport steht
+    }
 }
 
-void Engine::process(float* const* out, int numChannels, int numFrames) noexcept {
+void Engine::process(const float* const* in, int numInputs, float* const* out, int numOutputs,
+                     int numFrames) noexcept {
     drainCommands();
 
     int done = 0;
     while (done < numFrames) {
         const int n = std::min(numFrames - done, maxFrames_);
+        if (in != nullptr && numInputs > 0) {
+            inL_ = in[0] + done;
+            inR_ = (numInputs > 1 ? in[1] : in[0]) + done;
+        } else {
+            inL_ = inR_ = nullptr;
+        }
         renderBlock(n);
 
         const std::size_t bytes = static_cast<std::size_t>(n) * sizeof(float);
-        if (numChannels >= 2) {
+        if (numOutputs >= 2) {
             std::memcpy(out[0] + done, masterL_.data(), bytes);
             std::memcpy(out[1] + done, masterR_.data(), bytes);
-            for (int c = 2; c < numChannels; ++c) std::memset(out[c] + done, 0, bytes);
-        } else if (numChannels == 1) {
+            for (int c = 2; c < numOutputs; ++c) std::memset(out[c] + done, 0, bytes);
+        } else if (numOutputs == 1) {
             for (int i = 0; i < n; ++i)
                 out[0][done + i] = 0.5f * (masterL_[static_cast<std::size_t>(i)] +
                                            masterR_[static_cast<std::size_t>(i)]);
         }
         done += n;
     }
+    inL_ = inR_ = nullptr;
 
     positionOut_.store(position_, std::memory_order_relaxed);
     playingOut_.store(wantPlay_, std::memory_order_relaxed);
+    recordingOut_.store(recordSink_ != nullptr, std::memory_order_relaxed);
 }

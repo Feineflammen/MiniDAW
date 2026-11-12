@@ -1,4 +1,4 @@
-// Schritt 4: grafische Oberflaeche.
+// MiniDAW: Programmstart.
 //
 // Aufruf ohne Argumente startet die DAW.
 // "minidaw --screenshot bild.png" zeichnet die Oberflaeche mit Beispieldaten
@@ -15,6 +15,7 @@
 #include <windows.h>
 #include <objbase.h>
 #include <shellapi.h>
+#include <shlobj.h>
 
 #include <cmath>
 #include <cwchar>
@@ -74,7 +75,8 @@ int runScreenshot(const std::filesystem::path& output) {
     controller.setTrackPan(1, -0.6f);
     controller.setTrackPan(2, 0.6f);
     controller.setTrackMute(4, true);
-    controller.setTrackSolo(5, false);
+    controller.setInputChannels(2);
+    controller.armTrack(3);
 
     while (!controller.peaksIdle()) Sleep(10);
 
@@ -115,6 +117,17 @@ int runApp(HINSTANCE instance, int showCommand) {
 
     ProjectController controller(*engine);
     controller.setSampleRate(device.sampleRate());
+    controller.setInputChannels(device.inputChannels());
+    controller.setLatencyProvider([&device] {
+        return static_cast<std::int64_t>(device.inputLatencyFrames() + device.outputLatencyFrames());
+    });
+
+    // Aufnahmen landen unter Dokumente\MiniDAW\Aufnahmen.
+    PWSTR documents = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &documents)) && documents) {
+        controller.setRecordingFolder(std::filesystem::path(documents) / L"MiniDAW" / L"Aufnahmen");
+    }
+    if (documents) CoTaskMemFree(documents);
 
     if (!device.start(*engine, error)) {
         showError("Audio-Start fehlgeschlagen: " + error);
@@ -123,10 +136,18 @@ int runApp(HINSTANCE instance, int showCommand) {
     disk.start(*engine);
 
     ui::MainView view(controller, *engine);
-    wchar_t info[128];
-    std::swprintf(info, 128, L"%.0f Hz, Puffer %d Frames (%.1f ms)", device.sampleRate(),
-                  device.periodFrames(), 1000.0 * device.periodFrames() / device.sampleRate());
-    view.setDeviceInfo(info);
+    wchar_t info[160];
+    std::swprintf(info, 160, L"%.0f Hz, Puffer %d Frames (%.1f ms), %ls", device.sampleRate(),
+                  device.periodFrames(), 1000.0 * device.periodFrames() / device.sampleRate(),
+                  device.inputChannels() == 0   ? L"kein Eingang"
+                  : device.inputChannels() == 1 ? L"Eingang mono"
+                                                : L"Eingang stereo");
+    std::wstring deviceInfo = info;
+    if (device.inputChannels() == 0 && !device.inputError().empty()) {
+        const std::string& reason = device.inputError();  // reines ASCII
+        deviceInfo += L" (" + std::wstring(reason.begin(), reason.end()) + L")";
+    }
+    view.setDeviceInfo(deviceInfo);
 
     ui::MainWindow window(view);
     if (!window.create(instance, showCommand, error)) {
@@ -135,7 +156,10 @@ int runApp(HINSTANCE instance, int showCommand) {
     }
     const int result = window.run();
 
+    // Reihenfolge: erst den Audio-Thread anhalten, dann eine laufende Aufnahme
+    // abschliessen (dafuer muss der Disk-Thread noch laufen), dann den Disk-Thread.
     device.stop();
+    controller.finishRecordingOnShutdown();
     disk.stop();
     return result;
 }

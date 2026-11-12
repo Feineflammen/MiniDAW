@@ -164,6 +164,56 @@ void WavFile::readStereo(std::int64_t frame, int count, float* out) {
     }
 }
 
+bool WavWriter::open(const std::filesystem::path& path, int channels, int sampleRate, std::string& error) {
+    if (channels < 1 || sampleRate < 1) { error = "Ungueltige Parameter"; return false; }
+    out_.open(path, std::ios::binary | std::ios::trunc);
+    if (!out_) { error = "Datei laesst sich nicht anlegen"; return false; }
+    channels_ = channels;
+    frames_ = 0;
+
+    std::vector<unsigned char> head;
+    head.insert(head.end(), {'R', 'I', 'F', 'F'});
+    putU32(head, 36);  // wird in finish() korrigiert
+    head.insert(head.end(), {'W', 'A', 'V', 'E', 'f', 'm', 't', ' '});
+    putU32(head, 16);
+    putU16(head, kTagFloat);
+    putU16(head, static_cast<std::uint16_t>(channels));
+    putU32(head, static_cast<std::uint32_t>(sampleRate));
+    putU32(head, static_cast<std::uint32_t>(sampleRate * channels * 4));
+    putU16(head, static_cast<std::uint16_t>(channels * 4));
+    putU16(head, 32);
+    head.insert(head.end(), {'d', 'a', 't', 'a'});
+    putU32(head, 0);  // wird in finish() korrigiert
+    out_.write(reinterpret_cast<const char*>(head.data()), static_cast<std::streamsize>(head.size()));
+    if (!out_) { error = "Schreibfehler"; return false; }
+    return true;
+}
+
+bool WavWriter::write(const float* interleaved, std::int64_t frames) {
+    if (!out_.is_open() || frames <= 0) return out_.is_open();
+    out_.write(reinterpret_cast<const char*>(interleaved),
+               static_cast<std::streamsize>(frames * channels_ * 4));
+    frames_ += frames;
+    return static_cast<bool>(out_);
+}
+
+bool WavWriter::finish() {
+    if (!out_.is_open()) return false;
+    const std::int64_t dataSize = std::min<std::int64_t>(frames_ * channels_ * 4, 0xFFFFFFFFll - 36);
+    std::vector<unsigned char> size;
+    putU32(size, static_cast<std::uint32_t>(36 + dataSize));
+    out_.seekp(4);
+    out_.write(reinterpret_cast<const char*>(size.data()), 4);
+    size.clear();
+    putU32(size, static_cast<std::uint32_t>(dataSize));
+    out_.seekp(40);
+    out_.write(reinterpret_cast<const char*>(size.data()), 4);
+    out_.flush();
+    const bool ok = static_cast<bool>(out_);
+    out_.close();
+    return ok;
+}
+
 bool writeWav(const std::filesystem::path& path, const float* interleaved, std::int64_t frames,
               int channels, int sampleRate, WavFormat format, std::string& error) {
     if (frames < 0 || channels < 1 || sampleRate < 1) { error = "Ungueltige Parameter"; return false; }

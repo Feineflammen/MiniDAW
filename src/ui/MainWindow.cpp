@@ -149,6 +149,7 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
             if (wParam == VK_SPACE) view_.key(Key::Space);
             else if (wParam == VK_HOME) view_.key(Key::Home);
             else if (wParam == VK_DELETE) view_.key(Key::Delete);
+            else if (wParam == 'R') view_.key(Key::Record);
             else break;
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;

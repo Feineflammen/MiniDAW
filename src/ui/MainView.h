@@ -13,7 +13,7 @@
 
 namespace ui {
 
-enum class Key { Space, Home, Delete };
+enum class Key { Space, Home, Delete, Record };
 
 // Die gesamte Oberflaeche: Transportleiste, Spurkoepfe, Zeitachse.
 // Kennt kein Fenster. Koordinaten sind geraeteunabhaengige Pixel (96 pro Zoll).
@@ -42,6 +42,7 @@ private:
     double xToFrame(float x) const;
     int rowAt(float y) const;
     float rowY(int track) const;
+    Rect armRect(int track) const;
     Rect muteRect(int track) const;
     Rect soloRect(int track) const;
     Rect gainRect(int track) const;
@@ -61,6 +62,7 @@ private:
     void applyDrag(float x, float y);
     void locateTo(float x);
     void togglePlay();
+    void toggleRecord();
     std::int64_t snap(std::int64_t start, std::int64_t length, int skipTrack, int skipIndex) const;
     double rulerStep() const;
     void setStatus(const std::wstring& message);
@@ -84,6 +86,7 @@ private:
 
     std::array<float, kProjectTracks> meters_{};
     float masterMeter_ = 0.0f;
+    float inputMeter_ = 0.0f;
 
     std::wstring deviceInfo_;
     std::wstring status_;

@@ -1,7 +1,11 @@
 #include "model/ProjectController.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <ctime>
+#include <thread>
 #include <utility>
 
 ProjectController::ProjectController(Engine& engine) : engine_(engine) {
@@ -116,6 +120,129 @@ void ProjectController::setTrackSolo(int track, bool solo) {
 void ProjectController::setMasterGain(float gain) {
     project_.masterGain = std::max(0.0f, gain);
     engine_.setMasterGain(gain);
+}
+
+// --- Aufnahme ----------------------------------------------------------------
+
+void ProjectController::armTrack(int track) {
+    if (track != -1 && !validTrack(track)) return;
+    if (recordSink_) return;  // waehrend der Aufnahme nicht umschalten
+    armedTrack_ = track;
+    engine_.setArmedTrack(track);
+}
+
+void ProjectController::setMonitor(bool on) {
+    monitor_ = on;
+    engine_.setInputMonitor(on);
+}
+
+bool ProjectController::startRecording(std::string& message) {
+    message.clear();
+    if (recordSink_) { message = "Es l\u00E4uft bereits eine Aufnahme."; return false; }
+    if (inputChannels_ < 1) { message = "Kein Audio-Eingang verf\u00FCgbar."; return false; }
+    if (!validTrack(armedTrack_)) {
+        message = "Keine Spur scharfgeschaltet. Erst R an einer Spur anklicken.";
+        return false;
+    }
+    if (recordingFolder_.empty()) { message = "Kein Aufnahmeordner festgelegt."; return false; }
+
+    std::error_code ec;
+    std::filesystem::create_directories(recordingFolder_, ec);
+    if (ec) { message = "Aufnahmeordner l\u00E4sst sich nicht anlegen."; return false; }
+
+    // Dateiname aus Datum und Uhrzeit; bei Namensgleichheit hochzaehlen.
+    const std::time_t now = std::time(nullptr);
+    std::tm local{};
+#ifdef _WIN32
+    localtime_s(&local, &now);
+#else
+    localtime_r(&now, &local);
+#endif
+    char stamp[64];
+    std::strftime(stamp, sizeof stamp, "%Y-%m-%d_%H-%M-%S", &local);
+    std::filesystem::path path;
+    for (int n = 0;; ++n) {
+        std::string name = std::string("Aufnahme_") + stamp;
+        if (n > 0) name += "_" + std::to_string(n);
+        path = recordingFolder_ / (name + ".wav");
+        if (!std::filesystem::exists(path, ec)) break;
+    }
+
+    std::string error;
+    auto sink = RecordSink::create(path, inputChannels_, static_cast<int>(sampleRate_ + 0.5), error);
+    if (!sink) { message = "Aufnahmedatei: " + error; return false; }
+
+    recordSink_ = sink;
+    recordTrack_ = armedTrack_;
+    if (!engine_.record(std::move(sink))) {
+        recordSink_.reset();
+        recordTrack_ = -1;
+        std::filesystem::remove(path, ec);
+        message = "Aufnahme lie\u00DF sich nicht starten.";
+        return false;
+    }
+    return true;
+}
+
+bool ProjectController::recordProgress(std::int64_t& start, std::int64_t& frames) const noexcept {
+    if (!recordSink_ || !recordSink_->started()) return false;
+    start = recordSink_->startPosition();
+    frames = recordSink_->framesCaptured();
+    return true;
+}
+
+bool ProjectController::poll(std::string& message) {
+    message.clear();
+    if (!recordSink_ || !recordSink_->done()) return false;
+
+    // Die Datei ist fertig geschrieben: Aufnahme abschliessen und Clip anlegen.
+    const std::shared_ptr<RecordSink> sink = std::move(recordSink_);
+    const int track = recordTrack_;
+    recordSink_.reset();
+    recordTrack_ = -1;
+    engine_.releaseRecordSink();
+
+    std::error_code ec;
+    if (!sink->started() || sink->framesCaptured() <= 0) {
+        std::filesystem::remove(sink->path(), ec);
+        return false;
+    }
+
+    std::string error;
+    auto file = openFile(sink->path(), error);
+    if (!file) { message = "Aufnahme nicht lesbar: " + error; return false; }
+
+    // Um die Latenz nach vorn schieben: Was aufgenommen wurde, gehoert zu dem,
+    // was der Spieler in dem Moment gehoert hat.
+    const std::int64_t latency = latencyProvider_ ? std::max<std::int64_t>(0, latencyProvider_()) : 0;
+    ClipModel clip;
+    clip.start = sink->startPosition() - latency;
+    clip.offset = 0;
+    clip.length = file->wav->frames();
+    if (clip.start < 0) {
+        // Der Anfang laege vor dem Nullpunkt: vorn entsprechend abschneiden.
+        clip.offset = -clip.start;
+        clip.length -= clip.offset;
+        clip.start = 0;
+    }
+    if (clip.length <= 0) return false;
+    clip.file = std::move(file);
+    project_.tracks[static_cast<std::size_t>(track)].clips.push_back(std::move(clip));
+    syncTrack(track);
+
+    if (sink->overruns() > 0)
+        message = "Aufnahme mit L\u00FCcken: Die Platte kam nicht nach.";
+    return true;
+}
+
+void ProjectController::finishRecordingOnShutdown() {
+    if (!recordSink_) return;
+    recordSink_->finish();  // der Audio-Thread laeuft nicht mehr, also darf das hier passieren
+    std::string message;
+    for (int i = 0; i < 600 && recordSink_; ++i) {
+        poll(message);
+        if (recordSink_) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
 }
 
 std::int64_t ProjectController::projectLength() const noexcept {

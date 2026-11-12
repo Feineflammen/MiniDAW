@@ -17,7 +17,7 @@ build\Release\minidaw.exe
 
 Tests ausführen: `ctest --test-dir build -C Release --output-on-failure`
 
-Aktueller Stand: Schritt 4, erste grafische Oberfläche.
+Aktueller Stand: Schritt 5, Audio-Aufnahme.
 
 ## Bedienung
 
@@ -31,3 +31,8 @@ Aktueller Stand: Schritt 4, erste grafische Oberfläche.
 | Entf | ausgewählten Clip löschen |
 | Mausrad / Strg + Mausrad | scrollen / zoomen |
 | Doppelklick auf einen Regler | zurück auf 0 dB bzw. Mitte |
+| R am Spurkopf | Spur für die Aufnahme scharfschalten |
+| Rec-Knopf oder Taste R | Aufnahme starten / beenden |
+| Mithören | Eingang über die scharfgeschaltete Spur hören |
+
+Aufnahmen landen unter `Dokumente\MiniDAW\Aufnahmen`.

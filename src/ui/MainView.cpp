@@ -18,10 +18,12 @@ constexpr float kRowH = 44.0f;
 
 const Rect kRewindRect{8.0f, 8.0f, 34.0f, 28.0f};
 const Rect kPlayRect{46.0f, 8.0f, 58.0f, 28.0f};
-const Rect kTimeRect{114.0f, 6.0f, 124.0f, 32.0f};
-const Rect kMasterLabelRect{250.0f, 8.0f, 50.0f, 28.0f};
-const Rect kMasterRect{302.0f, 15.0f, 160.0f, 14.0f};
-const Rect kMasterMeterRect{474.0f, 18.0f, 110.0f, 8.0f};
+const Rect kRecordRect{108.0f, 8.0f, 46.0f, 28.0f};
+const Rect kTimeRect{162.0f, 6.0f, 124.0f, 32.0f};
+const Rect kMasterLabelRect{298.0f, 8.0f, 50.0f, 28.0f};
+const Rect kMasterRect{350.0f, 15.0f, 150.0f, 14.0f};
+const Rect kMasterMeterRect{512.0f, 18.0f, 100.0f, 8.0f};
+const Rect kMonitorRect{690.0f, 8.0f, 76.0f, 28.0f};
 
 // Farben
 constexpr Color kBg = rgb(0x1B1C1F);
@@ -35,6 +37,7 @@ constexpr Color kTextDim = rgb(0x8D9099);
 constexpr Color kAccent = rgb(0x4C9AFF);
 constexpr Color kPlayhead = rgb(0xFF5A5A);
 constexpr Color kMuteOn = rgb(0xE8A33D);
+constexpr Color kRecord = rgb(0xE5484D);
 constexpr Color kSoloOn = rgb(0xE6D34A);
 constexpr Color kButton = rgb(0x3A3D45);
 constexpr Color kMeter = rgb(0x4CD27A);
@@ -72,8 +75,26 @@ std::wstring formatTime(double seconds) {
     return buffer;
 }
 
-// Die Meldungen des Kerns sind reines ASCII.
-std::wstring widen(const std::string& text) { return std::wstring(text.begin(), text.end()); }
+// Wandelt die UTF-8-Meldungen des Kerns in UTF-16 um (Zeichen bis U+FFFF).
+std::wstring widen(const std::string& text) {
+    std::wstring out;
+    for (std::size_t i = 0; i < text.size();) {
+        const auto c = static_cast<unsigned char>(text[i]);
+        unsigned code = c;
+        std::size_t length = 1;
+        if (c >= 0xE0 && i + 2 < text.size()) {
+            code = ((c & 0x0Fu) << 12) | ((static_cast<unsigned char>(text[i + 1]) & 0x3Fu) << 6) |
+                   (static_cast<unsigned char>(text[i + 2]) & 0x3Fu);
+            length = 3;
+        } else if (c >= 0xC0 && i + 1 < text.size()) {
+            code = ((c & 0x1Fu) << 6) | (static_cast<unsigned char>(text[i + 1]) & 0x3Fu);
+            length = 2;
+        }
+        out.push_back(static_cast<wchar_t>(code));
+        i += length;
+    }
+    return out;
+}
 
 std::wstring formatGain(float gain) {
     if (gain <= 0.0f) return L"-inf";
@@ -107,10 +128,11 @@ int MainView::rowAt(float y) const {
     return row < kProjectTracks ? row : -1;
 }
 
-Rect MainView::muteRect(int track) const { return {66.0f, rowY(track) + 11.0f, 22.0f, 22.0f}; }
-Rect MainView::soloRect(int track) const { return {92.0f, rowY(track) + 11.0f, 22.0f, 22.0f}; }
-Rect MainView::gainRect(int track) const { return {124.0f, rowY(track) + 7.0f, 70.0f, 14.0f}; }
-Rect MainView::panRect(int track) const { return {124.0f, rowY(track) + 25.0f, 70.0f, 12.0f}; }
+Rect MainView::armRect(int track) const { return {62.0f, rowY(track) + 12.0f, 20.0f, 20.0f}; }
+Rect MainView::muteRect(int track) const { return {86.0f, rowY(track) + 12.0f, 20.0f, 20.0f}; }
+Rect MainView::soloRect(int track) const { return {110.0f, rowY(track) + 12.0f, 20.0f, 20.0f}; }
+Rect MainView::gainRect(int track) const { return {140.0f, rowY(track) + 7.0f, 56.0f, 14.0f}; }
+Rect MainView::panRect(int track) const { return {140.0f, rowY(track) + 25.0f, 56.0f, 12.0f}; }
 Rect MainView::meterRect(int track) const { return {204.0f, rowY(track) + 5.0f, 8.0f, 34.0f}; }
 
 double MainView::rulerStep() const {
@@ -133,7 +155,21 @@ void MainView::tick() {
     masterMeter_ = std::max(engine_.takeMasterPeak(), masterMeter_ * 0.82f);
     if (masterMeter_ < 0.0001f) masterMeter_ = 0.0f;
 
+    inputMeter_ = std::max(engine_.takeInputPeak(), inputMeter_ * 0.82f);
+    if (inputMeter_ < 0.0001f) inputMeter_ = 0.0f;
+
     if (statusTicks_ > 0 && --statusTicks_ == 0) status_.clear();
+
+    // Fertig geschriebene Aufnahmen als Clip uebernehmen.
+    std::string message;
+    if (controller_.poll(message)) {
+        const int track = controller_.armedTrack();
+        if (track >= 0) {
+            selTrack_ = track;
+            selIndex_ = static_cast<int>(controller_.project().tracks[static_cast<std::size_t>(track)].clips.size()) - 1;
+        }
+    }
+    if (!message.empty()) setStatus(widen(message));
 
     // Ansicht mitlaufen lassen, wenn der Abspielzeiger rechts hinauslaeuft.
     if (engine_.isPlaying() && drag_ == Drag::None) {
@@ -153,6 +189,15 @@ void MainView::setStatus(const std::wstring& message) {
 void MainView::togglePlay() {
     if (engine_.isPlaying()) engine_.stop();
     else engine_.play();
+}
+
+void MainView::toggleRecord() {
+    if (controller_.isRecording()) {
+        engine_.stop();
+        return;
+    }
+    std::string message;
+    if (!controller_.startRecording(message)) setStatus(widen(message));
 }
 
 // --- Zeichnen ----------------------------------------------------------------
@@ -187,6 +232,10 @@ void MainView::drawTopBar(Canvas& c) {
     c.fillRounded(kPlayRect, 4.0f, playing ? kAccent : kButton);
     c.text(playing ? L"Stop" : L"Play", kPlayRect, playing ? kDark : kText, Font::Normal, Align::Center);
 
+    const bool recording = controller_.isRecording();
+    c.fillRounded(kRecordRect, 4.0f, recording ? kRecord : kButton);
+    c.text(L"Rec", kRecordRect, recording ? rgb(0xFFFFFF) : kRecord, Font::Normal, Align::Center);
+
     c.fillRounded(kTimeRect, 4.0f, kDark);
     c.text(formatTime(static_cast<double>(engine_.position()) / controller_.sampleRate()), kTimeRect,
            kText, Font::Large, Align::Center);
@@ -203,9 +252,13 @@ void MainView::drawTopBar(Canvas& c) {
     c.text(formatGain(controller_.project().masterGain) + L" dB",
            {kMasterMeterRect.right() + 10.0f, 8.0f, 70.0f, 28.0f}, kTextDim, Font::Small);
 
+    const bool monitor = controller_.monitor();
+    c.fillRounded(kMonitorRect, 4.0f, monitor ? kAccent : kButton);
+    c.text(L"Mith\u00F6ren", kMonitorRect, monitor ? kDark : kTextDim, Font::Normal, Align::Center);
+
     // Rechts: Meldung oder Geraeteinfo mit Aussetzer-Zaehler.
-    const Rect right{kMasterMeterRect.right() + 90.0f, 8.0f,
-                     std::max(0.0f, width_ - kMasterMeterRect.right() - 100.0f), 28.0f};
+    const Rect right{kMonitorRect.right() + 14.0f, 8.0f,
+                     std::max(0.0f, width_ - kMonitorRect.right() - 24.0f), 28.0f};
     if (!status_.empty()) {
         c.text(status_, right, kMuteOn, Font::Normal, Align::Right);
     } else {
@@ -328,6 +381,20 @@ void MainView::drawTimeline(Canvas& c) {
         }
     }
 
+    // Laufende Aufnahme: roter Balken von der Startposition bis zum Abspielzeiger.
+    std::int64_t recStart = 0, recFrames = 0;
+    if (controller_.isRecording() && controller_.recordProgress(recStart, recFrames)) {
+        const float x0 = std::max(frameToX(static_cast<double>(recStart)), kHeaderW - 8.0f);
+        const float x1 = std::min(frameToX(static_cast<double>(recStart + recFrames)), width_ + 8.0f);
+        if (x1 > x0) {
+            const Rect body{x0, rowY(controller_.recordTrack()) + 2.0f, std::max(2.0f, x1 - x0), kRowH - 4.0f};
+            c.fillRounded(body, 4.0f, rgb(0xE5484D, 0.45f));
+            c.strokeRounded(body, 4.0f, kRecord);
+            c.text(L"Aufnahme", {std::max(x0, kHeaderW) + 5.0f, body.y + 1.0f, 80.0f, 14.0f},
+                   rgb(0xFFFFFF, 0.9f), Font::Small);
+        }
+    }
+
     if (draggingClip && selTrack_ >= 0) {
         const auto& clips = project.tracks[static_cast<std::size_t>(selTrack_)].clips;
         if (selIndex_ >= 0 && selIndex_ < static_cast<int>(clips.size()))
@@ -349,7 +416,12 @@ void MainView::drawHeaders(Canvas& c) {
 
         c.fill({0.0f, y + 6.0f, 3.0f, kRowH - 12.0f},
                rgb(kClipColors[static_cast<std::size_t>(t) % std::size(kClipColors)]));
-        c.text(track.name, {10.0f, y, 54.0f, kRowH}, kText);
+        c.text(track.name, {10.0f, y, 50.0f, kRowH}, kText);
+
+        const bool armed = controller_.armedTrack() == t;
+        const Rect a = armRect(t);
+        c.fillRounded(a, 3.0f, armed ? kRecord : kButton);
+        c.text(L"R", a, armed ? rgb(0xFFFFFF) : kTextDim, Font::Normal, Align::Center);
 
         const Rect m = muteRect(t);
         c.fillRounded(m, 3.0f, track.mute ? kMuteOn : kButton);
@@ -364,7 +436,8 @@ void MainView::drawHeaders(Canvas& c) {
 
         const Rect meter = meterRect(t);
         c.fill(meter, kDark);
-        const float peak = meters_[static_cast<std::size_t>(t)];
+        // Die scharfgeschaltete Spur zeigt zusaetzlich den Eingangspegel.
+        const float peak = std::max(meters_[static_cast<std::size_t>(t)], armed ? inputMeter_ : 0.0f);
         const float level = gainToPosition(peak);
         if (level > 0.0f) {
             const float h = meter.h * level;
@@ -425,6 +498,10 @@ void MainView::mouseDown(float x, float y, bool doubleClick) {
             viewStart_ = 0.0;
         } else if (kPlayRect.contains(x, y)) {
             togglePlay();
+        } else if (kRecordRect.contains(x, y)) {
+            toggleRecord();
+        } else if (kMonitorRect.contains(x, y)) {
+            controller_.setMonitor(!controller_.monitor());
         } else if (x >= kMasterRect.x - 6.0f && x < kMasterRect.right() + 6.0f) {
             if (doubleClick) {
                 controller_.setMasterGain(1.0f);
@@ -453,7 +530,9 @@ void MainView::mouseDown(float x, float y, bool doubleClick) {
         const TrackModel& model = controller_.project().tracks[static_cast<std::size_t>(track)];
         const Rect gain = gainRect(track);
         const Rect pan = panRect(track);
-        if (muteRect(track).contains(x, y)) {
+        if (armRect(track).contains(x, y)) {
+            controller_.armTrack(controller_.armedTrack() == track ? -1 : track);
+        } else if (muteRect(track).contains(x, y)) {
             controller_.setTrackMute(track, !model.mute);
         } else if (soloRect(track).contains(x, y)) {
             controller_.setTrackSolo(track, !model.solo);
@@ -569,6 +648,9 @@ void MainView::key(Key k) {
     switch (k) {
         case Key::Space:
             togglePlay();
+            break;
+        case Key::Record:
+            toggleRecord();
             break;
         case Key::Home:
             engine_.locate(0);

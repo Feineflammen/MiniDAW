@@ -88,6 +88,26 @@ Falsches Material darf nie zu hören sein; das prüfen die Tests.
 Noch offen (spätere Schritte): Samplerate-Umrechnung beim Import, Fades an
 Clip-Grenzen, Überblendung bei Sprüngen während der Wiedergabe.
 
+## Aufnahme
+
+- Das Audiogerät öffnet neben der Ausgabe das Standard-Aufnahmegerät. Ein
+  eigener Thread liest dessen Pakete in einen Ringpuffer; der Audio-Thread der
+  Ausgabe gibt den Takt vor und holt sich pro Block die passende Menge.
+  Windows rechnet den Eingang auf die Samplerate der Ausgabe um.
+- Die Engine reicht den Eingang während der Aufnahme an eine `RecordSink`
+  weiter (Ringpuffer). Der Disk-Thread schreibt daraus eine WAV-Datei
+  (32-Bit-Float). Der Audio-Thread fasst die Datei nie an.
+- Ist die Datei fertig, legt der `ProjectController` den Clip an und schiebt
+  ihn um die Gesamtlatenz (Eingang + Ausgang) nach vorn.
+- Immer nur eine Spur ist scharfgeschaltet. Mithören führt den Eingang durch
+  Fader und Panorama dieser Spur, auch bei stehendem Transport.
+
+Bekannte Grenzen: Die Latenz ist eine Schätzung aus den Angaben des Treibers
+und dem Füllstand des Ringpuffers, kein Messwert. Haben Ein- und Ausgang
+getrennte Taktgeber (zum Beispiel USB-Mikrofon und Onboard-Ausgang), laufen
+sie langsam auseinander; der Ringpuffer gleicht das alle paar Minuten mit
+einem kurzen Sprung aus. Sauber löst das erst ASIO oder ein Gerät für beides.
+
 ## Modell und Engine
 
 - Das **Projektmodell** (Spuren, Clips, Noten, Plugin-Zuordnung, Mixerwerte)
@@ -124,8 +144,8 @@ Windows-Code. Sie bilden die Bibliothek `dawcore`, die auch die Tests benutzen.
 | 1 | Audio-Callback über WASAPI, Sinus-Test | fertig, auf Hardware gehört |
 | 2 | Engine-Gerüst: Transport, Spuren-Array, Summierung, Kommando-Queue | fertig, auf Hardware gehört |
 | 3 | WAV-Wiedergabe mit Streaming vom Disk-Thread | fertig, auf Hardware gehört |
-| 4 | Minimale GUI: Spurliste, Timeline, Wellenformen, Transport, Fader | Code fertig, per Screenshot geprüft, Bedientest offen |
-| 5 | Audio-Aufnahme mit Latenzkorrektur | offen |
+| 4 | Minimale GUI: Spurliste, Timeline, Wellenformen, Transport, Fader | fertig, auf Hardware bedient |
+| 5 | Audio-Aufnahme mit Latenzkorrektur | Code und Offline-Tests fertig, Test mit echtem Eingang offen |
 | 6 | MIDI-Eingang, MIDI-Clips, Piano Roll | offen |
 | 7 | VST3-Hosting: Laden, Verarbeiten, Editor-Fenster, State | offen |
 | 8 | Mixer komplett: Inserts, Sends, Busse, Pegel, Latenzausgleich | offen |

@@ -5,6 +5,7 @@
 #include "model/Project.h"
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -41,6 +42,39 @@ public:
     void setTrackSolo(int track, bool solo);
     void setMasterGain(float gain);
 
+    // --- Aufnahme ---
+    // Anzahl der Eingangskanaele des Audiogeraets, 0 = kein Eingang.
+    void setInputChannels(int channels) noexcept { inputChannels_ = channels; }
+    int inputChannels() const noexcept { return inputChannels_; }
+    // Ordner fuer neue Aufnahmen.
+    void setRecordingFolder(std::filesystem::path folder) { recordingFolder_ = std::move(folder); }
+    // Liefert die Gesamtlatenz (Eingang + Ausgang) in Frames. Um diesen Betrag
+    // wird eine Aufnahme nach vorn geschoben, damit sie zum Gehoerten passt.
+    void setLatencyProvider(std::function<std::int64_t()> provider) { latencyProvider_ = std::move(provider); }
+
+    // Schaltet eine Spur fuer die Aufnahme scharf, -1 = keine. Immer nur eine Spur.
+    void armTrack(int track);
+    int armedTrack() const noexcept { return armedTrack_; }
+    void setMonitor(bool on);
+    bool monitor() const noexcept { return monitor_; }
+
+    // Startet Wiedergabe und Aufnahme auf der scharfgeschalteten Spur.
+    // Beendet wird mit Engine::stop().
+    bool startRecording(std::string& message);
+    bool isRecording() const noexcept { return recordSink_ != nullptr; }
+    int recordTrack() const noexcept { return recordTrack_; }
+    // Fuer die Anzeige waehrend der Aufnahme. false, solange noch nichts aufgenommen ist.
+    bool recordProgress(std::int64_t& start, std::int64_t& frames) const noexcept;
+
+    // Regelmaessig aufrufen (einmal pro Bild). Legt den Clip an, sobald eine
+    // beendete Aufnahme fertig geschrieben ist. true, wenn sich das Projekt
+    // geaendert hat; message enthaelt dann gegebenenfalls einen Hinweis.
+    bool poll(std::string& message);
+
+    // Vor dem Beenden rufen, nachdem der Audio-Thread gestoppt ist: schliesst
+    // eine noch laufende Aufnahme ab. Der Disk-Thread muss dabei noch laufen.
+    void finishRecordingOnShutdown();
+
     // Ende des letzten Clips, in Frames.
     std::int64_t projectLength() const noexcept;
 
@@ -55,5 +89,14 @@ private:
     Project project_;
     double sampleRate_ = 44100.0;
     std::vector<std::weak_ptr<AudioFile>> files_;
+
+    int inputChannels_ = 0;
+    int armedTrack_ = -1;
+    bool monitor_ = false;
+    std::filesystem::path recordingFolder_;
+    std::function<std::int64_t()> latencyProvider_;
+    std::shared_ptr<RecordSink> recordSink_;
+    int recordTrack_ = -1;
+
     PeakBuilder peakBuilder_;
 };

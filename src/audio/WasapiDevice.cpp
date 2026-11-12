@@ -14,6 +14,7 @@
 #include <avrt.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -47,13 +48,20 @@ HRESULT activateClient(IMMDevice* device, ComPtr<IAudioClient>& client) {
                             reinterpret_cast<void**>(client.GetAddressOf()));
 }
 
+int toFrames(REFERENCE_TIME time, double sampleRate) {  // time in 100-ns-Einheiten
+    return static_cast<int>(static_cast<double>(time) * sampleRate / 10'000'000.0 + 0.5);
+}
+
+constexpr std::size_t kInputRingFrames = std::size_t{1} << 15;
+constexpr std::size_t kInputRingMask = kInputRingFrames - 1;
+
 }  // namespace
 
 struct WasapiDevice::Impl {
+    // Ausgabe
     ComPtr<IAudioClient> client;
     ComPtr<IAudioRenderClient> render;
     HANDLE event = nullptr;
-
     std::thread thread;
     std::atomic<bool> running{false};
     std::atomic<bool> failed{false};
@@ -63,11 +71,38 @@ struct WasapiDevice::Impl {
     int channels = 0;
     UINT32 bufferFrames = 0;
     int periodFrames = 0;
+    int outputLatency = 0;
 
     std::vector<std::vector<float>> planar;
     std::vector<float*> planarPtrs;
 
-    void threadMain();
+    // Eingang
+    ComPtr<IAudioClient> inClient;
+    ComPtr<IAudioCaptureClient> capture;
+    HANDLE inEvent = nullptr;
+    std::thread inThread;
+    int inChannels = 0;
+    int inPeriodFrames = 0;
+    int inStreamLatency = 0;
+    std::string inError;
+
+    // Ringpuffer Aufnahme-Thread -> Wiedergabe-Thread, verschachtelt
+    std::vector<float> ring;
+    std::atomic<std::size_t> ringWrite{0};
+    std::atomic<std::size_t> ringRead{0};
+    bool primed = false;       // nur Wiedergabe-Thread
+    float fillAverage = 0.0f;  // nur Wiedergabe-Thread
+    std::atomic<int> ringLatency{0};
+    std::atomic<unsigned> inGlitches{0};
+
+    std::vector<std::vector<float>> inPlanar;
+    std::vector<const float*> inPtrs;
+
+    void openInput(IMMDeviceEnumerator* enumerator);
+    void closeInput();
+    void renderThread();
+    void captureThread();
+    void pullInput(UINT32 frames) noexcept;
 };
 
 WasapiDevice::WasapiDevice() : d(std::make_unique<Impl>()) {}
@@ -136,11 +171,9 @@ bool WasapiDevice::open(std::string& error) {
             close();
             return false;
         }
-        REFERENCE_TIME defPeriod = 0;  // in 100-ns-Einheiten
-        if (SUCCEEDED(d->client->GetDevicePeriod(&defPeriod, nullptr))) {
-            d->periodFrames = static_cast<int>(
-                static_cast<double>(defPeriod) * d->sampleRate / 10'000'000.0 + 0.5);
-        }
+        REFERENCE_TIME defPeriod = 0;
+        if (SUCCEEDED(d->client->GetDevicePeriod(&defPeriod, nullptr)))
+            d->periodFrames = toFrames(defPeriod, d->sampleRate);
     }
     CoTaskMemFree(mix);
 
@@ -156,35 +189,121 @@ bool WasapiDevice::open(std::string& error) {
     hr = d->client->GetService(IID_PPV_ARGS(&d->render));
     if (FAILED(hr)) { error = hrText("Render-Client nicht verfuegbar", hr); close(); return false; }
 
+    // Ausgangslatenz: was das Geraet meldet, plus eine Periode im Puffer.
+    REFERENCE_TIME streamLatency = 0;
+    d->client->GetStreamLatency(&streamLatency);
+    d->outputLatency = toFrames(streamLatency, d->sampleRate) + d->periodFrames;
+
     d->planar.assign(static_cast<size_t>(d->channels),
                      std::vector<float>(d->bufferFrames, 0.0f));
     d->planarPtrs.clear();
     for (auto& ch : d->planar) d->planarPtrs.push_back(ch.data());
 
+    // Der Eingang ist optional: Ohne ihn laeuft alles ausser der Aufnahme.
+    d->openInput(enumerator.Get());
     return true;
+}
+
+void WasapiDevice::Impl::openInput(IMMDeviceEnumerator* enumerator) {
+    inError.clear();
+
+    ComPtr<IMMDevice> device;
+    HRESULT hr = enumerator->GetDefaultAudioEndpoint(eCapture, eConsole, &device);
+    if (FAILED(hr)) { inError = "Kein Aufnahmegeraet gefunden"; return; }
+
+    hr = activateClient(device.Get(), inClient);
+    if (FAILED(hr)) { inError = hrText("Aufnahmegeraet nicht aktivierbar", hr); closeInput(); return; }
+
+    WAVEFORMATEX* mix = nullptr;
+    hr = inClient->GetMixFormat(&mix);
+    if (FAILED(hr)) { inError = hrText("Format des Aufnahmegeraets nicht lesbar", hr); closeInput(); return; }
+    const int deviceChannels = static_cast<int>(mix->nChannels);
+    CoTaskMemFree(mix);
+
+    // Gewuenschtes Format: Float, Samplerate der Ausgabe, hoechstens Stereo.
+    // Windows wandelt vom Geraeteformat dorthin um.
+    inChannels = std::clamp(deviceChannels, 1, 2);
+    WAVEFORMATEX format{};
+    format.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+    format.nChannels = static_cast<WORD>(inChannels);
+    format.nSamplesPerSec = static_cast<DWORD>(sampleRate + 0.5);
+    format.wBitsPerSample = 32;
+    format.nBlockAlign = static_cast<WORD>(inChannels * 4);
+    format.nAvgBytesPerSec = format.nSamplesPerSec * format.nBlockAlign;
+    format.cbSize = 0;
+
+    hr = inClient->Initialize(AUDCLNT_SHAREMODE_SHARED,
+                              AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
+                                  AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+                              0, 0, &format, nullptr);
+    if (FAILED(hr)) {
+        inError = hr == E_ACCESSDENIED
+                      ? "Windows verweigert den Mikrofonzugriff (Datenschutz-Einstellungen pruefen)"
+                      : hrText("Aufnahme-Stream nicht initialisierbar", hr);
+        closeInput();
+        return;
+    }
+
+    inEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!inEvent || FAILED(inClient->SetEventHandle(inEvent)) ||
+        FAILED(inClient->GetService(IID_PPV_ARGS(&capture)))) {
+        inError = "Aufnahme-Stream nicht einrichtbar";
+        closeInput();
+        return;
+    }
+
+    REFERENCE_TIME period = 0, latency = 0;
+    inClient->GetDevicePeriod(&period, nullptr);
+    inClient->GetStreamLatency(&latency);
+    inPeriodFrames = std::max(1, toFrames(period, sampleRate));
+    inStreamLatency = toFrames(latency, sampleRate);
+
+    ring.assign(kInputRingFrames * static_cast<std::size_t>(inChannels), 0.0f);
+    ringWrite.store(0);
+    ringRead.store(0);
+    primed = false;
+    fillAverage = 0.0f;
+    ringLatency.store(2 * inPeriodFrames);
+
+    inPlanar.assign(static_cast<std::size_t>(inChannels), std::vector<float>(bufferFrames, 0.0f));
+    inPtrs.clear();
+    for (auto& ch : inPlanar) inPtrs.push_back(ch.data());
+}
+
+void WasapiDevice::Impl::closeInput() {
+    capture.Reset();
+    inClient.Reset();
+    if (inEvent) { CloseHandle(inEvent); inEvent = nullptr; }
+    inChannels = 0;
+    inPlanar.clear();
+    inPtrs.clear();
 }
 
 bool WasapiDevice::start(AudioCallback& callback, std::string& error) {
     if (!d->client || !d->render) { error = "Geraet ist nicht geoeffnet"; return false; }
     if (d->running.load()) { error = "Geraet laeuft bereits"; return false; }
 
-    callback.prepare(d->sampleRate, d->channels, static_cast<int>(d->bufferFrames));
+    callback.prepare(d->sampleRate, d->inChannels, d->channels, static_cast<int>(d->bufferFrames));
     d->callback = &callback;
     d->failed.store(false);
     d->running.store(true);
-    d->thread = std::thread([this] { d->threadMain(); });
+    if (d->inChannels > 0) d->inThread = std::thread([this] { d->captureThread(); });
+    d->thread = std::thread([this] { d->renderThread(); });
     return true;
 }
 
 void WasapiDevice::stop() {
     d->running.store(false);
-    if (d->event) SetEvent(d->event);  // Thread aus dem Warten holen
+    if (d->event) SetEvent(d->event);  // Threads aus dem Warten holen
+    if (d->inEvent) SetEvent(d->inEvent);
     if (d->thread.joinable()) d->thread.join();
+    if (d->inThread.joinable()) d->inThread.join();
     d->callback = nullptr;
 }
 
 void WasapiDevice::close() {
     stop();
+    d->closeInput();
     d->render.Reset();
     d->client.Reset();
     if (d->event) { CloseHandle(d->event); d->event = nullptr; }
@@ -201,8 +320,55 @@ int WasapiDevice::numChannels() const { return d->channels; }
 int WasapiDevice::bufferFrames() const { return static_cast<int>(d->bufferFrames); }
 int WasapiDevice::periodFrames() const { return d->periodFrames; }
 bool WasapiDevice::failed() const { return d->failed.load(); }
+int WasapiDevice::inputChannels() const { return d->inChannels; }
+const std::string& WasapiDevice::inputError() const { return d->inError; }
+int WasapiDevice::outputLatencyFrames() const { return d->outputLatency; }
+unsigned WasapiDevice::inputGlitches() const { return d->inGlitches.load(std::memory_order_relaxed); }
 
-void WasapiDevice::Impl::threadMain() {
+int WasapiDevice::inputLatencyFrames() const {
+    if (d->inChannels == 0) return 0;
+    // Geraet + eine Aufnahmeperiode + Verweildauer im Ringpuffer.
+    return d->inStreamLatency + d->inPeriodFrames + d->ringLatency.load(std::memory_order_relaxed);
+}
+
+// Holt frames Eingangs-Frames aus dem Ringpuffer nach inPlanar (Wiedergabe-Thread).
+void WasapiDevice::Impl::pullInput(UINT32 frames) noexcept {
+    const std::size_t n = frames;
+    const std::size_t target = static_cast<std::size_t>(2 * inPeriodFrames);  // Polster gegen Schwankungen
+    const auto ch = static_cast<std::size_t>(inChannels);
+
+    std::size_t r = ringRead.load(std::memory_order_relaxed);
+    std::size_t avail = ringWrite.load(std::memory_order_acquire) - r;
+
+    // Zu viel angesammelt (die Uhren der Geraete laufen auseinander): aufholen.
+    if (avail > target + n + static_cast<std::size_t>(4 * inPeriodFrames)) {
+        r += avail - (target + n);
+        avail = target + n;
+        inGlitches.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    if (!primed && avail >= target + n) primed = true;
+
+    if (primed && avail >= n) {
+        for (std::size_t i = 0; i < n; ++i) {
+            const std::size_t idx = ((r + i) & kInputRingMask) * ch;
+            for (std::size_t c = 0; c < ch; ++c) inPlanar[c][i] = ring[idx + c];
+        }
+        r += n;
+        fillAverage += 0.02f * (static_cast<float>(avail - n) - fillAverage);
+        ringLatency.store(static_cast<int>(fillAverage), std::memory_order_relaxed);
+    } else {
+        // Noch nicht genug Vorrat (Start) oder leergelaufen: Stille, dann neu ansammeln.
+        for (std::size_t c = 0; c < ch; ++c) std::memset(inPlanar[c].data(), 0, n * sizeof(float));
+        if (primed) {
+            primed = false;
+            inGlitches.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    ringRead.store(r, std::memory_order_release);
+}
+
+void WasapiDevice::Impl::renderThread() {
     const HRESULT comInit = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
     // Meldet den Thread beim Multimedia-Scheduler an (hohe Prioritaet).
@@ -229,7 +395,12 @@ void WasapiDevice::Impl::threadMain() {
         for (int c = 0; c < ch; ++c)
             std::memset(planarPtrs[static_cast<size_t>(c)], 0, frames * sizeof(float));
 
-        callback->process(planarPtrs.data(), ch, static_cast<int>(frames));
+        if (inChannels > 0) {
+            pullInput(frames);
+            callback->process(inPtrs.data(), inChannels, planarPtrs.data(), ch, static_cast<int>(frames));
+        } else {
+            callback->process(nullptr, 0, planarPtrs.data(), ch, static_cast<int>(frames));
+        }
 
         // Kanalpuffer in das verschachtelte Geraeteformat kopieren.
         float* dst = reinterpret_cast<float*>(data);
@@ -243,6 +414,50 @@ void WasapiDevice::Impl::threadMain() {
     client->Stop();
     if (!ok) failed.store(true);
 
+    if (task) AvRevertMmThreadCharacteristics(task);
+    if (SUCCEEDED(comInit)) CoUninitialize();
+}
+
+// Liest Pakete vom Aufnahmegeraet und legt sie in den Ringpuffer.
+void WasapiDevice::Impl::captureThread() {
+    const HRESULT comInit = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    DWORD taskIndex = 0;
+    HANDLE task = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
+
+    const auto ch = static_cast<std::size_t>(inChannels);
+    bool ok = SUCCEEDED(inClient->Start());
+
+    while (ok && running.load(std::memory_order_relaxed)) {
+        WaitForSingleObject(inEvent, 2000);
+        if (!running.load(std::memory_order_relaxed)) break;
+
+        for (;;) {
+            UINT32 packet = 0;
+            if (FAILED(capture->GetNextPacketSize(&packet))) { ok = false; break; }
+            if (packet == 0) break;
+
+            BYTE* data = nullptr;
+            UINT32 frames = 0;
+            DWORD flags = 0;
+            if (FAILED(capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) { ok = false; break; }
+
+            const std::size_t w = ringWrite.load(std::memory_order_relaxed);
+            const std::size_t space = kInputRingFrames - (w - ringRead.load(std::memory_order_acquire));
+            if (frames <= space) {
+                const bool silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0 || data == nullptr;
+                const float* src = reinterpret_cast<const float*>(data);
+                for (std::size_t i = 0; i < frames; ++i) {
+                    const std::size_t idx = ((w + i) & kInputRingMask) * ch;
+                    for (std::size_t c = 0; c < ch; ++c) ring[idx + c] = silent ? 0.0f : src[i * ch + c];
+                }
+                ringWrite.store(w + frames, std::memory_order_release);
+            }  // sonst: Ringpuffer voll (die Wiedergabe steht), Paket verwerfen
+
+            capture->ReleaseBuffer(frames);
+        }
+    }
+
+    inClient->Stop();
     if (task) AvRevertMmThreadCharacteristics(task);
     if (SUCCEEDED(comInit)) CoUninitialize();
 }

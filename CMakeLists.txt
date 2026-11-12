@@ -15,6 +15,7 @@ endif()
 add_library(dawcore STATIC
     src/engine/Engine.cpp
     src/disk/PeakData.cpp
+    src/disk/RecordSink.cpp
     src/disk/TrackStream.cpp
     src/disk/WavFile.cpp
     src/model/ProjectController.cpp

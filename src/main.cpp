@@ -57,7 +57,7 @@ int runScreenshot(const std::filesystem::path& output) {
     constexpr int kBlock = 512;
 
     auto engine = std::make_unique<Engine>();
-    engine->prepare(kRate, 2, kBlock);
+    engine->prepare(kRate, 0, 2, kBlock);
     ProjectController controller(*engine);
     controller.setSampleRate(kRate);
 
@@ -84,11 +84,11 @@ int runScreenshot(const std::filesystem::path& output) {
     std::vector<float> left(kBlock), right(kBlock);
     float* out[2] = {left.data(), right.data()};
     while (engine->serviceDisk()) {}
-    engine->process(out, 2, kBlock);
+    engine->process(nullptr, 0, out, 2, kBlock);
     engine->play();
     for (int i = 0; i < 280; ++i) {
         while (engine->serviceDisk()) {}
-        engine->process(out, 2, kBlock);
+        engine->process(nullptr, 0, out, 2, kBlock);
     }
 
     ui::MainView view(controller, *engine);

@@ -17,4 +17,17 @@ build\Release\minidaw.exe
 
 Tests ausführen: `ctest --test-dir build -C Release --output-on-failure`
 
-Aktueller Stand: Schritt 3, WAV-Dateien als Clips abspielen, bedient über die Konsole.
+Aktueller Stand: Schritt 4, erste grafische Oberfläche.
+
+## Bedienung
+
+| Aktion | Wirkung |
+|---|---|
+| WAV-Datei auf eine Spur ziehen | Clip anlegen; auf dem Spurkopf abgelegt beginnt er bei 0 |
+| Leertaste | Play / Stop |
+| Pos1 | zurück zum Anfang |
+| Klick in Lineal oder leere Zeitachse | Abspielzeiger setzen |
+| Clip ziehen | verschieben, auch auf andere Spuren; rastet an Kanten ein |
+| Entf | ausgewählten Clip löschen |
+| Mausrad / Strg + Mausrad | scrollen / zoomen |
+| Doppelklick auf einen Regler | zurück auf 0 dB bzw. Mitte |

@@ -123,8 +123,8 @@ Windows-Code. Sie bilden die Bibliothek `dawcore`, die auch die Tests benutzen.
 |---|---|---|
 | 1 | Audio-Callback über WASAPI, Sinus-Test | fertig, auf Hardware gehört |
 | 2 | Engine-Gerüst: Transport, Spuren-Array, Summierung, Kommando-Queue | fertig, auf Hardware gehört |
-| 3 | WAV-Wiedergabe mit Streaming vom Disk-Thread | Code und Offline-Tests fertig, Hörtest offen |
-| 4 | Minimale GUI: Spurliste, Timeline, Wellenformen, Transport, Fader | offen |
+| 3 | WAV-Wiedergabe mit Streaming vom Disk-Thread | fertig, auf Hardware gehört |
+| 4 | Minimale GUI: Spurliste, Timeline, Wellenformen, Transport, Fader | Code fertig, per Screenshot geprüft, Bedientest offen |
 | 5 | Audio-Aufnahme mit Latenzkorrektur | offen |
 | 6 | MIDI-Eingang, MIDI-Clips, Piano Roll | offen |
 | 7 | VST3-Hosting: Laden, Verarbeiten, Editor-Fenster, State | offen |
@@ -134,6 +134,23 @@ Windows-Code. Sie bilden die Bibliothek `dawcore`, die auch die Tests benutzen.
 
 Jeder Schritt gilt erst als fertig, wenn er auf echter Hardware läuft und
 ohne Knackser klingt.
+
+## Oberfläche
+
+- `ui/Canvas` ist eine dünne Zeichenschicht über Direct2D und DirectWrite.
+- `ui/MainView` enthält die gesamte Oberfläche: Aufteilung, Zeichnen und
+  Bedienlogik. Sie kennt kein Fenster und bekommt Eingaben als Methodenaufrufe.
+  Alle Elemente zeichnet sie selbst, es gibt keine nativen Steuerelemente.
+- `ui/MainWindow` ist das Win32-Fenster: Nachrichten, Zeitgeber (etwa 30
+  Bilder pro Sekunde), Drag & Drop, Bildschirmskalierung.
+- Die Oberfläche ändert das Projekt nur über den `ProjectController` und liest
+  Position und Pegel aus der Engine.
+- `minidaw --screenshot bild.png` zeichnet die Oberfläche mit Beispieldaten in
+  eine Datei, ohne Fenster und Audiogerät. Der Build auf GitHub erzeugt das
+  Bild bei jedem Push, damit sich Änderungen an der Oberfläche prüfen lassen.
+
+Wellenformen kommen aus `disk/PeakData`: kleinster und größter Wert je 256
+Frames, berechnet von einem Hintergrund-Thread.
 
 ## Tests
 

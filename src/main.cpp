@@ -41,7 +41,7 @@ std::filesystem::path makeDemoFile(const wchar_t* name, double baseHz, double se
         const double inNote = t - note * noteLength;
         const double hz = baseHz * (1.0 + 0.25 * (note % 4));
         const double env = std::exp(-inNote * 5.0) * std::min(1.0, inNote * 200.0);
-        const auto s = static_cast<float>(0.7 * env * std::sin(6.283185307179586 * hz * t));
+        const auto s = static_cast<float>(0.4 * env * std::sin(6.283185307179586 * hz * t));
         data[static_cast<std::size_t>(2 * i)] = s;
         data[static_cast<std::size_t>(2 * i + 1)] = s;
     }

@@ -27,6 +27,12 @@ jobs:
           $h = (Get-FileHash build\Release\minidaw.exe -Algorithm SHA256).Hash
           Write-Output "SHA256 minidaw.exe: $h"
           "SHA-256 von minidaw.exe: ``$h``" >> $env:GITHUB_STEP_SUMMARY
+          # Liegt eine fertige exe im Repository, muss sie genau diesem Build entsprechen.
+          if (Test-Path bin\minidaw.exe) {
+            $c = (Get-FileHash bin\minidaw.exe -Algorithm SHA256).Hash
+            if ($c -eq $h) { Write-Output "bin\minidaw.exe entspricht dem Quellcode." }
+            else { Write-Output "::warning::bin\minidaw.exe ist veraltet (im Repository: $c, aus dem Quellcode: $h)" }
+          }
       - uses: actions/upload-artifact@v6
         with:
           name: minidaw

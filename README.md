@@ -5,6 +5,22 @@ C++20 ohne Fremdbibliotheken.
 
 Aufbau, Regeln und Fahrplan stehen in [ARCHITECTURE.md](ARCHITECTURE.md).
 
+## Fertiges Programm
+
+`bin/minidaw.exe` ist fertig gebaut, Windows 10/11, 64 Bit. Herunterladen und
+starten, eine Installation ist nicht nötig. Gebraucht wird die
+Visual-C++-Laufzeit von Microsoft, die auf den meisten Rechnern schon vorhanden ist.
+
+- Gebaut von GitHub Actions aus genau diesem Quellcode. Drei unabhängige
+  Builds ergaben Byte für Byte dieselbe Datei.
+- SHA-256: `58C75D0ED2E237069803D415E4F306F31A37C4FE71FCA574CDD7516EB0FC23C2`
+  (prüfen in PowerShell mit `Get-FileHash minidaw.exe`)
+- VirusTotal: keiner der Scanner meldet etwas. Browser und Windows warnen
+  trotzdem, weil die Datei nicht signiert und weitgehend unbekannt ist.
+
+Ändert sich der Quellcode, ist diese Datei veraltet, bis sie ersetzt wird.
+Der Build auf GitHub warnt dann.
+
 ## Bauen
 
 Voraussetzung: Visual Studio 2022 oder die kostenlosen "Build Tools für

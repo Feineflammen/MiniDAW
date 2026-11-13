@@ -4,7 +4,7 @@ name: pruefung
 on:
   workflow_dispatch:
   push:
-    branches: [bearbeiten-und-geraete]
+    branches: [main, bearbeiten-und-geraete]
 
 jobs:
   bau:

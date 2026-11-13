@@ -13,7 +13,7 @@ Visual-C++-Laufzeit von Microsoft, die auf den meisten Rechnern schon vorhanden 
 
 - Gebaut von GitHub Actions aus genau diesem Quellcode. Drei unabhängige
   Builds ergaben Byte für Byte dieselbe Datei.
-- SHA-256: `6C7A418EA5448FB84B57D1C6158FDAB21F9EBC953B1A9F51B5FB083CABD78DA3`
+- SHA-256: `BB3247DC19E9FFDDE59224DEE885E7B8DA71C0C01477C3C766EABD111EEE33A3`
   (prüfen in PowerShell mit `Get-FileHash minidaw.exe`)
 - Browser und Windows warnen beim Herunterladen, weil die Datei nicht signiert
   und weitgehend unbekannt ist. Eine frühere Fassung wurde bei VirusTotal

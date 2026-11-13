@@ -14,95 +14,30 @@
 #include <atomic>
 #include <cstring>
 
-// Die ASIO-Schnittstelle ist eine COM-Schnittstelle mit festen Strukturen.
-// Hier steht nur, was MiniDAW davon braucht, in eigener Schreibweise.
-// Die Anordnung entspricht der veroeffentlichten Binaerschnittstelle der
-// Treiber (64 Bit Windows: "long" ist 32 Bit, ein Aufrufkonvention).
-static_assert(sizeof(void*) == 8, "ASIO wird nur fuer 64-Bit-Windows unterstuetzt");
-static_assert(sizeof(long) == 4, "ASIO erwartet 32-Bit-long");
+// Schnittstelle der Treiber aus dem ASIO SDK von Steinberg (GPLv3,
+// third_party/asiosdk). Die Header sind alt und nicht warnungsfrei.
+#pragma warning(push, 0)
+#include "asiosys.h"
+#include "asio.h"
+#include "iasiodrv.h"
+#pragma warning(pop)
+
+static_assert(sizeof(void*) == 8, "MiniDAW unterstuetzt ASIO nur unter 64-Bit-Windows");
+
+// Die Formatwandlung (audio/AsioFormat.h) kommt ohne SDK aus und wird so auch
+// unter Linux getestet; ihre Nummern muessen zu denen des SDK passen.
+constexpr bool sameFormat(long ours, long sdk) { return ours == sdk; }
+static_assert(sameFormat(asio_format::kInt16, ASIOSTInt16LSB) && sameFormat(asio_format::kInt24, ASIOSTInt24LSB) &&
+              sameFormat(asio_format::kInt32, ASIOSTInt32LSB) && sameFormat(asio_format::kFloat32, ASIOSTFloat32LSB) &&
+              sameFormat(asio_format::kFloat64, ASIOSTFloat64LSB) &&
+              sameFormat(asio_format::kInt32in16, ASIOSTInt32LSB16) &&
+              sameFormat(asio_format::kInt32in18, ASIOSTInt32LSB18) &&
+              sameFormat(asio_format::kInt32in20, ASIOSTInt32LSB20) &&
+              sameFormat(asio_format::kInt32in24, ASIOSTInt32LSB24));
 
 namespace {
 
-using AsioBool = long;
-using AsioError = long;
-using AsioSampleRate = double;
-
-constexpr AsioError kAsioOk = 0;
-constexpr AsioError kAsioSuccess = 0x3f4847a0;
-bool succeeded(AsioError e) { return e == kAsioOk || e == kAsioSuccess; }
-
-struct AsioSamples { unsigned long hi, lo; };
-struct AsioTimeStamp { unsigned long hi, lo; };
-
-struct AsioClockSource {
-    long index;
-    long associatedChannel;
-    long associatedGroup;
-    AsioBool isCurrentSource;
-    char name[32];
-};
-
-struct AsioChannelInfo {
-    long channel;
-    AsioBool isInput;
-    AsioBool isActive;
-    long channelGroup;
-    long type;
-    char name[32];
-};
-
-struct AsioBufferInfo {
-    AsioBool isInput;
-    long channelNum;
-    void* buffers[2];
-};
-
-struct AsioTime;  // wird nur durchgereicht
-
-struct AsioCallbacks {
-    void (*bufferSwitch)(long doubleBufferIndex, AsioBool directProcess);
-    void (*sampleRateDidChange)(AsioSampleRate rate);
-    long (*asioMessage)(long selector, long value, void* message, double* opt);
-    AsioTime* (*bufferSwitchTimeInfo)(AsioTime* params, long doubleBufferIndex, AsioBool directProcess);
-};
-
-// Nachrichten des Treibers an das Programm (asioMessage).
-enum : long {
-    kSelectorSupported = 1,
-    kEngineVersion = 2,
-    kResetRequest = 3,
-    kBufferSizeChange = 4,
-    kResyncRequest = 5,
-    kLatenciesChanged = 6,
-    kSupportsTimeInfo = 7,
-    kSupportsTimeCode = 8,
-    kOverload = 15,
-};
-
-struct IAsioDriver : public IUnknown {
-    virtual AsioBool init(void* systemHandle) = 0;
-    virtual void getDriverName(char* name) = 0;
-    virtual long getDriverVersion() = 0;
-    virtual void getErrorMessage(char* text) = 0;
-    virtual AsioError start() = 0;
-    virtual AsioError stop() = 0;
-    virtual AsioError getChannels(long* numInputs, long* numOutputs) = 0;
-    virtual AsioError getLatencies(long* inputLatency, long* outputLatency) = 0;
-    virtual AsioError getBufferSize(long* minSize, long* maxSize, long* preferredSize, long* granularity) = 0;
-    virtual AsioError canSampleRate(AsioSampleRate rate) = 0;
-    virtual AsioError getSampleRate(AsioSampleRate* rate) = 0;
-    virtual AsioError setSampleRate(AsioSampleRate rate) = 0;
-    virtual AsioError getClockSources(AsioClockSource* clocks, long* numSources) = 0;
-    virtual AsioError setClockSource(long reference) = 0;
-    virtual AsioError getSamplePosition(AsioSamples* position, AsioTimeStamp* timeStamp) = 0;
-    virtual AsioError getChannelInfo(AsioChannelInfo* info) = 0;
-    virtual AsioError createBuffers(AsioBufferInfo* infos, long numChannels, long bufferSize,
-                                    AsioCallbacks* callbacks) = 0;
-    virtual AsioError disposeBuffers() = 0;
-    virtual AsioError controlPanel() = 0;
-    virtual AsioError future(long selector, void* option) = 0;
-    virtual AsioError outputReady() = 0;
-};
+bool succeeded(ASIOError e) { return e == ASE_OK || e == ASE_SUCCESS; }
 
 constexpr int kMaxInputs = 64;   // so viele Eingaenge wertet die Engine aus
 constexpr int kMaxOutputs = 2;   // MiniDAW gibt Stereo aus
@@ -131,7 +66,7 @@ std::wstring registryText(HKEY root, const std::wstring& driver, const wchar_t* 
 }  // namespace
 
 struct AsioDevice::Impl {
-    IAsioDriver* driver = nullptr;
+    IASIO* driver = nullptr;
     std::wstring name;
     std::wstring emptyName;
     double rate = 0.0;
@@ -145,7 +80,7 @@ struct AsioDevice::Impl {
     bool useOutputReady = false;
     std::string inError;
 
-    std::vector<AsioBufferInfo> buffers;  // erst die Eingaenge, dann die Ausgaenge
+    std::vector<ASIOBufferInfo> buffers;  // erst die Eingaenge, dann die Ausgaenge
     std::vector<long> types;
     std::vector<float> scratch;           // float-Puffer fuer alle Kanaele
     std::vector<const float*> inPointers;
@@ -166,43 +101,43 @@ namespace {
 
 std::atomic<AsioDevice::Impl*> g_active{nullptr};
 
-void onBufferSwitch(long index, AsioBool /*direct*/) {
+void onBufferSwitch(long index, ASIOBool /*direct*/) {
     if (AsioDevice::Impl* self = g_active.load(std::memory_order_acquire)) self->process(index);
 }
 
-AsioTime* onBufferSwitchTimeInfo(AsioTime* params, long index, AsioBool direct) {
+ASIOTime* onBufferSwitchTimeInfo(ASIOTime* params, long index, ASIOBool direct) {
     onBufferSwitch(index, direct);
     return params;
 }
 
-void onSampleRateChange(AsioSampleRate /*rate*/) {
+void onSampleRateChange(ASIOSampleRate /*rate*/) {
     if (AsioDevice::Impl* self = g_active.load(std::memory_order_acquire)) self->reset.store(true);
 }
 
 long onMessage(long selector, long value, void* /*message*/, double* /*opt*/) {
     AsioDevice::Impl* self = g_active.load(std::memory_order_acquire);
     switch (selector) {
-        case kSelectorSupported:
-            return (value == kEngineVersion || value == kResetRequest || value == kBufferSizeChange ||
-                    value == kResyncRequest || value == kLatenciesChanged || value == kSupportsTimeInfo ||
-                    value == kOverload) ? 1 : 0;
-        case kEngineVersion:
+        case kAsioSelectorSupported:
+            return (value == kAsioEngineVersion || value == kAsioResetRequest || value == kAsioBufferSizeChange ||
+                    value == kAsioResyncRequest || value == kAsioLatenciesChanged || value == kAsioSupportsTimeInfo ||
+                    value == kAsioOverload) ? 1 : 0;
+        case kAsioEngineVersion:
             return 2;
-        case kResetRequest:
-        case kBufferSizeChange:
+        case kAsioResetRequest:
+        case kAsioBufferSizeChange:
             // Neu oeffnen erledigt die UI (resetRequested), nicht der Treiber-Thread.
             if (self) self->reset.store(true);
             return 1;
-        case kResyncRequest:
+        case kAsioResyncRequest:
             return 1;
-        case kLatenciesChanged:
+        case kAsioLatenciesChanged:
             if (self) self->latenciesChanged.store(true);
             return 1;
-        case kSupportsTimeInfo:
+        case kAsioSupportsTimeInfo:
             return 1;
-        case kSupportsTimeCode:
+        case kAsioSupportsTimeCode:
             return 0;
-        case kOverload:
+        case kAsioOverload:
             if (self) self->overloads.fetch_add(1, std::memory_order_relaxed);
             return 0;
         default:
@@ -210,7 +145,7 @@ long onMessage(long selector, long value, void* /*message*/, double* /*opt*/) {
     }
 }
 
-AsioCallbacks g_callbacks{onBufferSwitch, onSampleRateChange, onMessage, onBufferSwitchTimeInfo};
+ASIOCallbacks g_callbacks{onBufferSwitch, onSampleRateChange, onMessage, onBufferSwitchTimeInfo};
 
 }  // namespace
 
@@ -221,7 +156,7 @@ void AsioDevice::Impl::process(long index) noexcept {
     const int total = inputs + outputs;
     if (!processing.load(std::memory_order_acquire) || callback == nullptr || index < 0 || index > 1) {
         for (int c = inputs; c < total; ++c) {
-            const AsioBufferInfo& info = buffers[static_cast<std::size_t>(c)];
+            const ASIOBufferInfo& info = buffers[static_cast<std::size_t>(c)];
             std::memset(info.buffers[index & 1], 0,
                         n * static_cast<std::size_t>(asio_format::bytesPerSample(types[static_cast<std::size_t>(c)])));
         }
@@ -311,7 +246,7 @@ bool AsioDevice::open(const std::wstring& driverName, void* window, std::string&
                     : "Der ASIO-Treiber l\u00E4sst sich nicht laden (Fehler " + std::to_string(static_cast<long>(hr)) + ").";
         return false;
     }
-    d->driver = static_cast<IAsioDriver*>(object);
+    d->driver = static_cast<IASIO*>(object);
     d->name = driverName;
 
     if (!d->driver->init(window)) {
@@ -331,7 +266,7 @@ bool AsioDevice::open(const std::wstring& driverName, void* window, std::string&
     d->inError = d->inputs == 0 ? "Der Treiber hat keine Eing\u00E4nge" : "";
 
     // Samplerate: wie im Treiber eingestellt; meldet er keine, 48000 oder 44100 versuchen.
-    AsioSampleRate rate = 0.0;
+    ASIOSampleRate rate = 0.0;
     if (!succeeded(d->driver->getSampleRate(&rate)) || rate <= 0.0) {
         for (const double wanted : {48000.0, 44100.0}) {
             if (succeeded(d->driver->canSampleRate(wanted)) && succeeded(d->driver->setSampleRate(wanted))) {
@@ -357,15 +292,15 @@ bool AsioDevice::open(const std::wstring& driverName, void* window, std::string&
 
     // Puffer fuer alle Eingaenge und die ersten Ausgaenge.
     const int total = d->inputs + d->outputs;
-    d->buffers.assign(static_cast<std::size_t>(total), AsioBufferInfo{});
+    d->buffers.assign(static_cast<std::size_t>(total), ASIOBufferInfo{});
     d->types.assign(static_cast<std::size_t>(total), 0);
     for (int c = 0; c < total; ++c) {
         const bool isInput = c < d->inputs;
-        AsioBufferInfo& info = d->buffers[static_cast<std::size_t>(c)];
+        ASIOBufferInfo& info = d->buffers[static_cast<std::size_t>(c)];
         info.isInput = isInput ? 1 : 0;
         info.channelNum = isInput ? c : c - d->inputs;
 
-        AsioChannelInfo channel{};
+        ASIOChannelInfo channel{};
         channel.channel = info.channelNum;
         channel.isInput = info.isInput;
         if (!succeeded(d->driver->getChannelInfo(&channel))) {

@@ -86,5 +86,7 @@ if(WIN32)
         src/minidaw.manifest
     )
     target_compile_definitions(minidaw PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    # ASIO SDK von Steinberg (GPLv3), nur die Header der Treiberschnittstelle
+    target_include_directories(minidaw PRIVATE third_party/asiosdk/common)
     target_link_libraries(minidaw PRIVATE dawcore vst3host ole32 advapi32 avrt d2d1 dwrite windowscodecs shell32 user32 winmm comdlg32)
 endif()

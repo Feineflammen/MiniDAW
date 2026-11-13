@@ -2,8 +2,8 @@
 #include <winver.h>
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 0, 6, 0, 0
-PRODUCTVERSION 0, 6, 0, 0
+FILEVERSION 0, 7, 0, 0
+PRODUCTVERSION 0, 7, 0, 0
 FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
 FILEFLAGS 0
 FILEOS VOS_NT_WINDOWS32
@@ -16,12 +16,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Feineflammen"
             VALUE "FileDescription", "MiniDAW"
-            VALUE "FileVersion", "0.6.0.0"
+            VALUE "FileVersion", "0.7.0.0"
             VALUE "InternalName", "minidaw"
             VALUE "OriginalFilename", "minidaw.exe"
             VALUE "ProductName", "MiniDAW"
-            VALUE "ProductVersion", "0.6.0.0"
-            VALUE "LegalCopyright", "Hobbyprojekt, Quellcode: github.com/Feineflammen/daw"
+            VALUE "ProductVersion", "0.7.0.0"
+            VALUE "LegalCopyright", "Freie Software unter der GPLv3, ohne Gewaehr. Quellcode: github.com/Feineflammen/daw"
         END
     END
     BLOCK "VarFileInfo"

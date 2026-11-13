@@ -8,10 +8,12 @@ Wer Code für das Projekt schreibt (Mensch oder KI), hält sich an diese Regeln.
 - Kleine DAW für Windows, Hobbyprojekt.
 - 16 Spuren (Audio oder MIDI), 4 Busse, 1 Master. Die Anzahl ist fest.
 - VST3-Instrumente und -Effekte, Mixer mit Inserts und Sends.
-- C++20. Keine Fremdbibliotheken: nur C++-Standardbibliothek, Windows-SDK
-  und die VST3-Schnittstellen von Steinberg (`third_party/vst3`, MIT-Lizenz;
+- C++20. Keine Fremdbibliotheken: nur C++-Standardbibliothek, Windows-SDK,
+  die VST3-Schnittstellen von Steinberg (`third_party/vst3`, MIT-Lizenz;
   nur Schnittstellen-Header und zwei kleine Quelldateien mit Kennungen, keine
-  Hilfsklassen des VST3 SDK).
+  Hilfsklassen des VST3 SDK) und die drei Header des ASIO SDK
+  (`third_party/asiosdk`, GPLv3).
+- Lizenz des Projekts: GPLv3 (`LICENSE`), Fremdlizenzen in `FREMDLIZENZEN.md`.
 
 Bewusst nicht enthalten: Timestretching, Comping, Notation, Video, Surround,
 Tempoänderungen im Projekt, MP3/FLAC, eigene Effekte.
@@ -123,9 +125,11 @@ Clip-Grenzen, Überblendung bei Sprüngen während der Wiedergabe.
   Windows rechnet den Eingang auf die Samplerate der Ausgabe um.
 - Mit ASIO (`audio/AsioDevice`) gibt es keinen eigenen Eingangs-Thread: Der
   Treiber liefert Ein- und Ausgang im selben Rückruf, die Latenz ist fest.
-  Die Treiberschnittstelle ist im Code selbst beschrieben (COM-Klasse aus
-  `HKLM\SOFTWARE\ASIO`, Klassenkennung = Schnittstellenkennung); das ASIO-SDK
-  wird nicht benutzt. Die Umrechnung der Sampleformate (`audio/AsioFormat.h`)
+  Die Treiberschnittstelle kommt aus den Headern des ASIO SDK
+  (`third_party/asiosdk`, GPLv3); Laden der Treiber (COM-Klasse aus
+  `HKLM\SOFTWARE\ASIO`, Klassenkennung = Schnittstellenkennung), Puffer,
+  Formatwandlung und Neustart sind selbst geschrieben, die Host-Hilfsdateien
+  des SDK werden nicht benutzt. Die Umrechnung der Sampleformate (`audio/AsioFormat.h`)
   ist ohne Windows testbar. Will der Treiber neu gestartet werden (Puffer im
   Treiberfenster geändert), merkt das die UI und öffnet ihn neu.
 - `audio/AudioDevice` ist die gemeinsame Sicht auf WASAPI und ASIO.

@@ -19,6 +19,8 @@ enum ToolsCommand { kToolsMeasureLatency = 1101 };
 // Befehle des Menues "Bearbeiten"; das Fenster reicht sie selbst an die Ansicht weiter.
 enum EditCommand { kEditSplit = 1201, kEditNudgeLeft, kEditNudgeRight, kEditNudgeLeftBig, kEditNudgeRightBig, kEditDelete };
 enum UndoCommand { kEditUndo = 1251, kEditRedo = 1252 };
+// Menue "Hilfe".
+enum HelpCommand { kHelpAbout = 1401 };
 // Menue "Ansicht".
 enum ViewCommand { kViewMixer = 1301 };
 // Eintraege im Menue "Audio": Ausgabegeraet i = kAudioOutputBase + i, Eingabegeraet

@@ -1,9 +1,28 @@
 # daw
 
 Kleine DAW für Windows: 16 Spuren (Audio/MIDI), VST3, Mixer. Hobbyprojekt in
-C++20 ohne Fremdbibliotheken.
+C++20 ohne Fremdbibliotheken. Freie Software unter der GPLv3, kostenlos für alle.
 
 Aufbau, Regeln und Fahrplan stehen in [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Lizenz und Entstehung
+
+MiniDAW ist freie Software unter der **GNU General Public License, Version 3**
+(GPLv3, Text in [LICENSE](LICENSE)). Kurz gesagt: Jeder darf MiniDAW kostenlos
+benutzen, weitergeben und verändern. Wer eine veränderte Fassung weitergibt,
+muss sie ebenfalls unter der GPLv3 und mit Quellcode weitergeben; so bleibt
+MiniDAW und alles, was daraus entsteht, frei. Es gibt keine Gewähr, siehe
+Abschnitte 15 und 16 der Lizenz.
+
+Entstehung: Idee, Vorgaben und Tests am echten Gerät kommen von Feineflammen.
+Der Code wurde von Claude (Anthropic) geschrieben.
+
+Enthaltene Teile anderer: das VST 3 SDK (nur die Schnittstellen, MIT-Lizenz)
+und das ASIO SDK (nur die Header, unter der GPLv3) von Steinberg. Einzelheiten
+in [FREMDLIZENZEN.md](FREMDLIZENZEN.md). VST und ASIO sind Marken der Steinberg
+Media Technologies GmbH. MiniDAW ist kein Produkt von Steinberg.
+
+Impressum: [feineflammen.de](https://feineflammen.de)
 
 ## Fertiges Programm
 

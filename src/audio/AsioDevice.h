@@ -10,8 +10,8 @@
 // Takt, ohne Windows-Mischer dazwischen. Die Latenz ist dadurch klein und
 // fest, und alle Eingaenge der Soundkarte sind auf einmal da.
 //
-// Die Treiberschnittstelle ist hier selbst beschrieben (kein ASIO-SDK).
-// Treiber stehen in der Registry unter HKLM\SOFTWARE\ASIO.
+// Die Treiberschnittstelle kommt aus dem ASIO SDK von Steinberg (GPLv3,
+// third_party/asiosdk). Treiber stehen in der Registry unter HKLM\SOFTWARE\ASIO.
 //
 // Oeffnen, Starten und Schliessen nur aus dem UI-Thread (dort ist COM
 // initialisiert). Es kann immer nur ein ASIO-Treiber offen sein.

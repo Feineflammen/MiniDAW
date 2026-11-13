@@ -107,6 +107,9 @@ bool MainWindow::create(HINSTANCE instance, int showCommand, std::string& error)
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(view), L"&Ansicht");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(audioMenu_), L"&Audio");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(tools), L"E&xtras");
+    const HMENU help = CreatePopupMenu();
+    AppendMenuW(help, MF_STRING, kHelpAbout, L"\u00DC&ber MiniDAW \u2026");
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(help), L"&Hilfe");
 
     hwnd_ = CreateWindowExW(0, kClassName, L"MiniDAW", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                             1300, 880, nullptr, bar, instance, this);
@@ -186,6 +189,23 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
                 view_.releaseAllNotes();
                 view_.key(LOWORD(wParam) == kEditUndo ? Key::Undo : Key::Redo);
                 InvalidateRect(hwnd_, nullptr, FALSE);
+                return 0;
+            }
+            if (HIWORD(wParam) == 0 && LOWORD(wParam) == kHelpAbout) {
+                MessageBoxW(hwnd_,
+                            L"MiniDAW 0.7\n"
+                            L"Kleine Musik-Software f\u00FCr Windows: 16 Spuren, Audio und MIDI, VST3, Mischpult.\n\n"
+                            L"Idee, Vorgaben und Tests: Feineflammen\n"
+                            L"Programmiert von Claude (Anthropic)\n\n"
+                            L"Freie Software unter der GNU General Public License, Version 3 (GPLv3): "
+                            L"kostenlos benutzen, weitergeben und ver\u00E4ndern; ver\u00E4nderte Fassungen "
+                            L"ebenfalls unter der GPLv3 mit Quellcode. Ohne jede Gew\u00E4hr.\n"
+                            L"Quellcode und Lizenztext: github.com/Feineflammen/daw\n\n"
+                            L"Enth\u00E4lt das VST 3 SDK (Schnittstellen, MIT-Lizenz) und das ASIO SDK "
+                            L"(Header, GPLv3) von Steinberg. VST und ASIO sind Marken der "
+                            L"Steinberg Media Technologies GmbH.\n\n"
+                            L"Impressum: feineflammen.de",
+                            L"\u00DCber MiniDAW", MB_OK | MB_ICONINFORMATION);
                 return 0;
             }
             if (HIWORD(wParam) == 0 && LOWORD(wParam) == kViewMixer) {

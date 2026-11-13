@@ -121,13 +121,28 @@ Clip-Grenzen, Überblendung bei Sprüngen während der Wiedergabe.
   eigener Thread liest dessen Pakete in einen Ringpuffer; der Audio-Thread der
   Ausgabe gibt den Takt vor und holt sich pro Block die passende Menge.
   Windows rechnet den Eingang auf die Samplerate der Ausgabe um.
-- Die Engine reicht den Eingang während der Aufnahme an eine `RecordSink`
-  weiter (Ringpuffer). Der Disk-Thread schreibt daraus eine WAV-Datei
-  (32-Bit-Float). Der Audio-Thread fasst die Datei nie an.
+- Mit ASIO (`audio/AsioDevice`) gibt es keinen eigenen Eingangs-Thread: Der
+  Treiber liefert Ein- und Ausgang im selben Rückruf, die Latenz ist fest.
+  Die Treiberschnittstelle ist im Code selbst beschrieben (COM-Klasse aus
+  `HKLM\SOFTWARE\ASIO`, Klassenkennung = Schnittstellenkennung); das ASIO-SDK
+  wird nicht benutzt. Die Umrechnung der Sampleformate (`audio/AsioFormat.h`)
+  ist ohne Windows testbar. Will der Treiber neu gestartet werden (Puffer im
+  Treiberfenster geändert), merkt das die UI und öffnet ihn neu.
+- `audio/AudioDevice` ist die gemeinsame Sicht auf WASAPI und ASIO.
+- Jede Spur hat einen Audio-Eingang: einen Kanal des Geräts oder ein Paar.
+  Die Engine bekommt alle Eingangskanäle (bis 64) und sucht sich je Spur die
+  passenden heraus. Fehlt ein Kanal, wird Stille aufgenommen; der Controller
+  meldet das vorher.
+- Die Engine reicht den Eingang jeder aufnehmenden Spur während der Aufnahme
+  an ihre eigene `RecordSink` weiter (Ringpuffer). Der Disk-Thread schreibt
+  daraus je Spur eine WAV-Datei (32-Bit-Float, mono oder stereo). Der
+  Audio-Thread fasst die Dateien nie an. Alle Spuren beginnen im selben Block.
 - Ist die Datei fertig, legt der `ProjectController` den Clip an und schiebt
   ihn um die Gesamtlatenz (Eingang + Ausgang) nach vorn.
-- Immer nur eine Spur ist scharfgeschaltet. Mithören führt den Eingang durch
-  Fader und Panorama dieser Spur, auch bei stehendem Transport.
+- Beliebig viele Spuren können scharf sein. Mithören führt den Eingang jeder
+  scharfen Audio-Spur durch ihre Effekte, Fader und Panorama, auch bei
+  stehendem Transport. Scharfe MIDI-Spuren bekommen das Live-MIDI ihres
+  Kanals und nehmen es gemeinsam mit den Audio-Spuren auf.
 
 Ausrichtung des Eingangs: Jedes Aufnahmepaket trägt einen Zeitstempel des
 Geräts. Beim Start (und nach einer Störung) legt der Wiedergabe-Thread den
@@ -158,8 +173,8 @@ einem kurzen Sprung aus. Sauber löst das erst ASIO oder ein Gerät für beides.
   Rückruf im Thread des Treibers) und der Rechnertastatur (UI-Thread). Beide
   rufen `Engine::postMidi`. Die Schreibseite der Queue teilen sie sich über
   einen Mutex; der Audio-Thread liest ohne Sperre.
-- Die Nachrichten gehen an die scharfgeschaltete Spur und wirken am Anfang des
-  nächsten Blocks.
+- Die Nachrichten gehen an alle scharfgeschalteten MIDI-Spuren, deren Kanal
+  passt, und wirken am Anfang des nächsten Blocks.
 - Jede Spur hat einen eingebauten Synthesizer (`engine/Synth`: Sägezahn,
   Tiefpass, Hüllkurve, 16 Stimmen). Er ist die Klangquelle für MIDI, bis in
   Schritt 7 VST-Instrumente dazukommen, und bleibt danach der Ersatz für
@@ -283,7 +298,7 @@ werden die Windows-Standardgeräte benutzt.
 
 ```
 src/
-  audio/    Audiogerät (WASAPI), Callback-Schnittstelle
+  audio/    Audiogeräte (WASAPI, ASIO), Callback-Schnittstelle
   engine/   Transport, Spuren, Mixer, Latenzausgleich
   midi/     MIDI-Geräte, MIDI-Daten
   vst3/     Plugin-Scan, Hosting, Editor-Fenster
@@ -313,6 +328,7 @@ Windows-Code. Sie bilden die Bibliothek `dawcore`, die auch die Tests benutzen.
 | 8 | Mixer komplett: Inserts, Sends, Busse, Pegel, Latenzausgleich | Code und Offline-Tests fertig (Latenzausgleich samplegenau geprüft), per Screenshot geprüft, Bedientest offen |
 | 9 | Projekt speichern und laden, WAV-Export | Code und Offline-Tests fertig, Bedientest offen; Undo/Redo offen |
 | 10 | Automation | offen |
+| 11 | ASIO, Aufnahme mehrerer Spuren mit eigenem Eingang | Code und Offline-Tests fertig, per Screenshot geprüft, mit ASIO-Treiber NICHT getestet |
 
 Jeder Schritt gilt erst als fertig, wenn er auf echter Hardware läuft und
 ohne Knackser klingt.

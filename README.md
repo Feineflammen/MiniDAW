@@ -41,7 +41,7 @@ build\Release\minidaw.exe
 
 Tests ausführen: `ctest --test-dir build -C Release --output-on-failure`
 
-Aktueller Stand: Mischpult mit Effekten, Bussen und Latenzausgleich; Projekte speichern, laden und als WAV exportieren.
+Aktueller Stand: ASIO und Aufnahme mehrerer Spuren gleichzeitig; Mischpult mit Effekten, Bussen und Latenzausgleich; Projekte speichern, laden und als WAV exportieren.
 
 ## Bedienung
 
@@ -55,16 +55,16 @@ Aktueller Stand: Mischpult mit Effekten, Bussen und Latenzausgleich; Projekte sp
 | Entf | ausgewählten Clip löschen |
 | Mausrad / Strg + Mausrad | scrollen / zoomen |
 | Doppelklick auf einen Regler | zurück auf 0 dB bzw. Mitte |
-| R am Spurkopf | Spur für die Aufnahme scharfschalten |
+| R am Spurkopf | Spur für die Aufnahme scharfschalten; mehrere Spuren nehmen gleichzeitig auf |
 | Rec-Knopf oder Taste R | Aufnahme starten / beenden |
-| Mithören | Eingang über die scharfgeschaltete Spur hören |
+| Mithören | Eingang über die scharfgeschalteten Spuren hören |
 
 | − / + neben "Latenz" | Aufnahme-Latenz in 5-ms-Schritten anpassen; Mausrad 1 ms, Doppelklick setzt zurück |
 | Tasten A S D F G H J K L | weiße Tasten ab C auf der scharfgeschalteten Spur |
 | Tasten W E T Z U O | schwarze Tasten |
 | Y / X | Oktave tiefer / höher |
 
-Menü "Audio": Wiedergabe- und Aufnahmegerät direkt wählen, ohne Neustart. Die Wahl und die Aufnahme-Latenz werden je Gerät gespeichert.
+Menü "Audio": Wiedergabe- und Aufnahmegerät (WASAPI) oder einen ASIO-Treiber direkt wählen, ohne Neustart. Die Wahl und die Aufnahme-Latenz werden je Gerät gespeichert. Mit ASIO laufen Ein- und Ausgang im selben Takt, die Latenz ist kleiner und alle Eingänge der Soundkarte sind da (beim UMC404HD vier). "ASIO-Einstellungen …" öffnet das Fenster des Treibers, dort stellt man die Puffergröße ein; die DAW startet den Treiber danach selbst neu. Ein ASIO-Treiber kann immer nur von einem Programm benutzt werden.
 
 Menü "Bearbeiten" (Clip vorher anklicken): Am Abspielzeiger teilen (Strg+T), mit ← / → um 1 ms verschieben, mit Umschalt um 10 ms. Clips lassen sich an ihren Kanten kürzen; beim Ziehen mit gedrückter Umschalttaste rasten sie nicht ein.
 
@@ -72,7 +72,7 @@ Menü "Extras" → "Latenz messen …": Mit einem Kabel von Ausgang 1 oder 2 der
 
 Menü "Datei": Neu (Strg+N), Öffnen (Strg+O), Speichern (Strg+S), Speichern unter (Strg+Umschalt+S), Als WAV exportieren (Strg+E). Projekte haben die Endung `.mdaw` und sind lesbare Textdateien; die Audiodateien bleiben an ihrem Ort.
 
-Am Spurkopf rechts stehen zwei Felder: oben der Eingang der Spur (Audio, MIDI alle, MIDI 1 bis 16), unten ihr MIDI-Ausgang (Synth oder MIDI 1 bis 16). Linksklick schaltet weiter, Rechtsklick zurück, das Mausrad geht auch. In der Statusleiste wählt ein Klick auf "MIDI aus" das Ausgabegerät.
+Am Spurkopf rechts stehen zwei Felder: oben der Eingang der Spur, unten ihr MIDI-Ausgang (Synth oder MIDI 1 bis 16; Linksklick schaltet weiter, Rechtsklick zurück, Mausrad). Ein Klick auf den Eingang öffnet eine Liste: Stereopaare ("In 1+2", "In 3+4"), einzelne Kanäle ("In 1" bis "In 4") und MIDI (alle oder Kanal 1 bis 16); das Mausrad schaltet direkt weiter. Ein gelber Eingang steht auf einem Kanal, den das Gerät nicht hat. Zum Aufnehmen mehrerer Quellen jede Spur auf ihren Eingang stellen, alle mit R scharfschalten und Rec drücken: Jede Spur bekommt ihre eigene Datei. In der Statusleiste wählt ein Klick auf "MIDI aus" das Ausgabegerät.
 
 Links neben dem Lineal stehen Taktposition, Tempo (Klick +1, Rechtsklick −1, Mausrad) und der Knopf "Klick" für das Metronom.
 
@@ -91,4 +91,4 @@ Busse sind für Hall, Delay oder eine gemeinsame Gruppe gedacht: Effekt auf den 
 
 Unten rechts zeigt eine LED jede eingehende MIDI-Nachricht, daneben steht im Klartext, was ankam (Kanal, Note, Anschlag). Rot bedeutet einen Übertragungsfehler.
 
-Aufnahmen landen unter `Dokumente\MiniDAW\Aufnahmen`.
+Aufnahmen landen unter `Dokumente\MiniDAW\Aufnahmen`, eine Datei je Spur (`Aufnahme_<Datum>_<Uhrzeit>_Spur<n>.wav`, mono oder stereo je nach Eingang).

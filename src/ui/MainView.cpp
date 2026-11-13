@@ -20,6 +20,7 @@ constexpr float kHeaderW = 372.0f;
 constexpr float kPickerRowH = 22.0f;
 constexpr float kInputRowH = 19.0f;   // Zeilen der Eingangsliste
 constexpr float kInputColW = 70.0f;
+constexpr int kMidiRows = 9;  // "MIDI alle" und Kanal 1..8 in der ersten MIDI-Spalte
 constexpr int kPickerRows = 16;
 constexpr float kRowH = 44.0f;
 constexpr float kStatusH = 24.0f;
@@ -926,7 +927,7 @@ Rect MainView::inputMenuRect() const {
     int audio = 0;
     for (const InputChoice& choice : choices) audio += choice.input == kTrackInputAudio ? 1 : 0;
     const int midi = static_cast<int>(choices.size()) - audio;
-    const float rows = static_cast<float>(std::max(audio, (midi + 1) / 2));
+    const float rows = static_cast<float>(std::max(audio, std::min(midi, kMidiRows)));
     const float h = 26.0f + rows * kInputRowH + 6.0f;
     const float top = kTopH + kRulerH + 4.0f;
     const Rect field = inputRect(std::max(0, inputMenuTrack_));
@@ -949,8 +950,9 @@ void MainView::drawInputMenu(Canvas& c) {
         if (choice.input == kTrackInputAudio) {
             row = {r.x + 6.0f, r.y + 26.0f + static_cast<float>(audioRow++) * kInputRowH, kInputColW, kInputRowH - 2.0f};
         } else {
-            const int column = 1 + midiIndex % 2;
-            const int line = midiIndex++ / 2;
+            // MIDI in zwei Spalten von oben nach unten: alle, 1..8 | 9..16.
+            const int column = 1 + midiIndex / kMidiRows;
+            const int line = midiIndex++ % kMidiRows;
             row = {r.x + 6.0f + static_cast<float>(column) * (kInputColW + 3.0f),
                    r.y + 26.0f + static_cast<float>(line) * kInputRowH, kInputColW, kInputRowH - 2.0f};
         }
@@ -978,7 +980,7 @@ bool MainView::inputMenuMouseDown(float x, float y) {
         if (choice.input == kTrackInputAudio) {
             hit = column == 0 && line == audioRow++;
         } else {
-            hit = column == 1 + midiIndex % 2 && line == midiIndex / 2;
+            hit = column == 1 + midiIndex / kMidiRows && line == midiIndex % kMidiRows;
             ++midiIndex;
         }
         if (hit) {

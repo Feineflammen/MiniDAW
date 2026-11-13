@@ -5,6 +5,10 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Die Laufzeitbibliothek von Visual C++ fest in die exe einbauen: Dann laeuft
+# minidaw.exe auch auf Rechnern ohne installierte Visual-C++-Laufzeit.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 # Die beiden Quelldateien der VST3-Schnittstellen (Kennungen der Basis-
 # Schnittstellen). Fremder Code: ohne unsere Warnstufe uebersetzen.
 add_library(vst3interfaces STATIC

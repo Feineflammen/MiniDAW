@@ -35,8 +35,8 @@ Impressum: [feineflammen.de](https://feineflammen.de)
 ## Fertiges Programm
 
 `bin/minidaw.exe` ist fertig gebaut, Windows 10/11, 64 Bit. Herunterladen und
-starten, eine Installation ist nicht nötig. Gebraucht wird die
-Visual-C++-Laufzeit von Microsoft, die auf den meisten Rechnern schon vorhanden ist.
+starten, eine Installation ist nicht nötig; die exe bringt alles mit, was sie
+braucht.
 
 - Gebaut von GitHub Actions aus genau diesem Quellcode. Drei unabhängige
   Builds ergaben Byte für Byte dieselbe Datei.

@@ -45,6 +45,7 @@ struct ClipModel {
     std::int64_t start = 0;   // Position auf der Zeitachse, in Frames
     std::int64_t offset = 0;  // erster benutzter Frame der Datei
     std::int64_t length = 0;
+    bool operator==(const ClipModel&) const = default;
 };
 
 // Eine Note in einem MIDI-Clip. Zeiten in Frames, relativ zum Clip-Anfang.
@@ -53,6 +54,7 @@ struct MidiNote {
     std::int64_t length = 0;
     std::uint8_t pitch = 60;
     std::uint8_t velocity = 100;
+    bool operator==(const MidiNote&) const = default;
 };
 
 struct MidiClipModel {
@@ -60,7 +62,21 @@ struct MidiClipModel {
     std::int64_t start = 0;   // Position auf der Zeitachse, in Frames
     std::int64_t length = 0;
     std::vector<MidiNote> notes;
+    bool operator==(const MidiClipModel&) const = default;
 };
+
+// Automation: Punkte auf der Zeitachse, dazwischen wird linear verbunden.
+// Lautstaerke als Fader-Stellung 0..1 (engine/FaderCurve.h), Panorama -1..1.
+constexpr int kAutoVolume = 0;
+constexpr int kAutoPan = 1;
+constexpr int kAutomationParams = 2;
+
+struct AutomationPoint {
+    std::int64_t position = 0;  // Frames
+    float value = 0.0f;
+    bool operator==(const AutomationPoint&) const = default;
+};
+using AutomationLane = std::vector<AutomationPoint>;  // nach Position sortiert
 
 // Eingang einer Spur: Audio oder MIDI (alle Kanaele oder ein bestimmter).
 // Die Werte entsprechen Engine::kInputAudio, kInputMidiAll und 0..15.
@@ -81,6 +97,7 @@ struct TrackModel {
     int audioChannel = 0;
     bool audioStereo = true;
     int midiOutput = kTrackOutputSynth;
+    std::array<AutomationLane, kAutomationParams> automation;
     SlotArray slots;                           // Instrument und Effekte
     std::array<float, kProjectBuses> sends{};  // Send-Pegel an die Busse, linear
     int output = -1;                           // -1 = Master, 0..3 = Bus

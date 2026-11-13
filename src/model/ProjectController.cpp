@@ -1,7 +1,10 @@
 #include "model/ProjectController.h"
 
+#include "engine/FaderCurve.h"
+
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
@@ -38,6 +41,127 @@ std::shared_ptr<AudioFile> ProjectController::openFile(const std::filesystem::pa
     return file;
 }
 
+// --- Rueckgaengig / Wiederholen ----------------------------------------------
+
+namespace {
+constexpr std::size_t kUndoLimit = 200;
+constexpr std::int64_t kCoalesceMicros = 1'000'000;  // Mausrad-Schritte innerhalb 1 s
+const std::wstring kNoLabel;
+
+std::int64_t nowMicros() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+}  // namespace
+
+void ProjectController::noteChange(const wchar_t* label, int target, bool coalesce) {
+    modified_ = true;
+    if (suppressUndo_ > 0) return;
+    if (editDepth_ > 0) {
+        if (editCaptured_) return;  // diese Geste ist schon gemerkt
+        editCaptured_ = true;
+    } else {
+        const std::int64_t now = nowMicros();
+        const bool same = coalesce && target != -1 && label == lastLabel_ && target == lastTarget_ &&
+                          now - lastChangeMicros_ < kCoalesceMicros && !undo_.empty();
+        lastLabel_ = coalesce ? label : nullptr;
+        lastTarget_ = target;
+        lastChangeMicros_ = now;
+        if (same) return;
+    }
+    undo_.push_back({project_, label});
+    if (undo_.size() > kUndoLimit) undo_.erase(undo_.begin());
+    redo_.clear();
+}
+
+void ProjectController::beginEdit() {
+    if (editDepth_++ == 0) editCaptured_ = false;
+}
+
+void ProjectController::endEdit() {
+    if (editDepth_ > 0 && --editDepth_ == 0) {
+        editCaptured_ = false;
+        lastLabel_ = nullptr;  // naechste Aenderung beginnt einen neuen Schritt
+        for (auto& from : writeFrom_) from.fill(-1);  // Automation-Schreiben endet mit der Geste
+    }
+}
+
+const std::wstring& ProjectController::undoLabel() const { return undo_.empty() ? kNoLabel : undo_.back().label; }
+const std::wstring& ProjectController::redoLabel() const { return redo_.empty() ? kNoLabel : redo_.back().label; }
+
+bool ProjectController::undo() {
+    if (!canUndo()) return false;
+    UndoStep step = std::move(undo_.back());
+    undo_.pop_back();
+    redo_.push_back({project_, step.label});
+    applySnapshot(std::move(step.project));
+    return true;
+}
+
+bool ProjectController::redo() {
+    if (!canRedo()) return false;
+    UndoStep step = std::move(redo_.back());
+    redo_.pop_back();
+    undo_.push_back({project_, step.label});
+    applySnapshot(std::move(step.project));
+    return true;
+}
+
+void ProjectController::clearHistory() {
+    undo_.clear();
+    redo_.clear();
+    lastLabel_ = nullptr;
+}
+
+// Uebernimmt einen gemerkten Zustand und schickt alles an die Engine. Plugins
+// bleiben, wie sie jetzt sind; Clips und Noten werden nur dort neu an die
+// Engine gegeben, wo sie sich unterscheiden (sonst wuerde die Wiedergabe neu ansetzen).
+void ProjectController::applySnapshot(Project snapshot) {
+    for (int t = 0; t < kProjectTracks; ++t)
+        snapshot.tracks[static_cast<std::size_t>(t)].slots = project_.tracks[static_cast<std::size_t>(t)].slots;
+    for (int b = 0; b < kProjectBuses; ++b)
+        snapshot.buses[static_cast<std::size_t>(b)].slots = project_.buses[static_cast<std::size_t>(b)].slots;
+    snapshot.masterSlots = project_.masterSlots;
+
+    const Project old = std::move(project_);
+    project_ = std::move(snapshot);
+    modified_ = true;
+    lastLabel_ = nullptr;
+
+    // Nur Unterschiede schicken: Die Befehlsschlange der Engine ist begrenzt,
+    // und mehrere Schritte koennen schnell hintereinander kommen.
+    if (project_.bpm != old.bpm) engine_.setTempo(project_.bpm);
+    if (project_.masterGain != old.masterGain) engine_.setMasterGain(project_.masterGain);
+    for (int t = 0; t < kProjectTracks; ++t) {
+        const auto i = static_cast<std::size_t>(t);
+        const TrackModel& track = project_.tracks[i];
+        const TrackModel& was = old.tracks[i];
+        if (track.gain != was.gain) engine_.setTrackGain(t, track.gain);
+        if (track.pan != was.pan) engine_.setTrackPan(t, track.pan);
+        if (track.mute != was.mute) engine_.setTrackMute(t, track.mute);
+        if (track.solo != was.solo) engine_.setTrackSolo(t, track.solo);
+        if (track.input != was.input) engine_.setTrackMidiInput(t, track.input);
+        if (track.audioChannel != was.audioChannel || track.audioStereo != was.audioStereo)
+            engine_.setTrackAudioInput(t, track.audioChannel, track.audioStereo);
+        if (track.midiOutput != was.midiOutput) engine_.setTrackMidiOutput(t, track.midiOutput);
+        if (track.output != was.output) engine_.setTrackOutput(t, track.output);
+        for (int b = 0; b < kProjectBuses; ++b) {
+            const auto bi = static_cast<std::size_t>(b);
+            if (track.sends[bi] != was.sends[bi]) engine_.setTrackSend(t, b, track.sends[bi]);
+        }
+        if (track.clips != was.clips) syncTrack(t);
+        if (track.midiClips != was.midiClips) syncMidi(t);
+        if (track.automation != was.automation) syncAutomation(t);
+    }
+    for (int b = 0; b < kProjectBuses; ++b) {
+        const BusModel& bus = project_.buses[static_cast<std::size_t>(b)];
+        const BusModel& was = old.buses[static_cast<std::size_t>(b)];
+        if (bus.gain != was.gain) engine_.setBusGain(b, bus.gain);
+        if (bus.pan != was.pan) engine_.setBusPan(b, bus.pan);
+        if (bus.mute != was.mute) engine_.setBusMute(b, bus.mute);
+    }
+}
+
 bool ProjectController::addClip(int track, const std::filesystem::path& path, std::int64_t start,
                                 std::string& message) {
     message.clear();
@@ -53,6 +177,7 @@ bool ProjectController::addClip(int track, const std::filesystem::path& path, st
                   (file->wav->sampleRate() < sampleRate_ ? "hoch und schnell." : "tief und langsam.");
     }
 
+    noteChange(L"Clip einf\u00FCgen");
     ClipModel clip;
     clip.start = std::max<std::int64_t>(0, start);
     clip.offset = 0;
@@ -69,6 +194,8 @@ int ProjectController::moveClip(int track, int index, int newTrack, std::int64_t
     if (index < 0 || index >= static_cast<int>(from.size())) return -1;
 
     newStart = std::max<std::int64_t>(0, newStart);
+    if (newTrack == track && from[static_cast<std::size_t>(index)].start == newStart) return index;
+    noteChange(L"Clip verschieben");
     if (newTrack == track) {
         from[static_cast<std::size_t>(index)].start = newStart;
         syncTrack(track);
@@ -89,6 +216,7 @@ bool ProjectController::removeClip(int track, int index) {
     if (!validTrack(track)) return false;
     auto& clips = project_.tracks[static_cast<std::size_t>(track)].clips;
     if (index < 0 || index >= static_cast<int>(clips.size())) return false;
+    noteChange(L"Clip l\u00F6schen");
     clips.erase(clips.begin() + index);
     syncTrack(track);
     return true;
@@ -98,8 +226,11 @@ bool ProjectController::splitClip(int track, int index, std::int64_t at) {
     if (!validTrack(track)) return false;
     auto& clips = project_.tracks[static_cast<std::size_t>(track)].clips;
     if (index < 0 || index >= static_cast<int>(clips.size())) return false;
+    if (at <= clips[static_cast<std::size_t>(index)].start ||
+        at >= clips[static_cast<std::size_t>(index)].start + clips[static_cast<std::size_t>(index)].length)
+        return false;
+    noteChange(L"Clip teilen");
     ClipModel& first = clips[static_cast<std::size_t>(index)];
-    if (at <= first.start || at >= first.start + first.length) return false;
 
     ClipModel second = first;
     const std::int64_t cut = at - first.start;
@@ -116,8 +247,11 @@ bool ProjectController::splitMidiClip(int track, int index, std::int64_t at) {
     if (!validTrack(track)) return false;
     auto& clips = project_.tracks[static_cast<std::size_t>(track)].midiClips;
     if (index < 0 || index >= static_cast<int>(clips.size())) return false;
+    if (at <= clips[static_cast<std::size_t>(index)].start ||
+        at >= clips[static_cast<std::size_t>(index)].start + clips[static_cast<std::size_t>(index)].length)
+        return false;
+    noteChange(L"Clip teilen");
     MidiClipModel& first = clips[static_cast<std::size_t>(index)];
-    if (at <= first.start || at >= first.start + first.length) return false;
 
     const std::int64_t cut = at - first.start;
     MidiClipModel second;
@@ -153,6 +287,8 @@ bool ProjectController::trimClip(int track, int index, std::int64_t newStart, st
     newStart = std::clamp(newStart, std::max<std::int64_t>(0, fileStart), fileEnd);
     newEnd = std::clamp(newEnd, newStart, fileEnd);
     if (newEnd - newStart < 1) return false;
+    if (clip.start == newStart && clip.length == newEnd - newStart) return true;
+    noteChange(L"Clip k\u00FCrzen");
     clip.start = newStart;
     clip.offset = newStart - fileStart;
     clip.length = newEnd - newStart;
@@ -164,6 +300,8 @@ bool ProjectController::resizeMidiClip(int track, int index, std::int64_t newLen
     if (!validTrack(track) || newLength < 1) return false;
     auto& clips = project_.tracks[static_cast<std::size_t>(track)].midiClips;
     if (index < 0 || index >= static_cast<int>(clips.size())) return false;
+    if (clips[static_cast<std::size_t>(index)].length == newLength) return true;
+    noteChange(L"Clip-L\u00E4nge");
     clips[static_cast<std::size_t>(index)].length = newLength;
     syncMidi(track);
     return true;
@@ -171,7 +309,8 @@ bool ProjectController::resizeMidiClip(int track, int index, std::int64_t newLen
 
 void ProjectController::setTrackGain(int track, float gain) {
     if (!validTrack(track)) return;
-    modified_ = true;
+    if (project_.tracks[static_cast<std::size_t>(track)].gain == std::max(0.0f, gain)) return;
+    noteChange(L"Lautst\u00E4rke", track, true);
     project_.tracks[static_cast<std::size_t>(track)].gain = std::max(0.0f, gain);
     engine_.setTrackGain(track, gain);
 }
@@ -179,27 +318,31 @@ void ProjectController::setTrackGain(int track, float gain) {
 void ProjectController::setTrackPan(int track, float pan) {
     if (!validTrack(track)) return;
     pan = std::clamp(pan, -1.0f, 1.0f);
-    modified_ = true;
+    if (project_.tracks[static_cast<std::size_t>(track)].pan == pan) return;
+    noteChange(L"Panorama", track, true);
     project_.tracks[static_cast<std::size_t>(track)].pan = pan;
     engine_.setTrackPan(track, pan);
 }
 
 void ProjectController::setTrackMute(int track, bool mute) {
     if (!validTrack(track)) return;
-    modified_ = true;
+    if (project_.tracks[static_cast<std::size_t>(track)].mute == mute) return;
+    noteChange(L"Stumm", track);
     project_.tracks[static_cast<std::size_t>(track)].mute = mute;
     engine_.setTrackMute(track, mute);
 }
 
 void ProjectController::setTrackSolo(int track, bool solo) {
     if (!validTrack(track)) return;
-    modified_ = true;
+    if (project_.tracks[static_cast<std::size_t>(track)].solo == solo) return;
+    noteChange(L"Solo", track);
     project_.tracks[static_cast<std::size_t>(track)].solo = solo;
     engine_.setTrackSolo(track, solo);
 }
 
 void ProjectController::setMasterGain(float gain) {
-    modified_ = true;
+    if (project_.masterGain == std::max(0.0f, gain)) return;
+    noteChange(L"Master-Lautst\u00E4rke", kMasterStripIndex, true);
     project_.masterGain = std::max(0.0f, gain);
     engine_.setMasterGain(gain);
 }
@@ -217,6 +360,7 @@ std::int64_t ProjectController::contentLength() const noexcept {
 
 // Setzt alles auf den Ausgangszustand zurueck: keine Clips, keine Plugins, Regler neutral.
 void ProjectController::clearProject() {
+    ++suppressUndo_;
     engine_.stop();
     engine_.locate(0);
     // Alle Plugins entfernen.
@@ -241,8 +385,10 @@ void ProjectController::clearProject() {
         setTrackOutput(t, -1);
         track.clips.clear();
         track.midiClips.clear();
+        for (auto& lane : track.automation) lane.clear();
         syncTrack(t);
         syncMidi(t);
+        syncAutomation(t);
         track.name = L"Spur " + std::to_wstring(t + 1);
         setTrackGain(t, 1.0f);
         setTrackPan(t, 0.0f);
@@ -254,6 +400,8 @@ void ProjectController::clearProject() {
     }
     setMasterGain(1.0f);
     setBpm(120.0);
+    --suppressUndo_;
+    clearHistory();
 }
 
 void ProjectController::newProject() {
@@ -286,6 +434,7 @@ bool ProjectController::saveProject(const std::filesystem::path& path, std::stri
         for (const ClipModel& clip : track.clips)
             out.clips.push_back({clip.file->path, clip.start, clip.offset, clip.length});
         out.midiClips = track.midiClips;
+        out.automation = track.automation;
     }
     // Plugins aller Kanalzuege mit ihren Einstellungen.
     for (int strip = 0; strip < kProjectStrips && persistence_; ++strip) {
@@ -325,6 +474,7 @@ bool ProjectController::loadProject(const std::filesystem::path& path, std::stri
     if (!readProjectFile(path, saved, message)) return false;
 
     clearProject();
+    ++suppressUndo_;
     int missingFiles = 0, failedPlugins = 0;
     std::string firstProblem;
 
@@ -364,6 +514,8 @@ bool ProjectController::loadProject(const std::filesystem::path& path, std::stri
 
         track.midiClips = in.midiClips;
         syncMidi(t);
+        track.automation = in.automation;
+        syncAutomation(t);
 
     }
 
@@ -392,6 +544,8 @@ bool ProjectController::loadProject(const std::filesystem::path& path, std::stri
 
     projectPath_ = path;
     modified_ = false;
+    --suppressUndo_;
+    clearHistory();
 
     if (missingFiles > 0 || failedPlugins > 0) {
         message = "Geladen mit L\u00FCcken: ";
@@ -412,7 +566,8 @@ bool ProjectController::loadProject(const std::filesystem::path& path, std::stri
 void ProjectController::setTrackInput(int track, int input) {
     if (!validTrack(track) || input < kTrackInputAudio || input > 15) return;
     if (isRecording()) return;
-    modified_ = true;
+    if (project_.tracks[static_cast<std::size_t>(track)].input == input) return;
+    noteChange(L"Eingang", track);
     project_.tracks[static_cast<std::size_t>(track)].input = input;
     engine_.setTrackMidiInput(track, input);
 }
@@ -421,7 +576,8 @@ void ProjectController::setTrackAudioInput(int track, int channel, bool stereo) 
     if (!validTrack(track) || channel < 0 || channel >= Engine::kMaxInputs) return;
     if (isRecording()) return;
     TrackModel& model = project_.tracks[static_cast<std::size_t>(track)];
-    if (model.audioChannel != channel || model.audioStereo != stereo) modified_ = true;
+    if (model.audioChannel == channel && model.audioStereo == stereo) return;
+    noteChange(L"Eingang", track);
     model.audioChannel = channel;
     model.audioStereo = stereo;
     engine_.setTrackAudioInput(track, channel, stereo);
@@ -429,7 +585,8 @@ void ProjectController::setTrackAudioInput(int track, int channel, bool stereo) 
 
 void ProjectController::setTrackMidiOutput(int track, int output) {
     if (!validTrack(track) || output < kTrackOutputSynth || output > 15) return;
-    modified_ = true;
+    if (project_.tracks[static_cast<std::size_t>(track)].midiOutput == output) return;
+    noteChange(L"MIDI-Ausgang", track);
     project_.tracks[static_cast<std::size_t>(track)].midiOutput = output;
     engine_.setTrackMidiOutput(track, output);
 }
@@ -465,21 +622,24 @@ void ProjectController::setPlugin(int strip, int slot, std::shared_ptr<AudioPlug
 void ProjectController::setTrackSend(int track, int bus, float level) {
     if (!validTrack(track) || bus < 0 || bus >= kProjectBuses) return;
     level = std::clamp(level, 0.0f, 4.0f);
-    modified_ = true;
+    if (project_.tracks[static_cast<std::size_t>(track)].sends[static_cast<std::size_t>(bus)] == level) return;
+    noteChange(L"Send", track * 8 + bus, true);
     project_.tracks[static_cast<std::size_t>(track)].sends[static_cast<std::size_t>(bus)] = level;
     engine_.setTrackSend(track, bus, level);
 }
 
 void ProjectController::setTrackOutput(int track, int bus) {
     if (!validTrack(track) || bus < -1 || bus >= kProjectBuses) return;
-    modified_ = true;
+    if (project_.tracks[static_cast<std::size_t>(track)].output == bus) return;
+    noteChange(L"Ausgang", track);
     project_.tracks[static_cast<std::size_t>(track)].output = bus;
     engine_.setTrackOutput(track, bus);
 }
 
 void ProjectController::setBusGain(int bus, float gain) {
     if (bus < 0 || bus >= kProjectBuses) return;
-    modified_ = true;
+    if (project_.buses[static_cast<std::size_t>(bus)].gain == std::max(0.0f, gain)) return;
+    noteChange(L"Bus-Lautst\u00E4rke", kFirstBusStrip + bus, true);
     project_.buses[static_cast<std::size_t>(bus)].gain = std::max(0.0f, gain);
     engine_.setBusGain(bus, gain);
 }
@@ -487,14 +647,16 @@ void ProjectController::setBusGain(int bus, float gain) {
 void ProjectController::setBusPan(int bus, float pan) {
     if (bus < 0 || bus >= kProjectBuses) return;
     pan = std::clamp(pan, -1.0f, 1.0f);
-    modified_ = true;
+    if (project_.buses[static_cast<std::size_t>(bus)].pan == pan) return;
+    noteChange(L"Bus-Panorama", kFirstBusStrip + bus, true);
     project_.buses[static_cast<std::size_t>(bus)].pan = pan;
     engine_.setBusPan(bus, pan);
 }
 
 void ProjectController::setBusMute(int bus, bool mute) {
     if (bus < 0 || bus >= kProjectBuses) return;
-    modified_ = true;
+    if (project_.buses[static_cast<std::size_t>(bus)].mute == mute) return;
+    noteChange(L"Bus stumm", kFirstBusStrip + bus);
     project_.buses[static_cast<std::size_t>(bus)].mute = mute;
     engine_.setBusMute(bus, mute);
 }
@@ -509,7 +671,8 @@ void ProjectController::releasePlugins() {
 }
 
 void ProjectController::setBpm(double bpm) {
-    modified_ = true;
+    if (project_.bpm == std::clamp(bpm, 30.0, 300.0)) return;
+    noteChange(L"Tempo", 99, true);
     project_.bpm = std::clamp(bpm, 30.0, 300.0);
     engine_.setTempo(project_.bpm);
 }
@@ -524,6 +687,9 @@ bool ProjectController::updateMidiClip(int track, int index, std::vector<MidiNot
     auto& clips = project_.tracks[static_cast<std::size_t>(track)].midiClips;
     if (index < 0 || index >= static_cast<int>(clips.size())) return false;
     std::sort(notes.begin(), notes.end(), [](const MidiNote& a, const MidiNote& b) { return a.start < b.start; });
+    if (clips[static_cast<std::size_t>(index)].notes == notes && clips[static_cast<std::size_t>(index)].length == length)
+        return true;
+    noteChange(L"Noten bearbeiten");
     clips[static_cast<std::size_t>(index)].notes = std::move(notes);
     clips[static_cast<std::size_t>(index)].length = length;
     syncMidi(track);
@@ -533,6 +699,7 @@ bool ProjectController::updateMidiClip(int track, int index, std::vector<MidiNot
 int ProjectController::addMidiClip(int track, MidiClipModel clip) {
     if (!validTrack(track) || clip.length <= 0) return -1;
     clip.start = std::max<std::int64_t>(0, clip.start);
+    noteChange(L"MIDI-Clip anlegen");
     auto& clips = project_.tracks[static_cast<std::size_t>(track)].midiClips;
     clips.push_back(std::move(clip));
     syncMidi(track);
@@ -545,6 +712,8 @@ int ProjectController::moveMidiClip(int track, int index, int newTrack, std::int
     if (index < 0 || index >= static_cast<int>(from.size())) return -1;
 
     newStart = std::max<std::int64_t>(0, newStart);
+    if (newTrack == track && from[static_cast<std::size_t>(index)].start == newStart) return index;
+    noteChange(L"Clip verschieben");
     if (newTrack == track) {
         from[static_cast<std::size_t>(index)].start = newStart;
         syncMidi(track);
@@ -564,6 +733,7 @@ bool ProjectController::removeMidiClip(int track, int index) {
     if (!validTrack(track)) return false;
     auto& clips = project_.tracks[static_cast<std::size_t>(track)].midiClips;
     if (index < 0 || index >= static_cast<int>(clips.size())) return false;
+    noteChange(L"Clip l\u00F6schen");
     clips.erase(clips.begin() + index);
     syncMidi(track);
     return true;
@@ -597,6 +767,142 @@ void ProjectController::syncMidi(int track) {
     engine_.setTrackMidiSequence(track, std::move(sequence));
 }
 
+// --- Automation --------------------------------------------------------------
+
+namespace {
+bool validParam(int param) { return param >= 0 && param < kAutomationParams; }
+float clampAutomation(int param, float value) {
+    return param == kAutoVolume ? std::clamp(value, 0.0f, 1.0f) : std::clamp(value, -1.0f, 1.0f);
+}
+const AutomationLane kNoLane;
+}  // namespace
+
+const AutomationLane& ProjectController::automation(int track, int param) const {
+    if (!validTrack(track) || !validParam(param)) return kNoLane;
+    return project_.tracks[static_cast<std::size_t>(track)].automation[static_cast<std::size_t>(param)];
+}
+
+int ProjectController::addAutomationPoint(int track, int param, std::int64_t position, float value) {
+    if (!validTrack(track) || !validParam(param)) return -1;
+    position = std::max<std::int64_t>(0, position);
+    value = clampAutomation(param, value);
+    noteChange(L"Automationspunkt");
+    AutomationLane& lane = project_.tracks[static_cast<std::size_t>(track)].automation[static_cast<std::size_t>(param)];
+    auto at = std::lower_bound(lane.begin(), lane.end(), position,
+                               [](const AutomationPoint& p, std::int64_t pos) { return p.position < pos; });
+    if (at != lane.end() && at->position == position) {
+        at->value = value;  // an derselben Stelle: Wert ersetzen
+    } else {
+        at = lane.insert(at, {position, value});
+    }
+    syncAutomation(track);
+    return static_cast<int>(at - lane.begin());
+}
+
+// Ein Punkt bleibt zwischen seinen Nachbarn; so aendert sich die Reihenfolge nie.
+int ProjectController::moveAutomationPoint(int track, int param, int index, std::int64_t position, float value) {
+    if (!validTrack(track) || !validParam(param)) return -1;
+    AutomationLane& lane = project_.tracks[static_cast<std::size_t>(track)].automation[static_cast<std::size_t>(param)];
+    if (index < 0 || index >= static_cast<int>(lane.size())) return -1;
+    const auto i = static_cast<std::size_t>(index);
+    const std::int64_t low = i > 0 ? lane[i - 1].position + 1 : 0;
+    const std::int64_t high = i + 1 < lane.size() ? lane[i + 1].position - 1 : std::numeric_limits<std::int64_t>::max();
+    position = std::clamp(position, low, std::max(low, high));
+    value = clampAutomation(param, value);
+    if (lane[i].position == position && lane[i].value == value) return index;
+    noteChange(L"Automationspunkt");
+    lane[i] = {position, value};
+    syncAutomation(track);
+    return index;
+}
+
+bool ProjectController::removeAutomationPoint(int track, int param, int index) {
+    if (!validTrack(track) || !validParam(param)) return false;
+    AutomationLane& lane = project_.tracks[static_cast<std::size_t>(track)].automation[static_cast<std::size_t>(param)];
+    if (index < 0 || index >= static_cast<int>(lane.size())) return false;
+    noteChange(L"Automationspunkt löschen");
+    lane.erase(lane.begin() + index);
+    syncAutomation(track);
+    return true;
+}
+
+void ProjectController::clearAutomation(int track, int param) {
+    if (!validTrack(track) || !validParam(param)) return;
+    AutomationLane& lane = project_.tracks[static_cast<std::size_t>(track)].automation[static_cast<std::size_t>(param)];
+    if (lane.empty()) return;
+    noteChange(L"Automation löschen");
+    lane.clear();
+    syncAutomation(track);
+}
+
+void ProjectController::setAutomationView(int track, int param) {
+    if (!validTrack(track) || param < -1 || param >= kAutomationParams) return;
+    automationView_[static_cast<std::size_t>(track)] = param;
+}
+
+int ProjectController::automationView(int track) const noexcept {
+    return validTrack(track) ? automationView_[static_cast<std::size_t>(track)] : -1;
+}
+
+bool ProjectController::automationWriting(int track, int param) const noexcept {
+    return validTrack(track) && automationView_[static_cast<std::size_t>(track)] == param && engine_.isPlaying();
+}
+
+void ProjectController::userTrackGain(int track, float gain) {
+    if (automationWriting(track, kAutoVolume)) writeAutomation(track, kAutoVolume, fader::gainToPosition(gain));
+    else setTrackGain(track, gain);
+}
+
+void ProjectController::userTrackPan(int track, float pan) {
+    if (automationWriting(track, kAutoPan)) writeAutomation(track, kAutoPan, pan);
+    else setTrackPan(track, pan);
+}
+
+// Schreiben waehrend der Wiedergabe: Was der Strich seit dem letzten Aufruf
+// ueberstrichen hat, wird ersetzt; ein neuer Punkt kommt an die aktuelle Stelle.
+void ProjectController::writeAutomation(int track, int param, float value) {
+    const auto t = static_cast<std::size_t>(track);
+    const auto p = static_cast<std::size_t>(param);
+    AutomationLane& lane = project_.tracks[t].automation[p];
+    const std::int64_t now = engine_.position();
+    std::int64_t& from = writeFrom_[t][p];
+    if (from < 0 || now < from) from = now;  // neuer Strich (oder Sprung zurueck)
+    value = clampAutomation(param, value);
+    noteChange(L"Automation schreiben", track);
+
+    // Vor dem ersten Punkt soll der bisherige feste Wert gelten, nicht der neue.
+    if (lane.empty() && now > 0) {
+        const TrackModel& model = project_.tracks[t];
+        lane.push_back({0, param == kAutoVolume ? fader::gainToPosition(model.gain) : model.pan});
+    }
+    const auto first = std::lower_bound(lane.begin(), lane.end(), from,
+                                        [](const AutomationPoint& a, std::int64_t pos) { return a.position < pos; });
+    const auto last = std::upper_bound(first, lane.end(), now,
+                                       [](std::int64_t pos, const AutomationPoint& a) { return pos < a.position; });
+    // Punkte im ueberstrichenen Bereich entfernen, ausser dem Anfangspunkt dieses Strichs.
+    auto keep = first;
+    if (keep != last && keep->position == from && from != now) ++keep;
+    const auto at = lane.erase(keep, last);
+    lane.insert(at, {now, value});
+    from = now;
+    syncAutomation(track);
+}
+
+void ProjectController::syncAutomation(int track) {
+    modified_ = true;
+    const TrackModel& model = project_.tracks[static_cast<std::size_t>(track)];
+    for (int param = 0; param < kAutomationParams; ++param) {
+        const AutomationLane& lane = model.automation[static_cast<std::size_t>(param)];
+        std::unique_ptr<AutomationCurve> curve;
+        if (!lane.empty()) {
+            curve = std::make_unique<AutomationCurve>();
+            curve->points.reserve(lane.size());
+            for (const AutomationPoint& point : lane) curve->points.push_back({point.position, point.value});
+        }
+        engine_.setTrackAutomation(track, param, std::move(curve));
+    }
+}
+
 // Schliesst die MIDI-Aufnahme ab: je Spur offene Noten beenden, Clip anlegen.
 void ProjectController::finishMidiRecording(std::int64_t end) {
     midiRecording_ = false;
@@ -623,6 +929,7 @@ void ProjectController::finishMidiRecording(std::int64_t end) {
         clip.start = midiRecordStart_;
         clip.length = length;
         clip.notes = std::move(notes);
+        noteChange(L"Aufnahme");  // in poll() gruppiert: alle Spuren ein Schritt
         std::sort(clip.notes.begin(), clip.notes.end(),
                   [](const MidiNote& a, const MidiNote& b) { return a.start < b.start; });
         addMidiClip(track, std::move(clip));
@@ -790,7 +1097,13 @@ bool ProjectController::poll(std::string& message) {
     }
 
     // MIDI-Aufnahme: Ereignisse abholen, Noten je Spur zusammensetzen, am Ende die Clips anlegen.
+    // Alles, was hier an Clips entsteht, ist ein Schritt "Aufnahme".
     bool changed = false;
+    beginEdit();
+    struct EditEnd {
+        ProjectController* self;
+        ~EditEnd() { self->endEdit(); }
+    } editEnd{this};
     if (midiRecording_) {
         MidiRecordEvent e;
         while (midiRecording_ && engine_.popMidiRecord(e)) {
@@ -857,6 +1170,7 @@ bool ProjectController::finishAudioTake(int track, const std::shared_ptr<RecordS
         clip.start = 0;
     }
     if (clip.length <= 0) return false;
+    noteChange(L"Aufnahme");
     clip.file = std::move(file);
     project_.tracks[static_cast<std::size_t>(track)].clips.push_back(std::move(clip));
     syncTrack(track);

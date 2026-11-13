@@ -42,6 +42,22 @@ public:
     void setPluginPersistence(PluginPersistence* persistence) noexcept { persistence_ = persistence; }
     // Leert das Projekt.
     void newProject();
+
+    // --- Rueckgaengig / Wiederholen ---
+    // Vor jeder Aenderung am Projekt wird ein Schnappschuss gemerkt. Plugins
+    // (welches Plugin in welchem Platz, ihre Einstellungen) gehoeren nicht
+    // dazu: Rueckgaengig laesst sie, wie sie sind.
+    // Alles zwischen beginEdit() und endEdit() wird ein einziger Schritt
+    // (eine Mausbewegung, die viele Werte aendert). Verschachteln ist erlaubt.
+    void beginEdit();
+    void endEdit();
+    bool canUndo() const noexcept { return !undo_.empty() && !isRecording(); }
+    bool canRedo() const noexcept { return !redo_.empty() && !isRecording(); }
+    const std::wstring& undoLabel() const;  // was zurueckgenommen wuerde
+    const std::wstring& redoLabel() const;
+    bool undo();
+    bool redo();
+    void clearHistory();
     // Speichert das Projekt. Bei false steht der Grund in message.
     bool saveProject(const std::filesystem::path& path, std::string& message);
     // Laedt ein Projekt. Bei false steht der Grund in message und das bisherige
@@ -153,6 +169,27 @@ public:
     // Um so viel werden Aufnahmen tatsaechlich verschoben.
     std::int64_t appliedLatencyFrames() const;
 
+    // --- Automation der Spuren (Lautstaerke, Panorama) ---
+    // Werte: Lautstaerke als Fader-Stellung 0..1, Panorama -1..1. Hat eine
+    // Spur Punkte fuer einen Parameter, gilt die Kurve statt des Reglers.
+    const AutomationLane& automation(int track, int param) const;
+    bool hasAutomation(int track, int param) const { return !automation(track, param).empty(); }
+    // Liefert den Index des neuen bzw. verschobenen Punkts, -1 bei Fehler.
+    int addAutomationPoint(int track, int param, std::int64_t position, float value);
+    int moveAutomationPoint(int track, int param, int index, std::int64_t position, float value);
+    bool removeAutomationPoint(int track, int param, int index);
+    void clearAutomation(int track, int param);
+    // Welche Automation die Spur im Arrangement zeigt: -1 keine, sonst der Parameter.
+    // Zaehlt nicht zum Projekt und nicht zu Rueckgaengig.
+    void setAutomationView(int track, int param);
+    int automationView(int track) const noexcept;
+    // Regler-Bewegung des Benutzers. Laeuft die Wiedergabe und zeigt die Spur
+    // diesen Parameter, wird Automation geschrieben (zwischen beginEdit() und
+    // endEdit() ein Strich); sonst wird der feste Wert gesetzt.
+    void userTrackGain(int track, float gain);
+    void userTrackPan(int track, float pan);
+    bool automationWriting(int track, int param) const noexcept;
+
     // Scharfgeschaltete Spuren nehmen beim Start gemeinsam auf: Audio-Spuren
     // jede von ihrem Eingang in eine eigene Datei, MIDI-Spuren ihre Noten.
     void setTrackArmed(int track, bool armed);
@@ -190,7 +227,25 @@ private:
     std::shared_ptr<AudioFile> openFile(const std::filesystem::path& path, std::string& error);
     void syncTrack(int track);
     void syncMidi(int track);
+    void syncAutomation(int track);
+    void writeAutomation(int track, int param, float value);
     void clearProject();
+
+    // Merkt vor einer Aenderung den Zustand. target != -1 und coalesce: Folgen
+    // gleicher Aenderungen am selben Ziel (Mausrad) werden ein Schritt.
+    void noteChange(const wchar_t* label, int target = -1, bool coalesce = false);
+    void applySnapshot(Project snapshot);
+    struct UndoStep {
+        Project project;
+        std::wstring label;
+    };
+    std::vector<UndoStep> undo_, redo_;
+    int editDepth_ = 0;
+    bool editCaptured_ = false;
+    int suppressUndo_ = 0;  // > 0: Aenderungen werden nicht gemerkt (Laden, Zuruecksetzen)
+    const wchar_t* lastLabel_ = nullptr;
+    int lastTarget_ = -1;
+    std::int64_t lastChangeMicros_ = 0;
     void finishMidiRecording(std::int64_t end);
     bool finishAudioTake(int track, const std::shared_ptr<RecordSink>& sink, std::string& message);
 
@@ -207,6 +262,17 @@ private:
 
     int inputChannels_ = 0;
     std::array<bool, kProjectTracks> armed_{};
+    std::array<int, kProjectTracks> automationView_ = [] {
+        std::array<int, kProjectTracks> views{};
+        views.fill(-1);
+        return views;
+    }();
+    // Beim Schreiben: bis wohin der aktuelle Strich schon geschrieben hat (-1 = keiner).
+    std::array<std::array<std::int64_t, kAutomationParams>, kProjectTracks> writeFrom_ = [] {
+        std::array<std::array<std::int64_t, kAutomationParams>, kProjectTracks> from{};
+        for (auto& f : from) f.fill(-1);
+        return from;
+    }();
     bool monitor_ = false;
     bool metronome_ = false;
     int recordOffsetMs_ = 0;

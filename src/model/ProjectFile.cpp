@@ -216,6 +216,14 @@ bool writeProjectFile(const std::filesystem::path& path, const SavedProject& pro
         for (int b = 0; b < kProjectBuses; ++b)
             if (track.sends[static_cast<std::size_t>(b)] > 0.0f)
                 out << "  send " << (b + 1) << ' ' << formatNumber(track.sends[static_cast<std::size_t>(b)]) << '\n';
+        // Automation: "automation lautstaerke 0:0.8 44100:0.5 ..." (Frame:Wert).
+        for (int param = 0; param < kAutomationParams; ++param) {
+            const AutomationLane& lane = track.automation[static_cast<std::size_t>(param)];
+            if (lane.empty()) continue;
+            out << "  automation " << (param == kAutoVolume ? "lautstaerke" : "panorama");
+            for (const AutomationPoint& point : lane) out << ' ' << point.position << ':' << formatNumber(point.value);
+            out << '\n';
+        }
         writeSlots(out, track.slots);
         for (const SavedClip& clip : track.clips) {
             out << "  audioclip " << clip.start << ' ' << clip.offset << ' ' << clip.length << ' '
@@ -343,6 +351,27 @@ bool readProjectFile(const std::filesystem::path& path, SavedProject& project, s
             if (numberAndRest(rest, index, value) && index >= 1 && index <= kProjectBuses)
                 track->sends[static_cast<std::size_t>(index - 1)] =
                     std::max(0.0f, static_cast<float>(std::strtod(value.c_str(), nullptr)));
+        }
+        else if (key == "automation") {
+            std::istringstream words(rest);
+            std::string which, pair;
+            words >> which;
+            const int param = which == "lautstaerke" ? kAutoVolume : which == "panorama" ? kAutoPan : -1;
+            if (param >= 0) {
+                AutomationLane& lane = track->automation[static_cast<std::size_t>(param)];
+                lane.clear();
+                while (words >> pair) {
+                    const auto colon = pair.find(':');
+                    if (colon == std::string::npos) continue;
+                    const std::int64_t position = std::strtoll(pair.c_str(), nullptr, 10);
+                    float value = static_cast<float>(std::strtod(pair.c_str() + colon + 1, nullptr));
+                    value = param == kAutoVolume ? std::clamp(value, 0.0f, 1.0f) : std::clamp(value, -1.0f, 1.0f);
+                    if (position >= 0) lane.push_back({position, value});
+                }
+                std::stable_sort(lane.begin(), lane.end(), [](const AutomationPoint& a, const AutomationPoint& b) {
+                    return a.position < b.position;
+                });
+            }
         }
         else if (key == "eingang") track->input = inputFromName(rest);
         else if (key == "audioeingang") {

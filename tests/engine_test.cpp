@@ -1,6 +1,7 @@
 // Offline-Tests der Engine. Laufen ohne Audiogeraet, also auch auf GitHub.
 
 #include "audio/AsioFormat.h"
+#include "engine/FaderCurve.h"
 #include "disk/DiskThread.h"
 #include "disk/WavFile.h"
 #include "engine/Engine.h"
@@ -1681,6 +1682,9 @@ void testProjectFile() {
         controller.setTrackMidiOutput(5, 9);
         controller.setTrackInput(6, kTrackInputMidiAll);
         controller.setTrackAudioInput(1, 2, false);  // In 3
+        controller.addAutomationPoint(2, kAutoVolume, 1000, 0.25f);
+        controller.addAutomationPoint(2, kAutoVolume, 50000, 0.75f);
+        controller.addAutomationPoint(4, kAutoPan, 0, -0.5f);
         controller.setTrackAudioInput(3, 2, true);   // In 3+4
         controller.setMasterGain(0.8f);
         controller.setBpm(97.0);
@@ -1752,6 +1756,11 @@ void testProjectFile() {
         CHECK(p.tracks[1].audioChannel == 2 && !p.tracks[1].audioStereo);
         CHECK(p.tracks[3].audioChannel == 2 && p.tracks[3].audioStereo);
         CHECK(p.tracks[0].audioChannel == 0 && p.tracks[0].audioStereo);
+        CHECK(p.tracks[2].automation[kAutoVolume] ==
+              (AutomationLane{{1000, 0.25f}, {50000, 0.75f}}));
+        CHECK(p.tracks[4].automation[kAutoPan] == (AutomationLane{{0, -0.5f}}));
+        CHECK(p.tracks[0].automation[kAutoVolume].empty());
+        CHECK(!controller.canUndo());  // Laden beginnt ohne Vorgeschichte
         CHECK(p.tracks[5].midiClips.size() == 1);
         if (p.tracks[5].midiClips.size() == 1) {
             const MidiClipModel& m = p.tracks[5].midiClips[0];
@@ -2275,6 +2284,241 @@ void testLatencyCompensation() {
 
 }  // namespace
 
+// --- Rueckgaengig / Wiederholen ----------------------------------------------
+
+void testUndoRedo() {
+    makeSource();
+    const auto path = tempFile("minidaw_test_source.wav");
+    Rig rig;
+    ProjectController c(*rig.engine);
+    c.setSampleRate(kRate);
+    std::string m;
+    const auto& tracks = c.project().tracks;
+
+    CHECK(!c.canUndo() && !c.canRedo() && !c.undo());
+    CHECK(c.addClip(0, path, 1024, m));
+    CHECK(c.canUndo() && c.undoLabel() == L"Clip einfügen");
+    CHECK(c.moveClip(0, 0, 2, 2048) == 0);
+    CHECK(c.undoLabel() == L"Clip verschieben");
+
+    // Zurueck: Der Clip liegt wieder auf Spur 1 bei 1024, und so klingt es auch.
+    CHECK(c.undo());
+    CHECK(tracks[0].clips.size() == 1 && tracks[0].clips[0].start == 1024 && tracks[2].clips.empty());
+    CHECK(c.canRedo() && c.redoLabel() == L"Clip verschieben");
+    Expected expected = [](std::int64_t p) -> std::int64_t { return (p >= 1024 && p < 1024 + kSourceFrames) ? p - 1024 : -1; };
+    rig.service();
+    rig.render();
+    rig.engine->play();
+    rig.render();
+    std::int64_t pos = kBlock;
+    int exact = 0;
+    for (int b = 0; b < 10; ++b, pos += kBlock) {
+        rig.service();
+        if (renderAndCompare(rig, pos, expected).exact) ++exact;
+    }
+    CHECK(exact >= 8);
+    rig.engine->stop();
+    rig.render();
+
+    CHECK(c.redo());
+    CHECK(tracks[2].clips.size() == 1 && tracks[2].clips[0].start == 2048 && tracks[0].clips.empty());
+    CHECK(!c.canRedo());
+
+    // Eine Geste mit vielen Werten ist ein Schritt.
+    c.beginEdit();
+    for (int i = 1; i <= 10; ++i) c.setTrackGain(1, 0.1f * static_cast<float>(i));
+    c.endEdit();
+    CHECK(tracks[1].gain == 1.0f);  // 0.1 * 10, als float
+    c.beginEdit();
+    for (int i = 1; i <= 5; ++i) c.setTrackGain(1, 0.2f * static_cast<float>(i) * 0.5f);
+    c.endEdit();
+    CHECK(c.undo());
+    CHECK(std::fabs(tracks[1].gain - 1.0f) < 1e-6f);
+    CHECK(c.undoLabel() == L"Lautstärke");
+    CHECK(c.undo());
+    CHECK(tracks[1].gain == 1.0f && c.undoLabel() == L"Clip verschieben");  // war vorher 1.0
+    CHECK(c.redo());
+
+    // Mausrad-Schritte am selben Regler werden zusammengefasst, andere Regler nicht.
+    c.setTrackPan(3, 0.1f);
+    c.setTrackPan(3, 0.2f);
+    c.setTrackPan(3, 0.3f);
+    c.setTrackPan(4, 0.5f);
+    CHECK(c.undo());
+    CHECK(tracks[4].pan == 0.0f && tracks[3].pan == 0.3f);
+    CHECK(c.undo());
+    CHECK(tracks[3].pan == 0.0f);
+
+    // Nichts geaendert, nichts gemerkt.
+    const std::wstring before = c.undoLabel();
+    c.setTrackMute(5, false);
+    c.setTrackOutput(5, -1);
+    CHECK(c.undoLabel() == before);
+
+    // Eine neue Aenderung verwirft, was wiederholt werden koennte.
+    CHECK(c.canRedo());
+    c.setTrackSolo(6, true);
+    CHECK(!c.canRedo());
+
+    // Plugins bleiben, wie sie sind.
+    c.setPlugin(7, 1, std::make_shared<Affine>(1.0f, 0.0f), L"Effekt");
+    c.setTrackGain(7, 0.5f);
+    CHECK(c.undo());
+    CHECK(tracks[7].gain == 1.0f && tracks[7].slots[1].used() && tracks[7].slots[1].name == L"Effekt");
+
+    // Noten.
+    MidiClipModel clip;
+    clip.length = 48000;
+    clip.notes.push_back({0, 1000, 60, 100});
+    CHECK(c.addMidiClip(8, clip) == 0);
+    auto notes = tracks[8].midiClips[0].notes;
+    notes.push_back({2000, 1000, 64, 90});
+    CHECK(c.updateMidiClip(8, 0, notes, 48000));
+    CHECK(tracks[8].midiClips[0].notes.size() == 2);
+    CHECK(c.undo());
+    CHECK(tracks[8].midiClips[0].notes.size() == 1);
+    CHECK(c.undo());
+    CHECK(tracks[8].midiClips.empty());
+
+    // Neues Projekt: nichts mehr zurueckzunehmen.
+    c.newProject();
+    CHECK(!c.canUndo() && !c.canRedo());
+    c.setPlugin(7, 1, nullptr, L"");
+    rig.render();
+    while (!c.peaksIdle()) std::this_thread::yield();
+}
+
+// --- Automation --------------------------------------------------------------
+
+void testAutomation() {
+    Rig rig;
+    ProjectController c(*rig.engine);
+    c.setSampleRate(kRate);
+    Engine& e = *rig.engine;
+    ConstantSource source(0.5f);
+    CHECK(e.setPlugin(0, Engine::kInstrumentSlot, &source));
+    c.setTrackPan(0, -1.0f);  // links, Verstaerkung 1
+
+    // Ohne Automation: fester Wert, Anzeige "keine".
+    rig.render();
+    CHECK(std::isnan(e.automationValue(0, Engine::kAutomationVolume)));
+
+    // Rampe von 0 (stumm) bei 0 bis Stellung 1 (+6 dB) bei 100000.
+    CHECK(c.addAutomationPoint(0, kAutoVolume, 100000, 1.0f) == 0);
+    CHECK(c.addAutomationPoint(0, kAutoVolume, 0, 0.0f) == 0);
+    CHECK(c.automation(0, kAutoVolume).size() == 2 && c.hasAutomation(0, kAutoVolume));
+    CHECK(c.addAutomationPoint(0, kAutoVolume, 100000, 0.9f) == 1);  // gleiche Stelle: ersetzt
+    CHECK(c.automation(0, kAutoVolume).size() == 2 && c.automation(0, kAutoVolume)[1].value == 0.9f);
+    CHECK(c.addAutomationPoint(0, kAutoVolume, 100000, 1.0f) == 1);
+
+    // Der Fader-Wert gilt nicht mehr, die Kurve schon: bei 50000 Stellung 0.5.
+    e.locate(50000);
+    rig.render();
+    auto [l, r] = rig.render();
+    CHECK(std::fabs(e.automationValue(0, Engine::kAutomationVolume) - 0.5f) < 1e-4f);
+    CHECK(std::fabs(l - 0.5f * fader::positionToGain(0.5f)) < 1e-4f);
+    CHECK(r == 0.0f);
+
+    // Mit Latenz auf einem Bus liest die Kurve um diese Latenz voraus.
+    Delayer busDelay(64);
+    CHECK(e.setPlugin(Engine::kFirstBus, 1, &busDelay));
+    rig.render();
+    rig.render();
+    CHECK(std::fabs(e.automationValue(0, Engine::kAutomationVolume) - 50064.0f / 100000.0f) < 1e-4f);
+    CHECK(e.setPlugin(Engine::kFirstBus, 1, nullptr));
+    rig.render();
+
+    // Beim Abspielen folgt die Lautstaerke der Kurve.
+    e.locate(0);
+    e.play();
+    rig.render();
+    for (int b = 0; b < 20; ++b) std::tie(l, r) = rig.render();
+    const float heard = e.automationValue(0, Engine::kAutomationVolume);
+    CHECK(heard > 0.0f && heard < 0.1f);
+    CHECK(std::fabs(l - 0.5f * fader::positionToGain(heard)) < 1e-3f);
+    e.stop();
+    rig.render();
+
+    // Panorama-Automation: ganz rechts.
+    CHECK(c.addAutomationPoint(0, kAutoPan, 0, 1.0f) == 0);
+    rig.render();
+    std::tie(l, r) = rig.render();
+    CHECK(l == 0.0f && r > 0.0f);
+
+    // Punkt verschieben bleibt zwischen den Nachbarn, Werte werden begrenzt.
+    CHECK(c.addAutomationPoint(0, kAutoVolume, 50000, 0.5f) == 1);
+    CHECK(c.moveAutomationPoint(0, kAutoVolume, 1, 200000, 2.0f) == 1);
+    CHECK(c.automation(0, kAutoVolume)[1].position == 99999 && c.automation(0, kAutoVolume)[1].value == 1.0f);
+    CHECK(c.removeAutomationPoint(0, kAutoVolume, 1));
+    CHECK(c.automation(0, kAutoVolume).size() == 2);
+
+    // Rueckgaengig nimmt Punkte zurueck, auch in der Engine.
+    c.clearAutomation(0, kAutoPan);
+    rig.render();
+    CHECK(std::isnan(e.automationValue(0, Engine::kAutomationPan)));
+    CHECK(c.undo());
+    CHECK(c.automation(0, kAutoPan).size() == 1);
+    rig.render();
+    CHECK(e.automationValue(0, Engine::kAutomationPan) == 1.0f);
+    c.clearAutomation(0, kAutoPan);
+    c.clearAutomation(0, kAutoVolume);
+    rig.render();
+    CHECK(std::isnan(e.automationValue(0, Engine::kAutomationVolume)));
+
+    // Schreiben: nur beim Abspielen und wenn die Spur diesen Parameter zeigt.
+    c.setTrackGain(0, 0.5f);
+    c.userTrackGain(0, 0.25f);  // steht: fester Wert
+    CHECK(c.project().tracks[0].gain == 0.25f && !c.hasAutomation(0, kAutoVolume));
+    c.setAutomationView(0, kAutoVolume);
+    e.locate(10000);
+    e.play();
+    rig.render();
+    CHECK(c.automationWriting(0, kAutoVolume) && !c.automationWriting(0, kAutoPan));
+    c.beginEdit();
+    for (int b = 0; b < 5; ++b) {
+        c.userTrackGain(0, 0.1f * static_cast<float>(b + 1));
+        rig.render();
+    }
+    c.endEdit();
+    {
+        const AutomationLane& lane = c.automation(0, kAutoVolume);
+        CHECK(lane.size() == 6);  // Startwert bei 0, dann fuenf geschriebene Punkte
+        CHECK(lane.front().position == 0 && std::fabs(lane.front().value - fader::gainToPosition(0.25f)) < 1e-6f);
+        bool ascending = true;
+        for (std::size_t i = 1; i < lane.size(); ++i) ascending = ascending && lane[i].position > lane[i - 1].position;
+        CHECK(ascending);
+        CHECK(std::fabs(lane.back().value - fader::gainToPosition(0.5f)) < 1e-6f);
+        CHECK(c.project().tracks[0].gain == 0.25f);  // der feste Wert bleibt
+    }
+    // Ein zweiter Strich ueber dieselbe Stelle ersetzt die Punkte dort.
+    e.locate(10000);
+    rig.render();
+    c.beginEdit();
+    for (int b = 0; b < 2; ++b) {
+        c.userTrackGain(0, 1.0f);
+        rig.render();
+    }
+    c.endEdit();
+    {
+        const AutomationLane& lane = c.automation(0, kAutoVolume);
+        CHECK(lane.size() == 6);  // die ersten beiden Punkte des ersten Strichs sind ersetzt
+        int full = 0;
+        for (const AutomationPoint& p : lane) full += p.value == fader::gainToPosition(1.0f) ? 1 : 0;
+        CHECK(full == 2);
+    }
+    // Ein Strich ist ein Schritt.
+    CHECK(c.undoLabel() == L"Automation schreiben");
+    CHECK(c.undo());
+    CHECK(c.automation(0, kAutoVolume).size() == 6);
+    CHECK(c.undo());
+    CHECK(!c.hasAutomation(0, kAutoVolume));
+    e.stop();
+    rig.render();
+    CHECK(!c.automationWriting(0, kAutoVolume));
+    CHECK(e.setPlugin(0, Engine::kInstrumentSlot, nullptr));
+    rig.render();
+}
+
 int main() {
     testStoppedIsSilent();
     testPlayAdvancesPosition();
@@ -2314,6 +2558,8 @@ int main() {
     testClipEditing();
     testMixerRouting();
     testLatencyCompensation();
+    testUndoRedo();
+    testAutomation();
     {
         std::error_code ec;
         std::filesystem::remove_all(tempFile("minidaw_test_aufnahmen"), ec);

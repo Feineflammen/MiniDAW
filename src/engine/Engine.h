@@ -4,6 +4,7 @@
 #include "disk/RecordSink.h"
 #include "disk/TrackStream.h"
 #include "engine/AudioPlugin.h"
+#include "engine/Automation.h"
 #include "engine/DelayLine.h"
 #include "engine/LatencyProbe.h"
 #include "engine/Synth.h"
@@ -75,7 +76,7 @@ public:
     // Wert fuer den MIDI-Ausgang einer Spur; 0..15 sendet auf diesem Kanal an das MIDI-Geraet.
     static constexpr int kOutputSynth = -1;
 
-    Engine() = default;
+    Engine();
     ~Engine() override;
 
     // --- UI-Thread -------------------------------------------------------
@@ -131,6 +132,16 @@ public:
     bool setTrackMidiSequence(int track, std::unique_ptr<MidiSequence> sequence);
     // Gibt Objekte frei, die der Audio-Thread nicht mehr braucht. Regelmaessig rufen.
     void collectGarbage();
+
+    // Automation einer Spur: kAutomationVolume (Fader-Stellung 0..1) oder
+    // kAutomationPan (-1..1). Mit einer Kurve gilt sie statt des festen Werts,
+    // nullptr schaltet sie ab. Die alte Kurve kommt ueber collectGarbage() zurueck.
+    static constexpr int kAutomationVolume = 0;
+    static constexpr int kAutomationPan = 1;
+    static constexpr int kAutomationParams = 2;
+    bool setTrackAutomation(int track, int param, std::unique_ptr<AutomationCurve> curve);
+    // Aktueller Wert der Automation (fuer die Anzeige); NaN, wenn keine aktiv ist.
+    float automationValue(int track, int param) const noexcept;
 
     // Setzt ein Plugin auf einen Platz eines Kanalzugs (nullptr = leer).
     // Platz 0 einer Spur ist das Instrument: Es bekommt das MIDI der Spur
@@ -225,7 +236,7 @@ private:
         TrackGain, TrackPan, TrackMute, TrackSolo, TrackTestTone,
         MasterGain,
         ArmTrack, TrackAudioInput, TrackRecordSink, InputMonitor, Record,
-        TrackMidiInput, TrackMidiOutput, TrackMidiSequence,
+        TrackMidiInput, TrackMidiOutput, TrackMidiSequence, TrackAutomation,
         Tempo, Metronome, TrackPlugin, Offline, Probe,
         TrackSend, TrackOutput, BusGain, BusPan, BusMute,
     };
@@ -237,6 +248,7 @@ private:
         std::int64_t position = 0;
         RecordSink* sink = nullptr;
         const MidiSequence* sequence = nullptr;
+        const AutomationCurve* curve = nullptr;
         AudioPlugin* plugin = nullptr;
         LatencyProbe* probe = nullptr;
     };
@@ -268,6 +280,10 @@ private:
         std::array<float, kNumBuses> sendCur{};  // aktueller (ueberblendet)
         int output = -1;                         // -1 = Master, sonst Bus
         DelayLine delay;                         // Latenzausgleich
+        // Automation (nullptr = aus) und der daraus gerade gueltige Wert
+        std::array<const AutomationCurve*, kAutomationParams> automation{};
+        float autoGain = 1.0f;
+        float autoPan = 0.0f;
         // Eingang und Aufnahme
         bool armed = false;
         int inChannel = 0;
@@ -297,6 +313,7 @@ private:
     bool send(const Command& c) noexcept { return commands_.push(c); }
     void drainCommands() noexcept;
     void updateTargets() noexcept;
+    void applyAutomation() noexcept;
     void renderBlock(int numFrames, std::int64_t blockMicros) noexcept;
     int gatherMidi(std::size_t trackIndex, int numFrames, std::int64_t blockMicros) noexcept;
     void silenceTrack(std::size_t trackIndex, std::int64_t dueMicros) noexcept;
@@ -309,6 +326,12 @@ private:
 
     SpscQueue<Command, 1024> commands_;
     SpscQueue<const MidiSequence*, 256> garbage_;  // Audio -> UI: nicht mehr benoetigt
+    SpscQueue<const AutomationCurve*, 256> curveGarbage_;
+    bool anyAutomation_ = false;
+    int busLatency_ = 0;     // groesste Latenz der Busse
+    int masterLatency_ = 0;  // Latenz der Master-Plaetze
+    // Werte der Automation fuer die Anzeige, je Spur und Parameter (NaN = keine).
+    std::array<std::atomic<float>, kNumTracks * kAutomationParams> automationOut_{};
     SpscQueue<AudioPlugin*, 256> releasedPlugins_;  // Audio -> UI: wird nicht mehr benutzt
 
     // Live-MIDI: mehrere Absender teilen sich die Schreibseite ueber einen Mutex,

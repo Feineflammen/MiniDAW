@@ -1,4 +1,5 @@
 #include "engine/Engine.h"
+#include "engine/FaderCurve.h"
 
 #include <algorithm>
 #include <chrono>
@@ -32,11 +33,21 @@ MidiMessage onChannel(MidiMessage m, int channel) noexcept {
 
 }  // namespace
 
+Engine::Engine() {
+    for (auto& value : automationOut_) value.store(std::nanf(""), std::memory_order_relaxed);
+}
+
 Engine::~Engine() {
     // Alles freigeben, was noch an MIDI-Sequenzen unterwegs ist.
-    for (auto& t : tracks_) delete t.sequence;
+    for (auto& t : tracks_) {
+        delete t.sequence;
+        for (const AutomationCurve* curve : t.automation) delete curve;
+    }
     Command c;
-    while (commands_.pop(c)) delete c.sequence;
+    while (commands_.pop(c)) {
+        delete c.sequence;
+        delete c.curve;
+    }
     collectGarbage();
 }
 
@@ -127,6 +138,24 @@ bool Engine::setTrackMidiSequence(int track, std::unique_ptr<MidiSequence> seque
 void Engine::collectGarbage() {
     const MidiSequence* old = nullptr;
     while (garbage_.pop(old)) delete old;
+    const AutomationCurve* curve = nullptr;
+    while (curveGarbage_.pop(curve)) delete curve;
+}
+
+bool Engine::setTrackAutomation(int track, int param, std::unique_ptr<AutomationCurve> curve) {
+    if (!validTrack(track) || param < 0 || param >= kAutomationParams) return false;
+    if (curve && curve->points.empty()) curve.reset();
+    Command c{CommandType::TrackAutomation, track};
+    c.position = param;
+    c.curve = curve.release();
+    if (send(c)) return true;
+    delete c.curve;
+    return false;
+}
+
+float Engine::automationValue(int track, int param) const noexcept {
+    if (!validTrack(track) || param < 0 || param >= kAutomationParams) return std::nanf("");
+    return automationOut_[static_cast<std::size_t>(track * kAutomationParams + param)].load(std::memory_order_relaxed);
 }
 
 bool Engine::setPlugin(int strip, int slot, AudioPlugin* plugin) noexcept {
@@ -469,6 +498,22 @@ void Engine::drainCommands() noexcept {
                 buses_[static_cast<std::size_t>(c.track)].mute = c.value != 0.0f;
                 mixChanged = true;
                 break;
+            case CommandType::TrackAutomation:
+                if (t) {
+                    auto& slot = t->automation[static_cast<std::size_t>(c.position)];
+                    if (slot) curveGarbage_.push(slot);  // gibt der UI-Thread frei
+                    slot = c.curve;
+                    if (!slot)
+                        automationOut_[static_cast<std::size_t>(c.track * kAutomationParams + c.position)].store(
+                            std::nanf(""), std::memory_order_relaxed);
+                    anyAutomation_ = false;
+                    for (const Track& track : tracks_)
+                        for (const AutomationCurve* curve : track.automation) anyAutomation_ = anyAutomation_ || curve;
+                    mixChanged = true;
+                } else if (c.curve) {
+                    curveGarbage_.push(c.curve);
+                }
+                break;
             case CommandType::TrackMidiSequence:
                 if (t) {
                     if (t->sequence) garbage_.push(t->sequence);  // gibt der UI-Thread frei
@@ -496,12 +541,15 @@ void Engine::updateTargets() noexcept {
         // Mute gewinnt gegen Solo. Ist irgendwo Solo aktiv, sind nur Solo-Spuren hoerbar.
         const bool audible = !t.mute && (!anySolo || t.solo);
         if (!audible) { t.tgtL = 0.0f; t.tgtR = 0.0f; continue; }
+        // Automation geht vor dem festen Wert.
+        const float gain = t.automation[kAutomationVolume] ? t.autoGain : t.gain;
+        const float pan = t.automation[kAutomationPan] ? t.autoPan : t.pan;
         // Constant-Power-Panning: in der Mitte -3 dB je Seite.
-        const float angle = (t.pan + 1.0f) * kQuarterPi;
-        t.tgtL = t.gain * std::cos(angle);
-        t.tgtR = t.gain * std::sin(angle);
-        if (t.pan <= -1.0f) t.tgtR = 0.0f;
-        if (t.pan >= 1.0f) t.tgtL = 0.0f;
+        const float angle = (pan + 1.0f) * kQuarterPi;
+        t.tgtL = gain * std::cos(angle);
+        t.tgtR = gain * std::sin(angle);
+        if (pan <= -1.0f) t.tgtR = 0.0f;
+        if (pan >= 1.0f) t.tgtL = 0.0f;
     }
 
     // Busse: kein Solo (sie bleiben hoerbar, wenn eine Spur solo ist).
@@ -513,6 +561,32 @@ void Engine::updateTargets() noexcept {
         if (bus.pan <= -1.0f) bus.tgtR = 0.0f;
         if (bus.pan >= 1.0f) bus.tgtL = 0.0f;
     }
+}
+
+// Automation fuer den kommenden Block: Der Fader einer Spur sitzt hinter ihrem
+// Latenzausgleich, das Signal dort gehoert also zur Zeit Position + Bus- und
+// Master-Latenz. Zu genau dieser Zeit wird die Kurve gelesen, damit man den
+// Wechsel an der Stelle hoert, an der er auf der Zeitachse steht.
+void Engine::applyAutomation() noexcept {
+    const std::int64_t at = position_ + busLatency_ + masterLatency_;
+    for (std::size_t ti = 0; ti < tracks_.size(); ++ti) {
+        Track& t = tracks_[ti];
+        const AutomationCurve* volume = t.automation[kAutomationVolume];
+        const AutomationCurve* pan = t.automation[kAutomationPan];
+        const float nan = std::nanf("");
+        float shownVolume = nan, shownPan = nan;
+        if (volume) {
+            shownVolume = std::clamp(volume->valueAt(at), 0.0f, 1.0f);
+            t.autoGain = fader::positionToGain(shownVolume);
+        }
+        if (pan) {
+            shownPan = std::clamp(pan->valueAt(at), -1.0f, 1.0f);
+            t.autoPan = shownPan;
+        }
+        automationOut_[ti * kAutomationParams + kAutomationVolume].store(shownVolume, std::memory_order_relaxed);
+        automationOut_[ti * kAutomationParams + kAutomationPan].store(shownPan, std::memory_order_relaxed);
+    }
+    updateTargets();
 }
 
 AudioPlugin** Engine::slotPointer(int strip, int slot) noexcept {
@@ -552,6 +626,8 @@ void Engine::recomputeLatency() noexcept {
         maxBus = std::max(maxBus, busLatency[i]);
     }
     const int masterLatency = sum(masterSlots_, any);
+    busLatency_ = maxBus;
+    masterLatency_ = masterLatency;
     for (std::size_t i = 0; i < tracks_.size(); ++i) tracks_[i].delay.setDelay(maxTrack - trackLatency[i]);
     for (std::size_t i = 0; i < buses_.size(); ++i) buses_[i].delay.setDelay(maxBus - busLatency[i]);
     masterDirectDelay_.setDelay(maxBus);
@@ -649,6 +725,8 @@ void Engine::renderBlock(int numFrames, std::int64_t blockMicros) noexcept {
     const std::size_t bytes = static_cast<std::size_t>(numFrames) * sizeof(float);
     std::memset(L, 0, bytes);
     std::memset(R, 0, bytes);
+
+    if (anyAutomation_) applyAutomation();
 
     // Eingangspegel der scharfgeschalteten Audio-Spuren fuer die Anzeige;
     // Mithoeren, sobald eine von ihnen einen Eingang hat.

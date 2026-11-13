@@ -43,6 +43,7 @@ struct SavedTrack {
     int output = -1;  // -1 = Master
     std::vector<SavedClip> clips;
     std::vector<MidiClipModel> midiClips;
+    std::array<AutomationLane, kAutomationParams> automation;
 };
 
 struct SavedBus {

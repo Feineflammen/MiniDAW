@@ -18,6 +18,13 @@ else()
     target_compile_options(vst3interfaces PRIVATE -w)
 endif()
 
+# Reproduzierbar bauen: keine Zeitstempel in den Dateien. Gleicher Quellcode
+# und gleicher Compiler ergeben dann Byte fuer Byte dieselbe exe.
+if(MSVC)
+    add_compile_options(/Brepro)
+    add_link_options(/Brepro)
+endif()
+
 if(MSVC)
     add_compile_options(/W4 /permissive- /utf-8)
 else()

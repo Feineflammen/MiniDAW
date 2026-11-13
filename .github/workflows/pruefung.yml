@@ -1,0 +1,49 @@
+name: pruefung
+# Prueft, ob die exe genau aus dem Quellcode entsteht: zwei Builds auf zwei
+# frischen Windows-Rechnern muessen Byte fuer Byte gleich sein.
+on:
+  workflow_dispatch:
+  push:
+    branches: [bearbeiten-und-geraete]
+
+jobs:
+  bau:
+    strategy:
+      matrix:
+        durchlauf: [1, 2]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Bauen
+        shell: cmd
+        run: build.bat
+      - name: Pruefsumme und Umgebung
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash build\Release\minidaw.exe -Algorithm SHA256).Hash
+          Write-Output "DURCHLAUF ${{ matrix.durchlauf }} SHA256 minidaw.exe: $h"
+          Write-Output "Rechner: $env:COMPUTERNAME  Image: $env:ImageOS $env:ImageVersion"
+          Write-Output "Groesse: $((Get-Item build\Release\minidaw.exe).Length) Bytes"
+          $h | Out-File -Encoding ascii hash.txt
+      - name: Programmdatei als Text ins Protokoll (nur Durchlauf 1)
+        if: matrix.durchlauf == 1
+        shell: pwsh
+        run: |
+          $b = [Convert]::ToBase64String([IO.File]::ReadAllBytes('build\Release\minidaw.exe'))
+          for ($i = 0; $i -lt $b.Length; $i += 200) { Write-Output ("EXE:" + $b.Substring($i, [Math]::Min(200, $b.Length - $i))) }
+      - uses: actions/upload-artifact@v6
+        with:
+          name: hash-${{ matrix.durchlauf }}
+          path: hash.txt
+
+  vergleich:
+    needs: bau
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v5
+      - name: Beide Builds vergleichen
+        run: |
+          a=$(tr -d '\r\n ' < hash-1/hash.txt); b=$(tr -d '\r\n ' < hash-2/hash.txt)
+          echo "Durchlauf 1: $a"
+          echo "Durchlauf 2: $b"
+          if [ "$a" = "$b" ]; then echo "ERGEBNIS: identisch"; else echo "ERGEBNIS: verschieden"; exit 1; fi

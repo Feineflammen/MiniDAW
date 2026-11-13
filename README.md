@@ -16,7 +16,7 @@ Abschnitte 15 und 16 der Lizenz.
 
 Entstehung: Idee, Vorgaben und Tests am echten Gerät kommen von Feineflammen.
 Der Programmcode wurde vollständig von einer KI geschrieben (Claude von
-Anthropic). MiniDAW ist ein kostenloses Hobbyprojekt ohne Gewähr; vor
+Anthropic), Programmsymbol und Titelbild von ChatGPT (OpenAI). MiniDAW ist ein kostenloses Hobbyprojekt ohne Gewähr; vor
 wichtigen Aufnahmen Sicherungskopien anlegen.
 
 Enthaltene Teile anderer: das VST 3 SDK (nur die Schnittstellen, MIT-Lizenz)

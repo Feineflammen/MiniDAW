@@ -78,6 +78,7 @@ if(WIN32)
         src/ui/MainView.cpp
         src/ui/MainWindow.cpp
         src/ui/MixerView.cpp
+        src/ui/SplashWindow.cpp
         src/ui/PianoRoll.cpp
         src/vst3/PluginManager.cpp
         src/vst3/PluginWindow.cpp
@@ -87,6 +88,6 @@ if(WIN32)
     )
     target_compile_definitions(minidaw PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
     # ASIO SDK von Steinberg (GPLv3), nur die Header der Treiberschnittstelle
-    target_include_directories(minidaw PRIVATE third_party/asiosdk/common)
-    target_link_libraries(minidaw PRIVATE dawcore vst3host ole32 advapi32 avrt d2d1 dwrite windowscodecs shell32 user32 winmm comdlg32)
+    target_include_directories(minidaw PRIVATE src third_party/asiosdk/common)
+    target_link_libraries(minidaw PRIVATE dawcore vst3host ole32 advapi32 avrt dwmapi gdi32 d2d1 dwrite windowscodecs shell32 user32 winmm comdlg32)
 endif()

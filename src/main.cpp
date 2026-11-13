@@ -17,6 +17,7 @@
 #include "model/ProjectController.h"
 #include "ui/MainView.h"
 #include "ui/MainWindow.h"
+#include "ui/SplashWindow.h"
 #include "vst3/PluginManager.h"
 
 #include <windows.h>
@@ -84,8 +85,11 @@ struct DemoPlugin final : AudioPlugin {
     int latency_;
 };
 
-// mode: leer = Spuren mit Plugin-Auswahl, "mixer" = Mischpult, "eingang" = Eingangsliste.
+// mode: leer = Spuren mit Plugin-Auswahl, "mixer" = Mischpult, "eingang" = Eingangsliste,
+// "ladebild" und "ueber" = Ladebild bzw. Fenster "Ueber MiniDAW".
 int runScreenshot(const std::filesystem::path& output, const std::wstring& mode) {
+    if (mode == L"ladebild" || mode == L"ueber")
+        return ui::SplashWindow::renderPng(GetModuleHandleW(nullptr), mode == L"ueber", output.wstring()) ? 0 : 3;
     constexpr int kRate = 44100;
     constexpr int kBlock = 512;
 
@@ -308,6 +312,16 @@ std::wstring decimal(double value) {
 }
 
 int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& initialProject) {
+    // Ladebild, bis das Hauptfenster steht. Fehlermeldungen schliessen es vorher,
+    // sonst laege es ueber dem Meldungsfenster.
+    ui::SplashWindow splash;
+    splash.show(instance);
+    splash.setStatus(L"\u00D6ffne Audioger\u00E4t \u2026");
+    const auto startupError = [&splash](const std::string& text) {
+        splash.close();
+        showError(text);
+    };
+
     auto engine = std::make_unique<Engine>();
     DiskThread disk;
     std::string error;
@@ -323,7 +337,7 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
         current = AudioChoice{};
         device = openAudio(current, nullptr, error);
         if (!device) {
-            showError("Audiogeraet nicht verfuegbar: " + error);
+            startupError("Audiogeraet nicht verfuegbar: " + error);
             return 1;
         }
         startupNotice = L"Das zuletzt gew\u00E4hlte Audioger\u00E4t fehlt, es l\u00E4uft das Windows-Standardger\u00E4t.";
@@ -353,17 +367,19 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
     if (documents) CoTaskMemFree(documents);
 
     if (!device->start(*engine, error)) {
-        showError("Audio-Start fehlgeschlagen: " + error);
+        startupError("Audio-Start fehlgeschlagen: " + error);
         return 1;
     }
     disk.start(*engine);
 
+    splash.setStatus(L"Verbinde MIDI-Ger\u00E4te \u2026");
     MidiInput midi(*engine);
     midi.open();
     MidiOutput midiOut(*engine);
     if (!settings.midiOutput.empty()) midiOut.select(settings.midiOutput);
 
     // VST3-Plugins: geladen wird mit Samplerate und groesster Blocklaenge des Audiogeraets.
+    splash.setStatus(L"Suche Plugins \u2026");
     vst3::PluginManager plugins(controller, device->sampleRate(), device->bufferFrames());
     controller.setPluginPersistence(&plugins);
 
@@ -756,12 +772,17 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
             view.showMessage(L"Audiotreiber neu gestartet: " + std::to_wstring(device->bufferFrames()) + L" Samples Puffer.");
         }
     };
+    splash.setStatus(L"\u00D6ffne Fenster \u2026");
     if (!window.create(instance, showCommand, error)) {
-        showError(error);
+        startupError(error);
         return 1;
     }
     plugins.setOwner(window.hwnd());
     updateTitle();
+    // Das Ladebild geht, bevor ein Projekt geladen wird: Dessen Meldungen
+    // erscheinen ueber dem Hauptfenster und duerfen nicht verdeckt sein.
+    splash.close();
+    SetForegroundWindow(window.hwnd());
     if (!initialProject.empty()) {
         openProject(initialProject);
         updateTitle();

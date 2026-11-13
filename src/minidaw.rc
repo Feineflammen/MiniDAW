@@ -1,5 +1,10 @@
 // Versionsangaben der Programmdatei (sichtbar unter Eigenschaften > Details).
 #include <winver.h>
+#include "resource.h"
+
+// Programmsymbol und Titelbild (erstellt mit ChatGPT, siehe FREMDLIZENZEN.md).
+IDI_MINIDAW ICON "res/minidaw.ico"
+IDR_SPLASH RCDATA "res/splash.jpg"
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION 0, 7, 0, 0

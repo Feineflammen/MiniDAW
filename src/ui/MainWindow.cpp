@@ -1,5 +1,8 @@
 #include "ui/MainWindow.h"
 
+#include "resource.h"
+#include "ui/SplashWindow.h"
+
 #include <commdlg.h>
 #include <shellapi.h>
 #include <wincodec.h>
@@ -67,7 +70,12 @@ bool MainWindow::create(HINSTANCE instance, int showCommand, std::string& error)
     wc.lpfnWndProc = &MainWindow::windowProc;
     wc.hInstance = instance;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    // Programmsymbol aus den Ressourcen; gross fuer Taskleiste, klein fuer die Titelleiste.
+    wc.hIcon = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_MINIDAW), IMAGE_ICON,
+                                             GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), 0));
+    wc.hIconSm = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_MINIDAW), IMAGE_ICON,
+                                               GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0));
+    if (!wc.hIcon) wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
     wc.lpszClassName = kClassName;
     if (!RegisterClassExW(&wc)) { error = "Fensterklasse nicht registrierbar"; return false; }
 
@@ -192,22 +200,7 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
                 return 0;
             }
             if (HIWORD(wParam) == 0 && LOWORD(wParam) == kHelpAbout) {
-                MessageBoxW(hwnd_,
-                            L"MiniDAW 0.7\n"
-                            L"Kleine Musik-Software f\u00FCr Windows: 16 Spuren, Audio und MIDI, VST3, Mischpult.\n\n"
-                            L"Idee, Vorgaben und Tests: Feineflammen\n"
-                            L"Der Programmcode wurde vollst\u00E4ndig von einer KI geschrieben "
-                            L"(Claude von Anthropic).\n\n"
-                            L"Freie Software unter der GNU General Public License, Version 3 (GPLv3): "
-                            L"kostenlos benutzen, weitergeben und ver\u00E4ndern; ver\u00E4nderte Fassungen "
-                            L"ebenfalls unter der GPLv3 mit Quellcode. Kostenlos und ohne Gew\u00E4hr; "
-                            L"vor wichtigen Aufnahmen Sicherungskopien anlegen.\n"
-                            L"Quellcode und Lizenztext: github.com/Feineflammen/daw\n\n"
-                            L"Enth\u00E4lt das VST 3 SDK (Schnittstellen, MIT-Lizenz) und das ASIO SDK "
-                            L"(Header, GPLv3) von Steinberg. VST und ASIO sind Marken der "
-                            L"Steinberg Media Technologies GmbH.\n\n"
-                            L"Impressum: feineflammen.de",
-                            L"\u00DCber MiniDAW", MB_OK | MB_ICONINFORMATION);
+                SplashWindow::showAbout(GetModuleHandleW(nullptr), hwnd_);
                 return 0;
             }
             if (HIWORD(wParam) == 0 && LOWORD(wParam) == kViewMixer) {

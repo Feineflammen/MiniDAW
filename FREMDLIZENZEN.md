@@ -16,6 +16,12 @@ stammen von anderen und liegen unverändert unter `third_party`:
   Text der Steinberg-Bedingungen in [third_party/asiosdk/LICENSE.txt](third_party/asiosdk/LICENSE.txt),
   Herkunft in [third_party/asiosdk/HERKUNFT.md](third_party/asiosdk/HERKUNFT.md).
 
+## Grafiken (`src/res`)
+
+Programmsymbol (`minidaw.ico`) und Titelbild (`splash.jpg`) wurden mit ChatGPT
+(OpenAI) erzeugt und für MiniDAW zugeschnitten. Sie stehen wie der übrige
+Inhalt des Projekts unter der GPLv3.
+
 ## Marken
 
 VST ist eine eingetragene Marke der Steinberg Media Technologies GmbH.

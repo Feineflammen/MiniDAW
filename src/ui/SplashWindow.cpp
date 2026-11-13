@@ -28,7 +28,7 @@ constexpr wchar_t kAboutText[] =
     L"Freie Software unter der GPLv3: kostenlos benutzen, weitergeben und verändern; "
     L"veränderte Fassungen ebenfalls unter der GPLv3 mit Quellcode. Ohne Gewähr; vor "
     L"wichtigen Aufnahmen Sicherungskopien anlegen.\n\n"
-    L"Quellcode und Lizenztext: github.com/Feineflammen/daw\n\n"
+    L"Quellcode und Lizenztext: github.com/Feineflammen/MiniDAW\n\n"
     L"Enthält das VST 3 SDK (MIT) und das ASIO SDK (GPLv3) von Steinberg. VST und ASIO sind "
     L"Marken der Steinberg Media Technologies GmbH.\n\n"
     L"Impressum: feineflammen.de";

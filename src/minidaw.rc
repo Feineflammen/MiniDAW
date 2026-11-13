@@ -26,7 +26,7 @@ BEGIN
             VALUE "OriginalFilename", "minidaw.exe"
             VALUE "ProductName", "MiniDAW"
             VALUE "ProductVersion", "0.7.0.0"
-            VALUE "LegalCopyright", "Freie Software unter der GPLv3, ohne Gewaehr. Quellcode: github.com/Feineflammen/daw"
+            VALUE "LegalCopyright", "Freie Software unter der GPLv3, ohne Gewaehr. Quellcode: github.com/Feineflammen/MiniDAW"
         END
     END
     BLOCK "VarFileInfo"

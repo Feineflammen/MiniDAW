@@ -15,7 +15,9 @@ MiniDAW und alles, was daraus entsteht, frei. Es gibt keine Gewähr, siehe
 Abschnitte 15 und 16 der Lizenz.
 
 Entstehung: Idee, Vorgaben und Tests am echten Gerät kommen von Feineflammen.
-Der Code wurde von Claude (Anthropic) geschrieben.
+Der Programmcode wurde vollständig von einer KI geschrieben (Claude von
+Anthropic). MiniDAW ist ein kostenloses Hobbyprojekt ohne Gewähr; vor
+wichtigen Aufnahmen Sicherungskopien anlegen.
 
 Enthaltene Teile anderer: das VST 3 SDK (nur die Schnittstellen, MIT-Lizenz)
 und das ASIO SDK (nur die Header, unter der GPLv3) von Steinberg. Einzelheiten

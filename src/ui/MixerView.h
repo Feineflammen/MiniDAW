@@ -23,6 +23,8 @@ public:
     std::function<void(int strip, int slot, const Rect& anchor)> onPickPlugin;
     // Belegter Platz angeklickt: Plugin-Fenster oeffnen.
     std::function<void(int strip, int slot)> onOpenEditor;
+    // Hinweis fuer die Statusleiste.
+    std::function<void(const std::wstring&)> onStatus;
 
     // Pegel der Spuren und des Masters fuehrt die Hauptansicht, die Busse diese Ansicht.
     void setMeters(const std::array<float, kProjectTracks>* tracks, float master) {
@@ -74,6 +76,9 @@ private:
     void setGain(int strip, float gain);
     void setPan(int strip, float pan);
     void stepOutput(int track, int delta);
+    // Folgt der Regler gerade einer Automation (und wird nicht geschrieben)?
+    bool automationLocked(int strip, int param) const;
+    bool automated(int strip, int param) const;
 
     ProjectController& controller_;
     Engine& engine_;

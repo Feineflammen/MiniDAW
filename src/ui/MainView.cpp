@@ -100,6 +100,7 @@ MainView::MainView(ProjectController& controller, Engine& engine)
     framesPerPixel_ = controller_.sampleRate() / 50.0;  // 50 Pixel pro Sekunde
     mixer_.onPickPlugin = [this](int strip, int slot, const Rect& anchor) { openPicker(strip, slot, anchor); };
     mixer_.onOpenEditor = [this](int strip, int slot) { openEditor(strip, slot); };
+    mixer_.onStatus = [this](const std::wstring& text) { setStatus(text); };
 }
 
 void MainView::setMixerMode(bool on) {
@@ -130,9 +131,10 @@ int MainView::rowAt(float y) const {
     return row < kProjectTracks ? row : -1;
 }
 
-Rect MainView::armRect(int track) const { return {62.0f, rowY(track) + 12.0f, 20.0f, 20.0f}; }
-Rect MainView::muteRect(int track) const { return {86.0f, rowY(track) + 12.0f, 20.0f, 20.0f}; }
-Rect MainView::soloRect(int track) const { return {110.0f, rowY(track) + 12.0f, 20.0f, 20.0f}; }
+Rect MainView::armRect(int track) const { return {62.0f, rowY(track) + 5.0f, 20.0f, 17.0f}; }
+Rect MainView::muteRect(int track) const { return {86.0f, rowY(track) + 5.0f, 20.0f, 17.0f}; }
+Rect MainView::soloRect(int track) const { return {110.0f, rowY(track) + 5.0f, 20.0f, 17.0f}; }
+Rect MainView::autoRect(int track) const { return {62.0f, rowY(track) + 25.0f, 68.0f, 14.0f}; }
 Rect MainView::gainRect(int track) const { return {140.0f, rowY(track) + 7.0f, 56.0f, 14.0f}; }
 Rect MainView::panRect(int track) const { return {140.0f, rowY(track) + 25.0f, 56.0f, 12.0f}; }
 Rect MainView::meterRect(int track) const { return {204.0f, rowY(track) + 5.0f, 8.0f, 34.0f}; }
@@ -702,6 +704,9 @@ void MainView::drawTimeline(Canvas& c) {
         }
     }
 
+    for (int t = 0; t < kProjectTracks; ++t)
+        if (controller_.automationView(t) >= 0) drawAutomation(c, t);
+
     // Laufende Aufnahme: roter Balken je aufnehmender Spur, vom Start bis zum Abspielzeiger.
     std::int64_t recStart = 0, recFrames = 0;
     if (controller_.isRecording() && controller_.recordProgress(recStart, recFrames)) {
@@ -730,6 +735,125 @@ void MainView::drawTimeline(Canvas& c) {
     c.popClip();
 }
 
+// --- Automation ---------------------------------------------------------------
+
+float MainView::shownGain(int track) const {
+    const float automated = engine_.automationValue(track, Engine::kAutomationVolume);
+    if (controller_.hasAutomation(track, kAutoVolume) && !std::isnan(automated)) return positionToGain(automated);
+    return controller_.project().tracks[static_cast<std::size_t>(track)].gain;
+}
+
+float MainView::shownPan(int track) const {
+    const float automated = engine_.automationValue(track, Engine::kAutomationPan);
+    if (controller_.hasAutomation(track, kAutoPan) && !std::isnan(automated)) return automated;
+    return controller_.project().tracks[static_cast<std::size_t>(track)].pan;
+}
+
+// Senkrechte Lage in der Spurzeile: oben das Maximum, unten das Minimum.
+float MainView::autoToY(int track, int param, float value) const {
+    const float top = rowY(track) + 5.0f;
+    const float h = kRowH - 10.0f;
+    const float unit = param == kAutoVolume ? value : (value + 1.0f) * 0.5f;
+    return top + (1.0f - std::clamp(unit, 0.0f, 1.0f)) * h;
+}
+
+float MainView::yToAuto(int track, int param, float y) const {
+    const float top = rowY(track) + 5.0f;
+    const float h = kRowH - 10.0f;
+    const float unit = std::clamp(1.0f - (y - top) / h, 0.0f, 1.0f);
+    if (param == kAutoVolume) return unit;
+    const float pan = unit * 2.0f - 1.0f;
+    return std::fabs(pan) < 0.04f ? 0.0f : pan;  // Mitte rastet ein
+}
+
+int MainView::autoPointAt(int track, int param, float x, float y) const {
+    const AutomationLane& lane = controller_.automation(track, param);
+    int best = -1;
+    float bestDistance = 7.0f;
+    for (std::size_t i = 0; i < lane.size(); ++i) {
+        const float px = frameToX(static_cast<double>(lane[i].position));
+        const float py = autoToY(track, param, lane[i].value);
+        const float d = std::max(std::fabs(px - x), std::fabs(py - y));
+        if (d < bestDistance) {
+            bestDistance = d;
+            best = static_cast<int>(i);
+        }
+    }
+    return best;
+}
+
+std::wstring MainView::autoValueText(int param, float value) const {
+    if (param == kAutoVolume) return L"Lautstärke " + formatDb(positionToGain(value)) + L" dB";
+    if (std::fabs(value) < 0.005f) return L"Panorama Mitte";
+    wchar_t text[48];
+    std::swprintf(text, 48, L"Panorama %ls %d", value < 0.0f ? L"L" : L"R", static_cast<int>(std::lround(std::fabs(value) * 100.0f)));
+    return text;
+}
+
+// Kurve ueber der Spurzeile; die Clips darunter treten zurueck.
+void MainView::drawAutomation(Canvas& c, int track) {
+    const int param = controller_.automationView(track);
+    const float y0 = rowY(track);
+    const Rect row{kHeaderW, y0, std::max(0.0f, width_ - kHeaderW), kRowH};
+    c.fill(row, rgb(0x101114, 0.55f));
+    const Color color = param == kAutoVolume ? rgb(0xF2C14E) : rgb(0x5BD1D7);
+    const AutomationLane& lane = controller_.automation(track, param);
+    const std::wstring name = param == kAutoVolume ? std::wstring(L"Lautstärke") : std::wstring(L"Panorama");
+
+    if (lane.empty()) {
+        // Noch keine Punkte: der feste Wert als blasse Linie.
+        const TrackModel& model = controller_.project().tracks[static_cast<std::size_t>(track)];
+        const float y = autoToY(track, param, param == kAutoVolume ? gainToPosition(model.gain) : model.pan);
+        c.line(kHeaderW, y + 0.5f, width_, y + 0.5f, rgb(param == kAutoVolume ? 0xF2C14E : 0x5BD1D7, 0.35f), 1.5f);
+        c.text(name + L": klicken setzt einen Punkt, beim Abspielen schreibt der Regler",
+               {kHeaderW + 6.0f, y0 + 1.0f, 520.0f, 14.0f}, kTextDim, Font::Small);
+        return;
+    }
+
+    c.text(name, {kHeaderW + 6.0f, y0 + 1.0f, 120.0f, 14.0f}, color, Font::Small);
+    float prevX = kHeaderW;
+    float prevY = autoToY(track, param, lane.front().value);
+    for (const AutomationPoint& point : lane) {
+        const float x = frameToX(static_cast<double>(point.position));
+        const float y = autoToY(track, param, point.value);
+        if (x >= kHeaderW - 10.0f || prevX >= kHeaderW) {
+            if (x > kHeaderW || prevX > kHeaderW) c.line(std::max(prevX, kHeaderW), prevY, x, y, color, 1.5f);
+        }
+        if (x >= kHeaderW - 4.0f && x <= width_ + 4.0f) {
+            const bool active = drag_ == Drag::AutoPoint && dragTrack_ == track &&
+                                &point == &lane[static_cast<std::size_t>(std::max(0, autoIndex_))];
+            c.fill({x - 3.0f, y - 3.0f, 6.0f, 6.0f}, active ? rgb(0xFFFFFF) : color);
+        }
+        prevX = x;
+        prevY = y;
+        if (x > width_) break;
+    }
+    if (prevX < width_) c.line(std::max(prevX, kHeaderW), prevY, width_, prevY, color, 1.5f);
+}
+
+void MainView::validateSelection() {
+    const Project& project = controller_.project();
+    if (selTrack_ >= 0 && selTrack_ < kProjectTracks) {
+        const TrackModel& track = project.tracks[static_cast<std::size_t>(selTrack_)];
+        const int count = static_cast<int>(selMidi_ ? track.midiClips.size() : track.clips.size());
+        if (selIndex_ >= count) selTrack_ = selIndex_ = -1;
+    }
+    if (pianoRoll_.isOpen()) {
+        const int track = pianoRoll_.track();
+        if (track < 0 || track >= kProjectTracks ||
+            pianoRoll_.index() >= static_cast<int>(project.tracks[static_cast<std::size_t>(track)].midiClips.size()))
+            pianoRoll_.close();
+    }
+}
+
+std::wstring MainView::undoText() const {
+    return controller_.canUndo() ? L"Rückgängig: " + controller_.undoLabel() : std::wstring(L"Rückgängig");
+}
+
+std::wstring MainView::redoText() const {
+    return controller_.canRedo() ? L"Wiederholen: " + controller_.redoLabel() : std::wstring(L"Wiederholen");
+}
+
 void MainView::drawHeaders(Canvas& c) {
     const Project& project = controller_.project();
     c.fill({0.0f, kTopH + kRulerH, kHeaderW, std::max(0.0f, height_ - kTopH - kRulerH)}, kPanel);
@@ -755,8 +879,18 @@ void MainView::drawHeaders(Canvas& c) {
         c.fillRounded(s, 3.0f, track.solo ? kSoloOn : kButton);
         c.text(L"S", s, track.solo ? kDark : kTextDim, Font::Normal, Align::Center);
 
-        drawSlider(c, gainRect(t), gainToPosition(track.gain), 0.0f);
-        drawSlider(c, panRect(t), (track.pan + 1.0f) * 0.5f, 0.5f);
+        // Automation: welche Kurve die Spur zeigt. Gelb, wenn eine Kurve wirkt.
+        const int view = controller_.automationView(t);
+        const bool hasAuto = controller_.hasAutomation(t, kAutoVolume) || controller_.hasAutomation(t, kAutoPan);
+        const Rect ar = autoRect(t);
+        c.fillRounded(ar, 3.0f, view >= 0 ? kAccent : kDark);
+        const std::wstring autoText = view == kAutoVolume ? std::wstring(L"Auto: Lautst.")
+                                      : view == kAutoPan  ? std::wstring(L"Auto: Pan")
+                                                          : std::wstring(L"Auto");
+        c.text(autoText, ar, view >= 0 ? kDark : hasAuto ? kSoloOn : kTextDim, Font::Small, Align::Center);
+
+        drawSlider(c, gainRect(t), gainToPosition(shownGain(t)), 0.0f);
+        drawSlider(c, panRect(t), (shownPan(t) + 1.0f) * 0.5f, 0.5f);
 
         const Rect meter = meterRect(t);
         c.fill(meter, kDark);
@@ -1012,12 +1146,35 @@ void MainView::rightMouseDown(float x, float y) {
     }
     if (mixerMode_) return;
     const int track = rowAt(y);
-    if (track < 0 || x >= kHeaderW) return;
+    if (track < 0) return;
+    if (x >= kHeaderW) {
+        // Rechtsklick auf einen Automationspunkt loescht ihn.
+        const int view = controller_.automationView(track);
+        if (view >= 0) {
+            const int index = autoPointAt(track, view, x, y);
+            if (index >= 0) controller_.removeAutomationPoint(track, view, index);
+        }
+        return;
+    }
+    if (autoRect(track).contains(x, y)) {
+        // Rechtsklick auf "Auto": die gezeigte Kurve loeschen (Rueckgaengig holt sie zurueck).
+        const int view = controller_.automationView(track);
+        if (view >= 0 && controller_.hasAutomation(track, view)) {
+            controller_.clearAutomation(track, view);
+            setStatus(L"Automation gel\u00F6scht (Strg+Z holt sie zur\u00FCck).");
+        }
+        return;
+    }
     if (inputRect(track).contains(x, y) && !controller_.isRecording()) inputMenuTrack_ = track;
     else if (outputRect(track).contains(x, y)) stepOutput(track, -1);
 }
 
 void MainView::mouseDown(float x, float y, bool doubleClick) {
+    // Alles bis zum Loslassen ist ein Rueckgaengig-Schritt.
+    if (gesture_) controller_.endEdit();
+    controller_.beginEdit();
+    gesture_ = true;
+
     dragStartX_ = x;
     dragStartY_ = y;
     dragMoved_ = false;
@@ -1107,26 +1264,52 @@ void MainView::mouseDown(float x, float y, bool doubleClick) {
                 setStatus(L"W\u00E4hrend der Aufnahme lassen sich Spuren nicht scharfschalten.");
             else
                 controller_.setTrackArmed(track, !controller_.trackArmed(track));
+        } else if (autoRect(track).contains(x, y)) {
+            // Aus -> Lautstaerke -> Panorama -> aus.
+            const int view = controller_.automationView(track);
+            controller_.setAutomationView(track, view + 1 >= kAutomationParams ? -1 : view + 1);
         } else if (muteRect(track).contains(x, y)) {
             controller_.setTrackMute(track, !model.mute);
         } else if (soloRect(track).contains(x, y)) {
             controller_.setTrackSolo(track, !model.solo);
         } else if (x >= gain.x - 6.0f && x < gain.right() + 6.0f && y >= gain.y - 2.0f && y < gain.bottom() + 2.0f) {
-            if (doubleClick) {
-                controller_.setTrackGain(track, 1.0f);
+            if (controller_.hasAutomation(track, kAutoVolume) && !controller_.automationWriting(track, kAutoVolume)) {
+                setStatus(L"Die Lautst\u00E4rke folgt der Automation. \u00C4ndern: Punkte verschieben oder beim Abspielen schreiben.");
+            } else if (doubleClick) {
+                controller_.userTrackGain(track, 1.0f);
             } else {
                 drag_ = Drag::TrackGain;
                 dragTrack_ = track;
                 applyDrag(x, y);
             }
         } else if (x >= pan.x - 6.0f && x < pan.right() + 6.0f && y >= pan.y - 2.0f && y < pan.bottom() + 2.0f) {
-            if (doubleClick) {
-                controller_.setTrackPan(track, 0.0f);
+            if (controller_.hasAutomation(track, kAutoPan) && !controller_.automationWriting(track, kAutoPan)) {
+                setStatus(L"Das Panorama folgt der Automation. \u00C4ndern: Punkte verschieben oder beim Abspielen schreiben.");
+            } else if (doubleClick) {
+                controller_.userTrackPan(track, 0.0f);
             } else {
                 drag_ = Drag::TrackPan;
                 dragTrack_ = track;
                 applyDrag(x, y);
             }
+        }
+        return;
+    }
+
+    // Zeitachse mit sichtbarer Automation: Punkte setzen und ziehen statt Clips.
+    if (const int view = controller_.automationView(track); view >= 0) {
+        int index = autoPointAt(track, view, x, y);
+        if (index < 0) {
+            auto at = std::max<std::int64_t>(0, static_cast<std::int64_t>(xToFrame(x)));
+            if (!dragFree_) at = snap(at, 0, -1, -1);
+            index = controller_.addAutomationPoint(track, view, at, yToAuto(track, view, y));
+        }
+        if (index >= 0) {
+            drag_ = Drag::AutoPoint;
+            dragTrack_ = track;
+            autoParam_ = view;
+            autoIndex_ = index;
+            setStatus(autoValueText(view, controller_.automation(track, view)[static_cast<std::size_t>(index)].value));
         }
         return;
     }
@@ -1206,12 +1389,21 @@ void MainView::applyDrag(float x, float y) {
             controller_.setMasterGain(positionToGain(sliderPosition(kMasterRect, x)));
             break;
         case Drag::TrackGain:
-            controller_.setTrackGain(dragTrack_, positionToGain(sliderPosition(gainRect(dragTrack_), x)));
+            controller_.userTrackGain(dragTrack_, positionToGain(sliderPosition(gainRect(dragTrack_), x)));
             break;
         case Drag::TrackPan: {
             float pan = sliderPosition(panRect(dragTrack_), x) * 2.0f - 1.0f;
             if (std::fabs(pan) < 0.06f) pan = 0.0f;  // Mitte rastet ein
-            controller_.setTrackPan(dragTrack_, pan);
+            controller_.userTrackPan(dragTrack_, pan);
+            break;
+        }
+        case Drag::AutoPoint: {
+            // Ein Punkt bleibt zwischen seinen Nachbarn (das sorgt der Controller).
+            auto frame = std::max<std::int64_t>(0, static_cast<std::int64_t>(xToFrame(x)));
+            if (!dragFree_) frame = snap(frame, 0, -1, -1);
+            const float value = yToAuto(dragTrack_, autoParam_, y);
+            autoIndex_ = controller_.moveAutomationPoint(dragTrack_, autoParam_, autoIndex_, frame, value);
+            if (autoIndex_ >= 0) setStatus(autoValueText(autoParam_, value));
             break;
         }
         case Drag::Scrub:
@@ -1289,6 +1481,16 @@ void MainView::mouseMove(float x, float y, bool free) {
 
 void MainView::mouseUp(float x, float y, bool free) {
     dragFree_ = free;
+    // Erst nach dem Abschluss der Geste (der Clip landet beim Loslassen) den Schritt schliessen.
+    struct GestureEnd {
+        MainView* view;
+        ~GestureEnd() {
+            if (view->gesture_) {
+                view->gesture_ = false;
+                view->controller_.endEdit();
+            }
+        }
+    } gestureEnd{this};
     if (mixer_.dragging()) {
         mixer_.mouseUp();
         return;
@@ -1319,6 +1521,7 @@ void MainView::mouseUp(float x, float y, bool free) {
     drag_ = Drag::None;
     dragTrack_ = -1;
     dragMoved_ = false;
+    autoIndex_ = -1;
 }
 
 void MainView::wheel(float x, float y, float notches, bool ctrl, bool shift) {
@@ -1379,6 +1582,21 @@ void MainView::key(Key k) {
         case Key::ToggleMixer:
             setMixerMode(!mixerMode_);
             break;
+        case Key::Undo:
+        case Key::Redo: {
+            if (drag_ != Drag::None || gesture_) break;  // nicht mitten in einer Mausbewegung
+            const bool undo = k == Key::Undo;
+            const std::wstring label = undo ? controller_.undoLabel() : controller_.redoLabel();
+            if (controller_.isRecording()) {
+                setStatus(L"W\u00E4hrend der Aufnahme geht das nicht.");
+            } else if (undo ? controller_.undo() : controller_.redo()) {
+                validateSelection();
+                setStatus((undo ? L"R\u00FCckg\u00E4ngig: " : L"Wiederholt: ") + label);
+            } else {
+                setStatus(undo ? L"Nichts zum R\u00FCckg\u00E4ngigmachen." : L"Nichts zum Wiederholen.");
+            }
+            break;
+        }
         // Die Clip-Befehle wirken nur, wenn die Clips zu sehen sind.
         case Key::NudgeLeft: if (!mixerMode_) nudgeSelected(-1.0); break;
         case Key::NudgeRight: if (!mixerMode_) nudgeSelected(1.0); break;

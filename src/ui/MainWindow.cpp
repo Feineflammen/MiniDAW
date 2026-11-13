@@ -83,6 +83,10 @@ bool MainWindow::create(HINSTANCE instance, int showCommand, std::string& error)
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, kFileQuit, L"&Beenden");
     const HMENU edit = CreatePopupMenu();
+    editMenu_ = edit;
+    AppendMenuW(edit, MF_STRING, kEditUndo, L"&R\u00FCckg\u00E4ngig\tStrg+Z");
+    AppendMenuW(edit, MF_STRING, kEditRedo, L"&Wiederholen\tStrg+Y");
+    AppendMenuW(edit, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(edit, MF_STRING, kEditSplit, L"Clip am Abspielzeiger &teilen\tStrg+T");
     AppendMenuW(edit, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(edit, MF_STRING, kEditNudgeLeft, L"Clip 1 ms fr\u00FCher\t\u2190");
@@ -159,6 +163,15 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
 
         case WM_INITMENUPOPUP:
             if (reinterpret_cast<HMENU>(wParam) == audioMenu_ && onAudioMenu) onAudioMenu(audioMenu_);
+            if (reinterpret_cast<HMENU>(wParam) == editMenu_) {
+                // Rueckgaengig und Wiederholen nennen, was sie tun wuerden.
+                const std::wstring undo = view_.undoText() + L"\tStrg+Z";
+                const std::wstring redo = view_.redoText() + L"\tStrg+Y";
+                ModifyMenuW(editMenu_, kEditUndo, MF_BYCOMMAND | MF_STRING | (view_.canUndo() ? 0 : MF_GRAYED), kEditUndo,
+                            undo.c_str());
+                ModifyMenuW(editMenu_, kEditRedo, MF_BYCOMMAND | MF_STRING | (view_.canRedo() ? 0 : MF_GRAYED), kEditRedo,
+                            redo.c_str());
+            }
             return 0;
 
         case WM_COMMAND:
@@ -166,6 +179,12 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
                 static const Key kKeys[] = {Key::Split, Key::NudgeLeft, Key::NudgeRight, Key::NudgeLeftBig,
                                             Key::NudgeRightBig, Key::Delete};
                 view_.key(kKeys[LOWORD(wParam) - kEditSplit]);
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return 0;
+            }
+            if (HIWORD(wParam) == 0 && (LOWORD(wParam) == kEditUndo || LOWORD(wParam) == kEditRedo)) {
+                view_.releaseAllNotes();
+                view_.key(LOWORD(wParam) == kEditUndo ? Key::Undo : Key::Redo);
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 return 0;
             }
@@ -262,6 +281,13 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
                                     : wParam == 'S' ? (shift ? kFileSaveAs : kFileSave)
                                     : wParam == 'E' ? kFileExport
                                                     : 0;
+                // Strg+Z zurueck, Strg+Y oder Strg+Umschalt+Z wieder vor; gehalten wiederholt es sich.
+                if (wParam == 'Z' || wParam == 'Y') {
+                    view_.releaseAllNotes();
+                    view_.key(wParam == 'Y' || shift ? Key::Redo : Key::Undo);
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return 0;
+                }
                 if (wParam == 'T' && !repeat) {
                     view_.key(Key::Split);
                     InvalidateRect(hwnd_, nullptr, FALSE);

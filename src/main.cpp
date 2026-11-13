@@ -143,6 +143,15 @@ int runScreenshot(const std::filesystem::path& output, const std::wstring& mode)
     controller.setTrackSend(5, 0, 0.7f);
     controller.setTrackSend(5, 1, 0.2f);
     controller.setTrackOutput(4, 1);
+
+    // Automation: Spur 1 zeigt eine Lautstaerke-Kurve, Spur 3 hat Panorama-Automation.
+    controller.addAutomationPoint(0, kAutoVolume, 0, 0.88f);
+    controller.addAutomationPoint(0, kAutoVolume, kRate * 2, 0.88f);
+    controller.addAutomationPoint(0, kAutoVolume, kRate * 3, 0.45f);
+    controller.addAutomationPoint(0, kAutoVolume, kRate * 5, 0.95f);
+    controller.setAutomationView(0, kAutoVolume);
+    controller.addAutomationPoint(2, kAutoPan, 0, -0.8f);
+    controller.addAutomationPoint(2, kAutoPan, kRate * 8, 0.8f);
     controller.setBusGain(1, 0.7f);
     controller.setBusPan(1, 0.3f);
 

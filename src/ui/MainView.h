@@ -22,6 +22,7 @@ enum class Key {
     NudgeLeft, NudgeRight, NudgeLeftBig, NudgeRightBig,  // Clip um 1 bzw. 10 ms verschieben
     Split,                                                // Clip am Abspielzeiger teilen
     ToggleMixer,                                          // zwischen Spuren und Mischpult umschalten
+    Undo, Redo,                                           // Rueckgaengig, Wiederholen
 };
 
 // Die gesamte Oberflaeche: Transportleiste, Spurkoepfe, Zeitachse.
@@ -38,6 +39,12 @@ public:
     void setPluginHost(PluginHost* host) { pluginHost_ = host; }
     // Oeffnet die Plugin-Auswahl fuer das Instrument einer Spur.
     void openPluginPicker(int track);
+    // Fuer das Menue Bearbeiten.
+    bool canUndo() const { return controller_.canUndo(); }
+    bool canRedo() const { return controller_.canRedo(); }
+    std::wstring undoText() const;
+    std::wstring redoText() const;
+
     // Oeffnet die Liste der Eingaenge einer Spur.
     void openInputMenu(int track) { inputMenuTrack_ = track; }
     // Mischpult statt Spuren und Zeitachse zeigen.
@@ -71,7 +78,7 @@ public:
     void dropFiles(float x, float y, const std::vector<std::filesystem::path>& paths);
 
 private:
-    enum class Drag { None, MasterGain, TrackGain, TrackPan, Scrub, Clip, TrimStart, TrimEnd };
+    enum class Drag { None, MasterGain, TrackGain, TrackPan, Scrub, Clip, TrimStart, TrimEnd, AutoPoint };
 
     // Geometrie
     float frameToX(double frame) const;
@@ -118,6 +125,19 @@ private:
     void togglePlay();
     void toggleRecord();
     void stepInput(int track, int delta);
+
+    // Automation im Arrangement
+    Rect autoRect(int track) const;
+    float autoToY(int track, int param, float value) const;
+    float yToAuto(int track, int param, float y) const;
+    int autoPointAt(int track, int param, float x, float y) const;
+    void drawAutomation(Canvas& c, int track);
+    std::wstring autoValueText(int param, float value) const;
+    // Was Regler zeigen: bei aktiver Automation deren aktueller Wert.
+    float shownGain(int track) const;
+    float shownPan(int track) const;
+    // Nach Rueckgaengig: Auswahl und Noten-Editor auf gueltige Clips pruefen.
+    void validateSelection();
 
     // Eingangswahl einer Spur: Audio-Kanaele des Geraets, dann die MIDI-Kanaele.
     struct InputChoice {
@@ -175,6 +195,9 @@ private:
     float masterMeter_ = 0.0f;
     std::array<float, kProjectTracks> inputMeters_{};
     int inputMenuTrack_ = -1;  // Spur, deren Eingangsliste offen ist; -1 = zu
+    bool gesture_ = false;      // Maustaste gedrueckt: alle Aenderungen sind ein Rueckgaengig-Schritt
+    int autoParam_ = 0;         // beim Ziehen eines Automationspunkts
+    int autoIndex_ = -1;
     int octave_ = 4;  // Oktave der Rechnertastatur, 4 = C ist das mittlere C (Note 60)
 
     std::wstring deviceInfo_;

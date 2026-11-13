@@ -121,8 +121,25 @@ MixerView::Hit MixerView::hitTest(float x, float y) const {
 
 // --- Werte der Kanalzuege ----------------------------------------------------
 
+bool MixerView::automated(int strip, int param) const {
+    return isTrack(strip) && controller_.hasAutomation(strip, param);
+}
+
+bool MixerView::automationLocked(int strip, int param) const {
+    if (!automated(strip, param) || controller_.automationWriting(strip, param)) return false;
+    if (onStatus)
+        onStatus(param == kAutoVolume
+                     ? L"Die Lautst\u00E4rke folgt der Automation. \u00C4ndern: Punkte verschieben oder beim Abspielen schreiben."
+                     : L"Das Panorama folgt der Automation. \u00C4ndern: Punkte verschieben oder beim Abspielen schreiben.");
+    return true;
+}
+
 float MixerView::stripGain(int strip) const {
     const Project& p = controller_.project();
+    if (automated(strip, kAutoVolume)) {
+        const float value = engine_.automationValue(strip, Engine::kAutomationVolume);
+        if (!std::isnan(value)) return positionToGain(value);
+    }
     if (isTrack(strip)) return p.tracks[static_cast<std::size_t>(strip)].gain;
     if (isBus(strip)) return p.buses[static_cast<std::size_t>(strip - kFirstBusStrip)].gain;
     return p.masterGain;
@@ -130,6 +147,10 @@ float MixerView::stripGain(int strip) const {
 
 float MixerView::stripPan(int strip) const {
     const Project& p = controller_.project();
+    if (automated(strip, kAutoPan)) {
+        const float value = engine_.automationValue(strip, Engine::kAutomationPan);
+        if (!std::isnan(value)) return value;
+    }
     if (isTrack(strip)) return p.tracks[static_cast<std::size_t>(strip)].pan;
     if (isBus(strip)) return p.buses[static_cast<std::size_t>(strip - kFirstBusStrip)].pan;
     return 0.0f;
@@ -149,14 +170,14 @@ float MixerView::stripMeter(int strip) const {
 }
 
 void MixerView::setGain(int strip, float gain) {
-    if (isTrack(strip)) controller_.setTrackGain(strip, gain);
+    if (isTrack(strip)) controller_.userTrackGain(strip, gain);  // schreibt Automation, wenn sie aufnimmt
     else if (isBus(strip)) controller_.setBusGain(strip - kFirstBusStrip, gain);
     else if (isMaster(strip)) controller_.setMasterGain(gain);
 }
 
 void MixerView::setPan(int strip, float pan) {
     if (std::fabs(pan) < 0.06f) pan = 0.0f;  // Mitte rastet ein
-    if (isTrack(strip)) controller_.setTrackPan(strip, pan);
+    if (isTrack(strip)) controller_.userTrackPan(strip, pan);
     else if (isBus(strip)) controller_.setBusPan(strip - kFirstBusStrip, pan);
 }
 
@@ -271,7 +292,8 @@ void MixerView::drawStrip(Canvas& c, int s) {
     c.fillRounded({centre - 2.0f, f.y, 4.0f, f.h}, 2.0f, kDark);
     const float thumbY = f.bottom() - f.h * gainToPosition(gain);
     c.fillRounded({centre - 2.0f, thumbY, 4.0f, f.bottom() - thumbY}, 2.0f, rgb(0x3D6EAF));
-    c.fillRounded({f.x, thumbY - 5.0f, f.w, 10.0f}, 2.0f, kText);
+    // Folgt der Fader einer Automation, ist sein Griff gelb.
+    c.fillRounded({f.x, thumbY - 5.0f, f.w, 10.0f}, 2.0f, automated(s, kAutoVolume) ? rgb(0xF2C14E) : kText);
     c.line(f.x + 3.0f, thumbY + 0.5f, f.right() - 3.0f, thumbY + 0.5f, kDark);
 
     const Rect m = meterRect(s);
@@ -331,6 +353,7 @@ bool MixerView::mouseDown(float x, float y, bool doubleClick) {
             stepOutput(s, 1);
             break;
         case Part::Pan:
+            if (automationLocked(s, kAutoPan)) break;
             if (doubleClick) {
                 setPan(s, 0.0f);
             } else {
@@ -340,6 +363,7 @@ bool MixerView::mouseDown(float x, float y, bool doubleClick) {
             }
             break;
         case Part::Fader:
+            if (automationLocked(s, kAutoVolume)) break;
             if (doubleClick) {
                 setGain(s, 1.0f);
             } else {
@@ -404,9 +428,11 @@ void MixerView::wheel(float x, float y, float notches) {
     const float oneDb = 1.0f / (kMaxDb - kMinDb);
     switch (hit.part) {
         case Part::Fader:
+            if (automationLocked(hit.strip, kAutoVolume)) return;
             setGain(hit.strip, positionToGain(std::clamp(gainToPosition(stripGain(hit.strip)) + step * oneDb, 0.0f, 1.0f)));
             return;
         case Part::Pan:
+            if (automationLocked(hit.strip, kAutoPan)) return;
             setPan(hit.strip, std::clamp(stripPan(hit.strip) + step * 0.05f, -1.0f, 1.0f));
             return;
         case Part::Send: {

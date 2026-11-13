@@ -18,6 +18,7 @@ enum MenuCommand { kFileNew = 1001, kFileOpen, kFileSave, kFileSaveAs, kFileExpo
 enum ToolsCommand { kToolsMeasureLatency = 1101 };
 // Befehle des Menues "Bearbeiten"; das Fenster reicht sie selbst an die Ansicht weiter.
 enum EditCommand { kEditSplit = 1201, kEditNudgeLeft, kEditNudgeRight, kEditNudgeLeftBig, kEditNudgeRightBig, kEditDelete };
+enum UndoCommand { kEditUndo = 1251, kEditRedo = 1252 };
 // Menue "Ansicht".
 enum ViewCommand { kViewMixer = 1301 };
 // Eintraege im Menue "Audio": Ausgabegeraet i = kAudioOutputBase + i, Eingabegeraet
@@ -65,6 +66,7 @@ private:
     HWND hwnd_ = nullptr;
     float dpi_ = 96.0f;
     HMENU audioMenu_ = nullptr;
+    HMENU editMenu_ = nullptr;
     int frameCount_ = 0;
     Microsoft::WRL::ComPtr<ID2D1Factory> d2d_;
     Microsoft::WRL::ComPtr<IDWriteFactory> dwrite_;

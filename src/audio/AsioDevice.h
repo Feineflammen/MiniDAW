@@ -56,7 +56,10 @@ public:
     // Ueberlastungen, die der Treiber gemeldet hat.
     unsigned overloads() const;
 
-private:
+    // Innenleben; oeffentlich nur, damit die Rueckrufe des Treibers (freie
+    // Funktionen ohne Benutzerzeiger) es erreichen.
     struct Impl;
+
+private:
     std::unique_ptr<Impl> d;
 };

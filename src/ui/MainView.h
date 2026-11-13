@@ -38,6 +38,8 @@ public:
     void setPluginHost(PluginHost* host) { pluginHost_ = host; }
     // Oeffnet die Plugin-Auswahl fuer das Instrument einer Spur.
     void openPluginPicker(int track);
+    // Oeffnet die Liste der Eingaenge einer Spur.
+    void openInputMenu(int track) { inputMenuTrack_ = track; }
     // Mischpult statt Spuren und Zeitachse zeigen.
     void setMixerMode(bool on);
     bool mixerMode() const noexcept { return mixerMode_; }
@@ -116,6 +118,21 @@ private:
     void togglePlay();
     void toggleRecord();
     void stepInput(int track, int delta);
+
+    // Eingangswahl einer Spur: Audio-Kanaele des Geraets, dann die MIDI-Kanaele.
+    struct InputChoice {
+        int input = kTrackInputAudio;  // wie TrackModel::input
+        int channel = 0;               // erster Audio-Kanal
+        bool stereo = true;
+        std::wstring label;
+    };
+    std::vector<InputChoice> inputChoices() const;
+    std::wstring inputLabel(const TrackModel& track) const;
+    bool inputUsable(const TrackModel& track) const;
+    void applyInput(int track, const InputChoice& choice);
+    Rect inputMenuRect() const;
+    void drawInputMenu(Canvas& c);
+    bool inputMenuMouseDown(float x, float y);
     void stepOutput(int track, int delta);
     bool selectedClip(std::int64_t& start, std::int64_t& length) const;
     std::int64_t snap(std::int64_t start, std::int64_t length, int skipTrack, int skipIndex) const;
@@ -156,7 +173,8 @@ private:
 
     std::array<float, kProjectTracks> meters_{};
     float masterMeter_ = 0.0f;
-    float inputMeter_ = 0.0f;
+    std::array<float, kProjectTracks> inputMeters_{};
+    int inputMenuTrack_ = -1;  // Spur, deren Eingangsliste offen ist; -1 = zu
     int octave_ = 4;  // Oktave der Rechnertastatur, 4 = C ist das mittlere C (Note 60)
 
     std::wstring deviceInfo_;

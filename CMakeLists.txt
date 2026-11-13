@@ -71,6 +71,7 @@ if(WIN32)
     add_executable(minidaw WIN32
         src/main.cpp
         src/audio/WasapiDevice.cpp
+        src/audio/AsioDevice.cpp
         src/midi/MidiInput.cpp
         src/midi/MidiOutput.cpp
         src/ui/Canvas.cpp
@@ -85,5 +86,5 @@ if(WIN32)
         src/minidaw.manifest
     )
     target_compile_definitions(minidaw PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(minidaw PRIVATE dawcore vst3host ole32 avrt d2d1 dwrite windowscodecs shell32 user32 winmm comdlg32)
+    target_link_libraries(minidaw PRIVATE dawcore vst3host ole32 advapi32 avrt d2d1 dwrite windowscodecs shell32 user32 winmm comdlg32)
 endif()

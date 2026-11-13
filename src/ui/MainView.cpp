@@ -18,6 +18,8 @@ constexpr float kTopH = 44.0f;
 constexpr float kRulerH = 24.0f;
 constexpr float kHeaderW = 372.0f;
 constexpr float kPickerRowH = 22.0f;
+constexpr float kInputRowH = 19.0f;   // Zeilen der Eingangsliste
+constexpr float kInputColW = 70.0f;
 constexpr int kPickerRows = 16;
 constexpr float kRowH = 44.0f;
 constexpr float kStatusH = 24.0f;
@@ -103,6 +105,7 @@ void MainView::setMixerMode(bool on) {
     if (on == mixerMode_) return;
     mixerMode_ = on;
     pickerStrip_ = -1;
+    inputMenuTrack_ = -1;
     drag_ = Drag::None;
     editorDrag_ = false;
     mixer_.mouseUp();
@@ -181,8 +184,11 @@ void MainView::tick() {
     masterMeter_ = std::max(engine_.takeMasterPeak(), masterMeter_ * 0.82f);
     if (masterMeter_ < 0.0001f) masterMeter_ = 0.0f;
 
-    inputMeter_ = std::max(engine_.takeInputPeak(), inputMeter_ * 0.82f);
-    if (inputMeter_ < 0.0001f) inputMeter_ = 0.0f;
+    for (int t = 0; t < kProjectTracks; ++t) {
+        auto& m = inputMeters_[static_cast<std::size_t>(t)];
+        m = std::max(engine_.takeInputPeak(t), m * 0.82f);
+        if (m < 0.0001f) m = 0.0f;
+    }
 
     mixer_.tick();
     if (statusTicks_ > 0 && --statusTicks_ == 0) status_.clear();
@@ -200,19 +206,28 @@ void MainView::tick() {
         midiText_ = describeMidi(last);
         // Die haeufigsten Gruende fuer "kein Ton" gleich benennen.
         if (last.isNoteOn() && status_.empty()) {
-            const int armed = controller_.armedTrack();
-            if (armed < 0) {
+            // Welche scharfen Spuren hoeren auf MIDI, und nimmt eine davon diese Note an?
+            const int channel = last.status & 0x0F;
+            int midiTrack = -1, accepting = -1;
+            for (int t = 0; t < kProjectTracks; ++t) {
+                if (!controller_.trackArmed(t)) continue;
+                const TrackModel& track = controller_.project().tracks[static_cast<std::size_t>(t)];
+                if (track.input == kTrackInputAudio) continue;
+                if (midiTrack < 0) midiTrack = t;
+                if (accepting < 0 && (track.input == kTrackInputMidiAll || track.input == channel || lastMidiFromKeyboard_))
+                    accepting = t;
+            }
+            if (!controller_.anyArmed()) {
                 setStatus(L"MIDI kommt an, aber keine Spur ist scharfgeschaltet: R an einer Spur anklicken.");
-            } else {
-                const TrackModel& track = controller_.project().tracks[static_cast<std::size_t>(armed)];
-                const int channel = last.status & 0x0F;
-                if (track.input == kTrackInputAudio)
-                    setStatus(L"Die scharfe Spur steht auf Audio: Eingang (Feld rechts am Spurkopf) auf MIDI stellen.");
-                else if (track.input >= 0 && track.input != channel && !lastMidiFromKeyboard_)
-                    setStatus(L"Die scharfe Spur h\u00F6rt auf MIDI-Kanal " + std::to_wstring(track.input + 1) +
-                              L", die Note kam auf Kanal " + std::to_wstring(channel + 1) + L".");
-                else if (track.midiOutput >= 0 && midiOutInfo_.empty())
-                    setStatus(L"Die Spur sendet an ein MIDI-Ger\u00E4t, aber es ist keins gew\u00E4hlt (unten \"MIDI aus\" anklicken).");
+            } else if (midiTrack < 0) {
+                setStatus(L"Die scharfen Spuren stehen auf Audio: Eingang (Feld rechts am Spurkopf) auf MIDI stellen.");
+            } else if (accepting < 0) {
+                const int wanted = controller_.project().tracks[static_cast<std::size_t>(midiTrack)].input;
+                setStatus(L"Die scharfe Spur h\u00F6rt auf MIDI-Kanal " + std::to_wstring(wanted + 1) +
+                          L", die Note kam auf Kanal " + std::to_wstring(channel + 1) + L".");
+            } else if (controller_.project().tracks[static_cast<std::size_t>(accepting)].midiOutput >= 0 &&
+                       midiOutInfo_.empty()) {
+                setStatus(L"Die Spur sendet an ein MIDI-Ger\u00E4t, aber es ist keins gew\u00E4hlt (unten \"MIDI aus\" anklicken).");
             }
         }
         lastMidiFromKeyboard_ = false;
@@ -223,16 +238,17 @@ void MainView::tick() {
         midiErrorTicks_ = 30;
     }
 
-    // Fertig geschriebene Aufnahmen als Clip uebernehmen.
+    // Fertig geschriebene Aufnahmen als Clip uebernehmen; der neue Clip der
+    // obersten aufnehmenden Spur wird ausgewaehlt.
+    int recorded = -1;
+    for (int t = 0; t < kProjectTracks && recorded < 0; ++t)
+        if (controller_.isTrackRecording(t)) recorded = t;
     std::string message;
-    if (controller_.poll(message)) {
-        const int track = controller_.armedTrack();
-        if (track >= 0) {
-            const TrackModel& model = controller_.project().tracks[static_cast<std::size_t>(track)];
-            selTrack_ = track;
-            selMidi_ = model.input != kTrackInputAudio;
-            selIndex_ = static_cast<int>(selMidi_ ? model.midiClips.size() : model.clips.size()) - 1;
-        }
+    if (controller_.poll(message) && recorded >= 0) {
+        const TrackModel& model = controller_.project().tracks[static_cast<std::size_t>(recorded)];
+        selTrack_ = recorded;
+        selMidi_ = model.input != kTrackInputAudio;
+        selIndex_ = static_cast<int>(selMidi_ ? model.midiClips.size() : model.clips.size()) - 1;
     }
     if (!message.empty()) setStatus(widen(message));
 
@@ -256,6 +272,7 @@ void MainView::projectReplaced() {
     selMidi_ = false;
     drag_ = Drag::None;
     pickerStrip_ = -1;
+    inputMenuTrack_ = -1;
     pianoRoll_.close();
     viewStart_ = 0.0;
 }
@@ -296,6 +313,7 @@ void MainView::draw(Canvas& c, float width, float height) {
     drawStatusBar(c);
     drawTopBar(c);
     if (pickerStrip_ >= 0) drawPluginPicker(c);
+    if (inputMenuTrack_ >= 0 && !mixerMode_) drawInputMenu(c);
 }
 
 void MainView::drawSlider(Canvas& c, const Rect& rect, float position, float fillFrom) {
@@ -683,13 +701,14 @@ void MainView::drawTimeline(Canvas& c) {
         }
     }
 
-    // Laufende Aufnahme: roter Balken von der Startposition bis zum Abspielzeiger.
+    // Laufende Aufnahme: roter Balken je aufnehmender Spur, vom Start bis zum Abspielzeiger.
     std::int64_t recStart = 0, recFrames = 0;
     if (controller_.isRecording() && controller_.recordProgress(recStart, recFrames)) {
         const float x0 = std::max(frameToX(static_cast<double>(recStart)), kHeaderW - 8.0f);
         const float x1 = std::min(frameToX(static_cast<double>(recStart + recFrames)), width_ + 8.0f);
-        if (x1 > x0) {
-            const Rect body{x0, rowY(controller_.recordTrack()) + 2.0f, std::max(2.0f, x1 - x0), kRowH - 4.0f};
+        for (int t = 0; t < kProjectTracks && x1 > x0; ++t) {
+            if (!controller_.isTrackRecording(t)) continue;
+            const Rect body{x0, rowY(t) + 2.0f, std::max(2.0f, x1 - x0), kRowH - 4.0f};
             c.fillRounded(body, 4.0f, rgb(0xE5484D, 0.45f));
             c.strokeRounded(body, 4.0f, kRecord);
             c.text(L"Aufnahme", {std::max(x0, kHeaderW) + 5.0f, body.y + 1.0f, 80.0f, 14.0f},
@@ -722,7 +741,7 @@ void MainView::drawHeaders(Canvas& c) {
                rgb(kClipColors[static_cast<std::size_t>(t) % std::size(kClipColors)]));
         c.text(track.name, {10.0f, y, 50.0f, kRowH}, kText);
 
-        const bool armed = controller_.armedTrack() == t;
+        const bool armed = controller_.trackArmed(t);
         const Rect a = armRect(t);
         c.fillRounded(a, 3.0f, armed ? kRecord : kButton);
         c.text(L"R", a, armed ? rgb(0xFFFFFF) : kTextDim, Font::Normal, Align::Center);
@@ -740,8 +759,8 @@ void MainView::drawHeaders(Canvas& c) {
 
         const Rect meter = meterRect(t);
         c.fill(meter, kDark);
-        // Die scharfgeschaltete Spur zeigt zusaetzlich den Eingangspegel.
-        const float peak = std::max(meters_[static_cast<std::size_t>(t)], armed ? inputMeter_ : 0.0f);
+        // Scharfgeschaltete Spuren zeigen zusaetzlich den Pegel ihres Eingangs.
+        const float peak = std::max(meters_[static_cast<std::size_t>(t)], armed ? inputMeters_[static_cast<std::size_t>(t)] : 0.0f);
         const float level = gainToPosition(peak);
         if (level > 0.0f) {
             const float h = meter.h * level;
@@ -750,11 +769,11 @@ void MainView::drawHeaders(Canvas& c) {
 
         // Eingang und MIDI-Ausgang der Spur.
         const Rect in = inputRect(t);
-        c.fillRounded(in, 3.0f, kDark);
-        const std::wstring inText = track.input == kTrackInputAudio     ? std::wstring(L"Audio")
-                                    : track.input == kTrackInputMidiAll ? std::wstring(L"MIDI alle")
-                                                                        : L"MIDI " + std::to_wstring(track.input + 1);
-        c.text(inText, in, track.input == kTrackInputAudio ? kTextDim : kText, Font::Small, Align::Center);
+        c.fillRounded(in, 3.0f, inputMenuTrack_ == t ? kAccent : kDark);
+        // Ein Kanal, den das Geraet nicht hat, wird gelb angezeigt.
+        const Color inColor = inputMenuTrack_ == t ? kDark : !inputUsable(track) ? kMuteOn
+                              : track.input == kTrackInputAudio ? kTextDim : kText;
+        c.text(inputLabel(track), in, inColor, Font::Small, Align::Center);
 
         const Rect outBox = outputRect(t);
         c.fillRounded(outBox, 3.0f, kDark);
@@ -845,13 +864,129 @@ bool MainView::selectedClip(std::int64_t& start, std::int64_t& length) const {
 }
 
 // Eingang weiterschalten: Audio, MIDI alle, MIDI 1 bis 16 (und wieder von vorn).
+// Eingang weiterschalten (Mausrad): durch dieselbe Liste wie im Aufklappmenue.
 void MainView::stepInput(int track, int delta) {
-    const int current = controller_.project().tracks[static_cast<std::size_t>(track)].input;
-    const int count = 18;  // -2 .. 15
-    const int next = ((current + 2 + delta) % count + count) % count - 2;
     if (controller_.isRecording()) return;
-    controller_.setTrackInput(track, next);
-    if (controller_.armedTrack() == track) releaseAllNotes();
+    const TrackModel& model = controller_.project().tracks[static_cast<std::size_t>(track)];
+    const std::vector<InputChoice> choices = inputChoices();
+    int current = 0;
+    for (std::size_t i = 0; i < choices.size(); ++i) {
+        const InputChoice& choice = choices[i];
+        const bool same = choice.input == model.input &&
+                          (model.input != kTrackInputAudio ||
+                           (choice.channel == model.audioChannel && choice.stereo == model.audioStereo));
+        if (same) current = static_cast<int>(i);
+    }
+    const int count = static_cast<int>(choices.size());
+    applyInput(track, choices[static_cast<std::size_t>(((current + delta) % count + count) % count)]);
+}
+
+void MainView::applyInput(int track, const InputChoice& choice) {
+    if (controller_.isRecording()) {
+        setStatus(L"Während der Aufnahme lässt sich der Eingang nicht ändern.");
+        return;
+    }
+    controller_.setTrackInput(track, choice.input);
+    if (choice.input == kTrackInputAudio) controller_.setTrackAudioInput(track, choice.channel, choice.stereo);
+    if (controller_.trackArmed(track)) releaseAllNotes();
+}
+
+// Erst die Stereopaare (In 1+2, In 3+4, ...), dann jeder Kanal einzeln, dann MIDI.
+std::vector<MainView::InputChoice> MainView::inputChoices() const {
+    std::vector<InputChoice> choices;
+    const int channels = controller_.inputChannels();
+    for (int c = 0; c + 1 < channels; c += 2)
+        choices.push_back({kTrackInputAudio, c, true, L"In " + std::to_wstring(c + 1) + L"+" + std::to_wstring(c + 2)});
+    for (int c = 0; c < channels; ++c)
+        choices.push_back({kTrackInputAudio, c, false, L"In " + std::to_wstring(c + 1)});
+    if (channels == 0) choices.push_back({kTrackInputAudio, 0, true, L"Audio"});
+    choices.push_back({kTrackInputMidiAll, 0, true, L"MIDI alle"});
+    for (int m = 0; m < 16; ++m) choices.push_back({m, 0, true, L"MIDI " + std::to_wstring(m + 1)});
+    return choices;
+}
+
+std::wstring MainView::inputLabel(const TrackModel& track) const {
+    if (track.input == kTrackInputMidiAll) return L"MIDI alle";
+    if (track.input >= 0) return L"MIDI " + std::to_wstring(track.input + 1);
+    std::wstring label = L"In " + std::to_wstring(track.audioChannel + 1);
+    // Ein Paar am letzten Kanal wird mono aufgenommen; so steht es auch da.
+    if (track.audioStereo && track.audioChannel + 1 < std::max(2, controller_.inputChannels()))
+        label += L"+" + std::to_wstring(track.audioChannel + 2);
+    return label;
+}
+
+bool MainView::inputUsable(const TrackModel& track) const {
+    const int channels = controller_.inputChannels();
+    return track.input != kTrackInputAudio || channels == 0 || track.audioChannel < channels;
+}
+
+// Zwei Spalten unter dem Eingangsfeld: links Audio, rechts MIDI.
+Rect MainView::inputMenuRect() const {
+    const std::vector<InputChoice> choices = inputChoices();
+    int audio = 0;
+    for (const InputChoice& choice : choices) audio += choice.input == kTrackInputAudio ? 1 : 0;
+    const int midi = static_cast<int>(choices.size()) - audio;
+    const float rows = static_cast<float>(std::max(audio, (midi + 1) / 2));
+    const float h = 26.0f + rows * kInputRowH + 6.0f;
+    const float top = kTopH + kRulerH + 4.0f;
+    const Rect field = inputRect(std::max(0, inputMenuTrack_));
+    const float y = std::clamp(field.bottom() + 2.0f, top, std::max(top, height_ - kStatusH - h - 4.0f));
+    return {field.x, y, 3.0f * kInputColW + 18.0f, h};
+}
+
+void MainView::drawInputMenu(Canvas& c) {
+    const Rect r = inputMenuRect();
+    c.fillRounded({r.x + 2.0f, r.y + 3.0f, r.w, r.h}, 6.0f, rgb(0x000000, 0.45f));  // Schatten
+    c.fillRounded(r, 6.0f, rgb(0x2E3037));
+    c.strokeRounded(r, 6.0f, kLine);
+    c.text(L"Eingang für Spur " + std::to_wstring(inputMenuTrack_ + 1),
+           {r.x + 10.0f, r.y + 2.0f, r.w - 20.0f, 24.0f}, kTextDim, Font::Small);
+
+    const TrackModel& model = controller_.project().tracks[static_cast<std::size_t>(inputMenuTrack_)];
+    int audioRow = 0, midiIndex = 0;
+    for (const InputChoice& choice : inputChoices()) {
+        Rect row;
+        if (choice.input == kTrackInputAudio) {
+            row = {r.x + 6.0f, r.y + 26.0f + static_cast<float>(audioRow++) * kInputRowH, kInputColW, kInputRowH - 2.0f};
+        } else {
+            const int column = 1 + midiIndex % 2;
+            const int line = midiIndex++ / 2;
+            row = {r.x + 6.0f + static_cast<float>(column) * (kInputColW + 3.0f),
+                   r.y + 26.0f + static_cast<float>(line) * kInputRowH, kInputColW, kInputRowH - 2.0f};
+        }
+        const bool active = choice.input == model.input &&
+                            (model.input != kTrackInputAudio ||
+                             (choice.channel == model.audioChannel && choice.stereo == model.audioStereo));
+        if (active) c.fillRounded(row, 3.0f, kAccent);
+        c.text(choice.label, {row.x + 6.0f, row.y, row.w - 8.0f, row.h}, active ? kDark : kText, Font::Small);
+    }
+}
+
+bool MainView::inputMenuMouseDown(float x, float y) {
+    if (inputMenuTrack_ < 0) return false;
+    const int track = inputMenuTrack_;
+    const Rect r = inputMenuRect();
+    inputMenuTrack_ = -1;  // jeder Klick schliesst die Liste
+    if (!r.contains(x, y)) return true;
+
+    const int line = static_cast<int>(std::floor((y - r.y - 26.0f) / kInputRowH));
+    const int column = static_cast<int>(std::floor((x - r.x - 6.0f) / (kInputColW + 3.0f)));
+    if (line < 0 || column < 0 || column > 2) return true;
+    int audioRow = 0, midiIndex = 0;
+    for (const InputChoice& choice : inputChoices()) {
+        bool hit;
+        if (choice.input == kTrackInputAudio) {
+            hit = column == 0 && line == audioRow++;
+        } else {
+            hit = column == 1 + midiIndex % 2 && line == midiIndex / 2;
+            ++midiIndex;
+        }
+        if (hit) {
+            applyInput(track, choice);
+            break;
+        }
+    }
+    return true;
 }
 
 // MIDI-Ausgang weiterschalten: Synthesizer, MIDI 1 bis 16.
@@ -863,6 +998,7 @@ void MainView::stepOutput(int track, int delta) {
 
 void MainView::rightMouseDown(float x, float y) {
     if (pickerStrip_ >= 0) { pickerStrip_ = -1; return; }
+    if (inputMenuTrack_ >= 0) { inputMenuTrack_ = -1; return; }
     if (mixerMode_ && mixer_.rightMouseDown(x, y)) return;
     if (!mixerMode_ && pianoRoll_.isOpen() && editorRect().contains(x, y)) {
         pianoRoll_.mouseDown(x, y, true);
@@ -875,7 +1011,7 @@ void MainView::rightMouseDown(float x, float y) {
     if (mixerMode_) return;
     const int track = rowAt(y);
     if (track < 0 || x >= kHeaderW) return;
-    if (inputRect(track).contains(x, y)) stepInput(track, -1);
+    if (inputRect(track).contains(x, y) && !controller_.isRecording()) inputMenuTrack_ = track;
     else if (outputRect(track).contains(x, y)) stepOutput(track, -1);
 }
 
@@ -885,6 +1021,7 @@ void MainView::mouseDown(float x, float y, bool doubleClick) {
     dragMoved_ = false;
 
     if (pickerMouseDown(x, y)) return;
+    if (inputMenuMouseDown(x, y)) return;
 
     // Statusleiste
     if (y >= height_ - kStatusH) {
@@ -960,11 +1097,14 @@ void MainView::mouseDown(float x, float y, bool doubleClick) {
         } else if (editorButtonRect(track).contains(x, y)) {
             openEditor(track, 0);
         } else if (inputRect(track).contains(x, y)) {
-            stepInput(track, 1);
+            if (!controller_.isRecording()) inputMenuTrack_ = track;
         } else if (outputRect(track).contains(x, y)) {
             stepOutput(track, 1);
         } else if (armRect(track).contains(x, y)) {
-            controller_.armTrack(controller_.armedTrack() == track ? -1 : track);
+            if (controller_.isRecording())
+                setStatus(L"W\u00E4hrend der Aufnahme lassen sich Spuren nicht scharfschalten.");
+            else
+                controller_.setTrackArmed(track, !controller_.trackArmed(track));
         } else if (muteRect(track).contains(x, y)) {
             controller_.setTrackMute(track, !model.mute);
         } else if (soloRect(track).contains(x, y)) {
@@ -1245,6 +1385,7 @@ void MainView::key(Key k) {
         case Key::Split: if (!mixerMode_) splitAtPlayhead(); break;
         case Key::Escape:
             if (pickerStrip_ >= 0) pickerStrip_ = -1;
+            else if (inputMenuTrack_ >= 0) inputMenuTrack_ = -1;
             else if (!mixerMode_) pianoRoll_.close();
             break;
         case Key::Delete:
@@ -1261,7 +1402,7 @@ void MainView::key(Key k) {
 }
 
 void MainView::noteKey(int semitone, bool down) {
-    if (controller_.armedTrack() < 0) return;
+    if (!controller_.anyArmed()) return;
     const int note = 12 * (octave_ + 1) + semitone;
     if (note < 0 || note > 127) return;
     lastMidiFromKeyboard_ = true;

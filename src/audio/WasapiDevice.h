@@ -1,10 +1,10 @@
 #pragma once
 
+#include "audio/AudioDevice.h"
+
 #include <memory>
 #include <string>
 #include <vector>
-
-class AudioCallback;
 
 // Ein Audiogeraet, wie Windows es kennt: eindeutige Kennung und Anzeigename.
 struct AudioEndpoint {
@@ -20,10 +20,10 @@ struct AudioEndpoint {
 // den Eingang dabei auf die Samplerate der Ausgabe um.
 //
 // COM muss im aufrufenden Thread initialisiert sein (CoInitializeEx).
-class WasapiDevice {
+class WasapiDevice final : public AudioDevice {
 public:
     WasapiDevice();
-    ~WasapiDevice();
+    ~WasapiDevice() override;
     WasapiDevice(const WasapiDevice&) = delete;
     WasapiDevice& operator=(const WasapiDevice&) = delete;
 
@@ -39,26 +39,28 @@ public:
 
     // Kennung und Name der tatsaechlich geoeffneten Geraete (leer = keins).
     const std::wstring& outputId() const;
-    const std::wstring& outputName() const;
+    const std::wstring& outputName() const override;
     const std::wstring& inputId() const;
-    const std::wstring& inputName() const;
-    bool start(AudioCallback& callback, std::string& error);
-    void stop();
-    void close();
+    const std::wstring& inputName() const override;
+    bool start(AudioCallback& callback, std::string& error) override;
+    void stop() override;
+    void close() override;
 
-    double sampleRate() const;
-    int numChannels() const;   // Ausgangskanaele
-    int bufferFrames() const;  // Groesse des Geraetepuffers = groesste Blocklaenge
-    int periodFrames() const;  // uebliche Blocklaenge pro Callback
-    bool failed() const;       // true, wenn der Audio-Thread wegen eines Fehlers endete
+    double sampleRate() const override;
+    int numChannels() const override;  // Ausgangskanaele
+    int bufferFrames() const override;  // Groesse des Geraetepuffers = groesste Blocklaenge
+    int periodFrames() const override;  // uebliche Blocklaenge pro Callback
+    bool failed() const override;      // true, wenn der Audio-Thread wegen eines Fehlers endete
 
-    int inputChannels() const;              // 0 = kein Eingang
-    const std::string& inputError() const;  // Grund, falls der Eingang fehlt
+    int inputChannels() const override;             // 0 = kein Eingang
+    const std::string& inputError() const override;  // Grund, falls der Eingang fehlt
 
     // Geschaetzte Latenzen in Frames. Die Eingangslatenz enthaelt den Ringpuffer
     // zwischen Aufnahme- und Wiedergabe-Thread und pendelt sich nach dem Start ein.
-    int outputLatencyFrames() const;
-    int inputLatencyFrames() const;
+    int outputLatencyFrames() const override;
+    int inputLatencyFrames() const override;
+
+    std::wstring settingsKey() const override { return outputId() + L"|" + inputId(); }
 
     // Anzahl der Stoerungen im Eingang (Ringpuffer leer oder uebergelaufen).
     unsigned inputGlitches() const;

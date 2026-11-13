@@ -1,5 +1,6 @@
 // Offline-Tests der Engine. Laufen ohne Audiogeraet, also auch auf GitHub.
 
+#include "audio/AsioFormat.h"
 #include "disk/DiskThread.h"
 #include "disk/WavFile.h"
 #include "engine/Engine.h"
@@ -18,6 +19,8 @@
 #include <sstream>
 #include <functional>
 #include <string>
+#include <limits>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <thread>
@@ -916,6 +919,52 @@ void testMultiMidiRecording() {
         CHECK(a[0].notes.size() == 1 && a[0].notes[0].pitch == 60);
         CHECK(b[0].notes.size() == 1 && b[0].notes[0].pitch == 67);
     }
+}
+
+// Umrechnung der ASIO-Sampleformate: hin und zurueck, Vorzeichen, Grenzen.
+void testAsioFormats() {
+    namespace af = asio_format;
+    const float values[] = {0.0f, 0.5f, -0.5f, 0.25f, -1.0f, 0.999f, 1.0f, 1.7f, -3.0f};
+    constexpr int n = static_cast<int>(std::size(values));
+    for (const long type : {af::kInt16, af::kInt24, af::kInt32, af::kFloat32, af::kFloat64, af::kInt32in16,
+                            af::kInt32in18, af::kInt32in20, af::kInt32in24}) {
+        CHECK(af::supported(type));
+        std::vector<unsigned char> raw(static_cast<std::size_t>(af::bytesPerSample(type) * n));
+        std::vector<float> back(static_cast<std::size_t>(n));
+        af::fromFloat(type, values, raw.data(), n);
+        af::toFloat(type, raw.data(), back.data(), n);
+        const bool isFloat = type == af::kFloat32 || type == af::kFloat64;
+        const float tolerance = (type == af::kInt16 || type == af::kInt32in16) ? 1.0f / 16384.0f : 1e-5f;
+        bool ok = true;
+        for (int i = 0; i < n; ++i) {
+            // Ganzzahlformate begrenzen auf -1..knapp unter +1.
+            const float expected = isFloat ? values[i] : std::clamp(values[i], -1.0f, 1.0f);
+            if (std::fabs(back[static_cast<std::size_t>(i)] - expected) > tolerance) ok = false;
+        }
+        CHECK(ok);
+    }
+
+    // Bitmuster: 24 Bit in drei Bytes, negativ; 32 Bit mit 24 genutzten Bits.
+    unsigned char three[3] = {0x00, 0x00, 0xC0};  // 0xC00000 = -4194304 = -0.5
+    float value = 0.0f;
+    af::toFloat(af::kInt24, three, &value, 1);
+    CHECK(value == -0.5f);
+    const float half = 0.5f;
+    std::int32_t word = 0;
+    af::fromFloat(af::kInt32in24, &half, &word, 1);
+    CHECK(word == 4194304);
+    const float one = 1.0f;
+    af::fromFloat(af::kInt32, &one, &word, 1);
+    CHECK(word == 2147483647);
+    const float minusOne = -1.0f;
+    af::fromFloat(af::kInt32, &minusOne, &word, 1);
+    CHECK(word == std::numeric_limits<std::int32_t>::min());
+
+    // Unbekanntes Format (Big Endian): nicht unterstuetzt, liefert Stille.
+    CHECK(!af::supported(2));
+    float silence[2] = {1.0f, 1.0f};
+    af::toFloat(2, three, silence, 2);
+    CHECK(silence[0] == 0.0f && silence[1] == 0.0f);
 }
 
 void testControllerRecording() {
@@ -2250,6 +2299,7 @@ int main() {
     testControllerRecording();
     testMultichannelRecording();
     testMultiMidiRecording();
+    testAsioFormats();
     testSynth();
     testLiveMidi();
     testMidiChannels();

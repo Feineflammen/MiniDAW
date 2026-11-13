@@ -22,7 +22,14 @@ enum EditCommand { kEditSplit = 1201, kEditNudgeLeft, kEditNudgeRight, kEditNudg
 enum ViewCommand { kViewMixer = 1301 };
 // Eintraege im Menue "Audio": Ausgabegeraet i = kAudioOutputBase + i, Eingabegeraet
 // i = kAudioInputBase + i, kein Eingang = kAudioNoInput.
-enum AudioCommand { kAudioOutputBase = 2000, kAudioInputBase = 2200, kAudioNoInput = 2399 };
+// ASIO-Treiber i = kAudioAsioBase + i, Einstellungsfenster des Treibers = kAudioAsioPanel.
+enum AudioCommand {
+    kAudioOutputBase = 2000,
+    kAudioInputBase = 2200,
+    kAudioNoInput = 2399,
+    kAudioAsioBase = 2400,
+    kAudioAsioPanel = 2500,
+};
 
 // Das Win32-Fenster. Reicht Eingaben an die MainView weiter und zeichnet sie
 // mit Direct2D, etwa 30-mal pro Sekunde.

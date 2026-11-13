@@ -40,6 +40,7 @@ struct MidiRecordEvent {
     Kind kind = Kind::Message;
     MidiMessage message;
     std::int64_t position = 0;  // Zeitachse, bereits um die Latenz korrigiert
+    int track = -1;             // Spur der Nachricht; bei Begin und End -1
 };
 
 // Die Engine rechnet das Audio. Sie kennt kein Audiogeraet: Sie bekommt nur
@@ -65,6 +66,8 @@ public:
     static constexpr int kInstrumentSlot = 0;
     static constexpr int kNumSlots = 1 + kNumInserts;
     static constexpr float kTestToneLevel = 0.15f;
+    // Hoechstzahl der Eingangskanaele, die die Engine auswerten kann.
+    static constexpr int kMaxInputs = 64;
 
     // Werte fuer den MIDI-Eingang einer Spur; 0..15 waehlt einen einzelnen Kanal.
     static constexpr int kInputAudio = -2;    // Spur nimmt Audio auf und ignoriert MIDI
@@ -158,20 +161,30 @@ public:
                 static_cast<std::uint8_t>((packed >> 16) & 0xFF)};
     }
 
-    // Spur, die den Eingang bekommt (Pegelanzeige, Mithoeren, Live-MIDI). -1 = keine.
+    // Scharfgeschaltete Spuren bekommen den Eingang (Pegelanzeige, Mithoeren,
+    // Live-MIDI, Aufnahme). Es koennen beliebig viele Spuren scharf sein.
+    bool setTrackArmed(int track, bool armed) noexcept;
+    // Schaltet genau diese Spur scharf und alle anderen ab; -1 = keine.
     bool setArmedTrack(int track) noexcept;
-    // Eingang ueber die scharfgeschaltete Spur mithoeren.
+    // Audio-Eingang einer Spur: erster Kanal des Geraets (0-basiert), mono
+    // oder als Stereopaar mit dem folgenden Kanal.
+    bool setTrackAudioInput(int track, int channel, bool stereo) noexcept;
+    // Eingang ueber die scharfgeschalteten Spuren mithoeren.
     bool setInputMonitor(bool on) noexcept;
 
-    // Startet die Wiedergabe und nimmt den Eingang in sink auf, bis stop() kommt.
-    // Der Aufrufer haelt sink am Leben, bis sink->done() gilt, und ruft dann
-    // releaseRecordSink().
-    bool record(std::shared_ptr<RecordSink> sink);
-    void releaseRecordSink();
-
-    // Startet die Wiedergabe und nimmt das Live-MIDI der scharfgeschalteten
-    // Spur auf, bis stop() kommt. Die Ereignisse holt popMidiRecord() ab.
-    bool recordMidi() noexcept;
+    // Startet die Wiedergabe und nimmt auf, bis stop() kommt: je Eintrag den
+    // Audio-Eingang einer Spur in ihre Datei, mit midi auch das Live-MIDI der
+    // scharfgeschalteten MIDI-Spuren (abzuholen mit popMidiRecord()).
+    // Der Aufrufer haelt die Dateien am Leben, bis done() gilt, und ruft dann
+    // releaseRecordSinks().
+    struct TrackSink {
+        int track = 0;
+        std::shared_ptr<RecordSink> sink;
+    };
+    bool record(const std::vector<TrackSink>& sinks, bool midi);
+    void releaseRecordSinks();
+    // Nur MIDI aufnehmen.
+    bool recordMidi() { return record({}, true); }
     bool popMidiRecord(MidiRecordEvent& event) noexcept { return midiRecordOut_.pop(event); }
 
     // Ausgangslatenz des Audiogeraets in Frames. MIDI an externe Geraete wird
@@ -190,7 +203,7 @@ public:
     float takeTrackPeak(int track) noexcept;
     float takeMasterPeak() noexcept;
     float takeBusPeak(int bus) noexcept;
-    float takeInputPeak() noexcept;
+    float takeInputPeak(int track) noexcept;  // Eingang einer scharfgeschalteten Spur
 
     // --- Disk-Thread -----------------------------------------------------
     // Liest Audiodaten fuer alle Spuren vor und schreibt Aufnahmedaten.
@@ -211,7 +224,7 @@ private:
         Play, Stop, Locate,
         TrackGain, TrackPan, TrackMute, TrackSolo, TrackTestTone,
         MasterGain,
-        ArmTrack, InputMonitor, Record, RecordMidi,
+        ArmTrack, TrackAudioInput, TrackRecordSink, InputMonitor, Record,
         TrackMidiInput, TrackMidiOutput, TrackMidiSequence,
         Tempo, Metronome, TrackPlugin, Offline, Probe,
         TrackSend, TrackOutput, BusGain, BusPan, BusMute,
@@ -255,6 +268,11 @@ private:
         std::array<float, kNumBuses> sendCur{};  // aktueller (ueberblendet)
         int output = -1;                         // -1 = Master, sonst Bus
         DelayLine delay;                         // Latenzausgleich
+        // Eingang und Aufnahme
+        bool armed = false;
+        int inChannel = 0;
+        bool inStereo = true;
+        RecordSink* sink = nullptr;
     };
 
     struct Bus {
@@ -282,6 +300,8 @@ private:
     void renderBlock(int numFrames, std::int64_t blockMicros) noexcept;
     int gatherMidi(std::size_t trackIndex, int numFrames, std::int64_t blockMicros) noexcept;
     void silenceTrack(std::size_t trackIndex, std::int64_t dueMicros) noexcept;
+    // Eingangskanaele einer Spur in diesem Block; false, wenn sie keinen Audio-Eingang hat.
+    bool trackInput(const Track& t, const float*& left, const float*& right) const noexcept;
     AudioPlugin** slotPointer(int strip, int slot) noexcept;
     void recomputeLatency() noexcept;
     void runInserts(std::array<AudioPlugin*, kNumSlots>& slots, float* left, float* right, int numFrames,
@@ -320,8 +340,9 @@ private:
     bool wantPlay_ = false;      // Wunsch des Benutzers
     bool rolling_ = false;       // Transport laeuft (auch noch waehrend des Ausblendens)
     std::int64_t position_ = 0;
-    int armedTrack_ = -1;
+    bool anyArmed_ = false;
     bool monitor_ = false;
+    bool recording_ = false;  // Audio-Aufnahme laeuft
     bool midiRecording_ = false;
     double tempo_ = 120.0;
     bool metronome_ = false;
@@ -331,9 +352,9 @@ private:
     int clickLength_ = 1;
     double clickPhase_ = 0.0;
     double clickPhaseInc_ = 0.0;
-    RecordSink* recordSink_ = nullptr;
-    const float* inL_ = nullptr;  // Eingang des aktuellen Blocks oder nullptr
-    const float* inR_ = nullptr;
+    std::array<const float*, kMaxInputs> in_{};  // Eingang des aktuellen Blocks
+    int numIn_ = 0;
+    std::vector<float> silence_;  // Ersatz fuer fehlende Eingangskanaele
     std::vector<float> masterL_, masterR_;
     std::vector<float> trackL_, trackR_;
     std::vector<float> pluginL_, pluginR_;
@@ -351,10 +372,10 @@ private:
     std::atomic<float> masterPeak_{0.0f};
     std::array<std::atomic<float>, kNumBuses> busPeak_{};
     std::atomic<int> latencyOut_{0};
-    std::atomic<float> inputPeak_{0.0f};
+    std::array<std::atomic<float>, kNumTracks> inputPeak_{};
     std::atomic<std::uint32_t> underruns_{0};
 
-    // Aufnahmeziel fuer den Disk-Thread (UI und Disk duerfen warten)
+    // Aufnahmeziele fuer den Disk-Thread, je Spur (UI und Disk duerfen warten)
     std::mutex sinkMutex_;
-    std::shared_ptr<RecordSink> diskSink_;
+    std::array<std::shared_ptr<RecordSink>, kNumTracks> diskSinks_;
 };

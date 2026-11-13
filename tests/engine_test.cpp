@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <sstream>
 #include <functional>
 #include <string>
@@ -50,6 +51,8 @@ struct Rig {
 
     // Eingangssignal fuer den naechsten render()-Aufruf; leer = kein Eingang.
     std::vector<float> inL, inR;
+    // Mehrkanaliger Eingang; hat Vorrang vor inL/inR, wenn nicht leer.
+    std::vector<std::vector<float>> inputs;
 
     // Spielt den Disk-Thread: liest vor, bis nichts mehr zu tun ist.
     void service() {
@@ -61,7 +64,11 @@ struct Rig {
         l.assign(static_cast<std::size_t>(frames), 0.0f);
         r.assign(static_cast<std::size_t>(frames), 0.0f);
         float* out[2] = {l.data(), r.data()};
-        if (inL.size() >= static_cast<std::size_t>(frames) && inR.size() >= static_cast<std::size_t>(frames)) {
+        if (!inputs.empty()) {
+            std::vector<const float*> in;
+            for (const auto& channel : inputs) in.push_back(channel.data());
+            engine->process(in.data(), static_cast<int>(in.size()), out, 2, frames);
+        } else if (inL.size() >= static_cast<std::size_t>(frames) && inR.size() >= static_cast<std::size_t>(frames)) {
             const float* in[2] = {inL.data(), inR.data()};
             engine->process(in, 2, out, 2, frames);
         } else {
@@ -665,10 +672,11 @@ void testRecording() {
     rig.engine->locate(5000);
     renderWithInput(rig, counter);  // Transport steht noch
     CHECK(!rig.engine->isRecording());
-    CHECK(rig.engine->takeInputPeak() > 0.2f);  // Eingangspegel wird schon angezeigt
+    CHECK(rig.engine->takeInputPeak(2) > 0.2f);  // Eingangspegel wird schon angezeigt
+    CHECK(rig.engine->takeInputPeak(3) == 0.0f);  // nur fuer scharfgeschaltete Spuren
 
     const std::int64_t firstRecorded = counter;
-    CHECK(rig.engine->record(sink));
+    CHECK(rig.engine->record({{2, sink}}, false));
     constexpr int kBlocks = 40;
     for (int b = 0; b < kBlocks; ++b) {
         renderWithInput(rig, counter);
@@ -687,7 +695,7 @@ void testRecording() {
     CHECK(sink->startPosition() == 5000);
     CHECK(sink->framesCaptured() == kBlocks * kBlock);
     CHECK(sink->overruns() == 0);
-    rig.engine->releaseRecordSink();
+    rig.engine->releaseRecordSinks();
 
     // Die Datei muss genau das Eingangssignal der aufgenommenen Bloecke enthalten.
     auto wav = WavFile::open(path, error);
@@ -740,6 +748,174 @@ void testInputMonitor() {
     for (int i = 0; i < kBlock; ++i)
         if (rig.l[static_cast<std::size_t>(i)] != 0.0f) silent = false;
     CHECK(silent);
+}
+
+// Eingangskanal c, Frame i: unterscheidbare Signale je Kanal.
+float multiInput(int channel, std::int64_t i) {
+    return 0.1f * static_cast<float>(channel + 1) * static_cast<float>(std::sin(0.01 * static_cast<double>(channel + 1) * static_cast<double>(i)));
+}
+
+void renderWithInputs(Rig& rig, std::int64_t& counter, int channels) {
+    rig.inputs.assign(static_cast<std::size_t>(channels), std::vector<float>(kBlock));
+    for (int c = 0; c < channels; ++c)
+        for (int i = 0; i < kBlock; ++i)
+            rig.inputs[static_cast<std::size_t>(c)][static_cast<std::size_t>(i)] = multiInput(c, counter + i);
+    rig.render();
+    counter += kBlock;
+}
+
+// Vier Eingaenge, drei Spuren nehmen gleichzeitig auf: ein Stereopaar und zwei Monokanaele.
+void testMultichannelRecording() {
+    const auto folder = tempFile("minidaw_test_mehrkanal");
+    std::error_code ec;
+    std::filesystem::remove_all(folder, ec);
+
+    Rig rig;
+    ProjectController controller(*rig.engine);
+    controller.setSampleRate(kRate);
+    controller.setInputChannels(4);
+    controller.setRecordingFolder(folder);
+    std::int64_t counter = 0;
+    std::string message;
+
+    controller.setTrackAudioInput(0, 0, true);   // In 1+2
+    controller.setTrackAudioInput(3, 2, false);  // In 3
+    controller.setTrackAudioInput(5, 3, false);  // In 4
+    controller.setTrackArmed(0, true);
+    controller.setTrackArmed(3, true);
+    controller.setTrackArmed(5, true);
+    CHECK(controller.trackArmed(3) && !controller.trackArmed(4) && controller.anyArmed());
+
+    // Pegel je Spur aus ihrem eigenen Eingang.
+    renderWithInputs(rig, counter, 4);
+    renderWithInputs(rig, counter, 4);
+    const float peak0 = rig.engine->takeInputPeak(0);
+    const float peak3 = rig.engine->takeInputPeak(3);
+    const float peak5 = rig.engine->takeInputPeak(5);
+    CHECK(peak0 > 0.05f && peak3 > 0.05f && peak5 > 0.05f);
+    CHECK(peak5 > peak3 && peak3 > peak0);  // Kanal 4 ist am lautesten
+    CHECK(rig.engine->takeInputPeak(1) == 0.0f);
+
+    // Mithoeren: Die Monospur liegt in der Mitte, beide Seiten bekommen ihren Kanal.
+    controller.setTrackArmed(0, false);
+    controller.setTrackArmed(5, false);
+    controller.setMonitor(true);
+    renderWithInputs(rig, counter, 4);
+    const std::int64_t monitorStart = counter;
+    renderWithInputs(rig, counter, 4);
+    bool centred = true;
+    for (int i = 0; i < kBlock; ++i) {
+        const float expected = multiInput(2, monitorStart + i);
+        const float l = rig.l[static_cast<std::size_t>(i)];
+        if (std::fabs(l - rig.r[static_cast<std::size_t>(i)]) > 1e-6f) centred = false;
+        if (std::fabs(expected) > 0.05f && std::fabs(l / expected - std::sqrt(0.5f)) > 0.01f) centred = false;
+    }
+    CHECK(centred);
+    controller.setMonitor(false);
+    controller.setTrackArmed(0, true);
+    controller.setTrackArmed(5, true);
+
+    // Ein Kanal, den das Geraet nicht hat, wird vor dem Start gemeldet.
+    controller.setTrackAudioInput(5, 6, false);
+    CHECK(!controller.startRecording(message));
+    CHECK(message.find("Spur 6") != std::string::npos);
+    controller.setTrackAudioInput(5, 3, false);
+
+    rig.engine->locate(9000);
+    renderWithInputs(rig, counter, 4);
+    const std::int64_t first = counter;
+    CHECK(controller.startRecording(message));
+    CHECK(controller.isTrackRecording(0) && controller.isTrackRecording(3) && controller.isTrackRecording(5));
+    CHECK(!controller.isTrackRecording(1));
+    controller.setTrackArmed(7, true);  // waehrend der Aufnahme gesperrt
+    CHECK(!controller.trackArmed(7));
+    constexpr int kBlocks = 12;
+    for (int b = 0; b < kBlocks; ++b) {
+        renderWithInputs(rig, counter, 4);
+        rig.service();
+    }
+    rig.engine->stop();
+    renderWithInputs(rig, counter, 4);
+    rig.service();
+    CHECK(controller.poll(message));
+    CHECK(!controller.isRecording());
+
+    // Jede Spur hat einen Clip; die Datei enthaelt genau ihren Kanal bzw. ihr Paar.
+    const struct { int track; int channel; int channels; } expected[] = {{0, 0, 2}, {3, 2, 1}, {5, 3, 1}};
+    std::set<std::filesystem::path> files;
+    for (const auto& e : expected) {
+        const auto& clips = controller.project().tracks[static_cast<std::size_t>(e.track)].clips;
+        CHECK(clips.size() == 1);
+        if (clips.size() != 1) continue;
+        CHECK(clips[0].start == 9000);
+        CHECK(clips[0].length == kBlocks * kBlock);
+        files.insert(clips[0].file->path);
+        CHECK(clips[0].file->path.filename().string().find("_Spur" + std::to_string(e.track + 1)) != std::string::npos);
+        const auto& wav = clips[0].file->wav;
+        CHECK(wav->channels() == e.channels);
+        std::vector<float> data(static_cast<std::size_t>(2 * wav->frames()));
+        wav->readStereo(0, static_cast<int>(wav->frames()), data.data());
+        bool ok = true;
+        for (std::int64_t i = 0; i < wav->frames(); ++i) {
+            const float l = data[static_cast<std::size_t>(2 * i)];
+            const float r = data[static_cast<std::size_t>(2 * i + 1)];
+            const int rightChannel = e.channels == 2 ? e.channel + 1 : e.channel;
+            if (l != multiInput(e.channel, first + i) || r != multiInput(rightChannel, first + i)) ok = false;
+        }
+        CHECK(ok);
+    }
+    CHECK(files.size() == 3);
+    for (int t : {1, 2, 4, 6}) CHECK(controller.project().tracks[static_cast<std::size_t>(t)].clips.empty());
+
+    // Stereopaar am letzten Kanal: Es gibt keinen Partner, die Datei wird mono.
+    controller.armTrack(2);
+    controller.setTrackAudioInput(2, 3, true);
+    CHECK(controller.startRecording(message));
+    for (int b = 0; b < 3; ++b) {
+        renderWithInputs(rig, counter, 4);
+        rig.service();
+    }
+    rig.engine->stop();
+    renderWithInputs(rig, counter, 4);
+    rig.service();
+    CHECK(controller.poll(message));
+    const auto& last = controller.project().tracks[2].clips;
+    CHECK(last.size() == 1 && last[0].file->wav->channels() == 1);
+
+    while (!controller.peaksIdle()) std::this_thread::yield();
+}
+
+// MIDI auf zwei Spuren gleichzeitig: Jede bekommt die Noten ihres Kanals.
+void testMultiMidiRecording() {
+    Rig rig;
+    ProjectController controller(*rig.engine);
+    controller.setSampleRate(kRate);
+    std::string message;
+    controller.setTrackInput(2, 0);  // Kanal 1
+    controller.setTrackInput(4, 1);  // Kanal 2
+    controller.setTrackArmed(2, true);
+    controller.setTrackArmed(4, true);
+    rig.render();
+    CHECK(controller.startRecording(message));
+    rig.render();
+    controller.poll(message);
+    rig.engine->postMidi(MidiMessage::noteOn(60, 100, 0));  // Kanal 1
+    rig.engine->postMidi(MidiMessage::noteOn(67, 100, 1));  // Kanal 2
+    rig.render();
+    rig.render();
+    rig.engine->postMidi(MidiMessage::noteOff(60, 0));
+    rig.engine->postMidi(MidiMessage::noteOff(67, 1));
+    rig.render();
+    rig.engine->stop();
+    rig.render();
+    CHECK(controller.poll(message));
+    const auto& a = controller.project().tracks[2].midiClips;
+    const auto& b = controller.project().tracks[4].midiClips;
+    CHECK(a.size() == 1 && b.size() == 1);
+    if (a.size() == 1 && b.size() == 1) {
+        CHECK(a[0].notes.size() == 1 && a[0].notes[0].pitch == 60);
+        CHECK(b[0].notes.size() == 1 && b[0].notes[0].pitch == 67);
+    }
 }
 
 void testControllerRecording() {
@@ -1455,6 +1631,8 @@ void testProjectFile() {
         controller.setTrackInput(5, 3);
         controller.setTrackMidiOutput(5, 9);
         controller.setTrackInput(6, kTrackInputMidiAll);
+        controller.setTrackAudioInput(1, 2, false);  // In 3
+        controller.setTrackAudioInput(3, 2, true);   // In 3+4
         controller.setMasterGain(0.8f);
         controller.setBpm(97.0);
         plugins.controller = &controller;
@@ -1522,6 +1700,9 @@ void testProjectFile() {
         CHECK(p.tracks[5].mute && p.tracks[2].solo && !p.tracks[0].mute);
         CHECK(p.tracks[5].input == 3 && p.tracks[5].midiOutput == 9);
         CHECK(p.tracks[6].input == kTrackInputMidiAll);
+        CHECK(p.tracks[1].audioChannel == 2 && !p.tracks[1].audioStereo);
+        CHECK(p.tracks[3].audioChannel == 2 && p.tracks[3].audioStereo);
+        CHECK(p.tracks[0].audioChannel == 0 && p.tracks[0].audioStereo);
         CHECK(p.tracks[5].midiClips.size() == 1);
         if (p.tracks[5].midiClips.size() == 1) {
             const MidiClipModel& m = p.tracks[5].midiClips[0];
@@ -2067,6 +2248,8 @@ int main() {
     testRecording();
     testInputMonitor();
     testControllerRecording();
+    testMultichannelRecording();
+    testMultiMidiRecording();
     testSynth();
     testLiveMidi();
     testMidiChannels();

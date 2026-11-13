@@ -183,34 +183,55 @@ bool Engine::postMidi(MidiMessage message, bool fromKeyboard) {
     return midiIn_.push({message, fromKeyboard, nowMicros()});
 }
 
+bool Engine::setTrackArmed(int track, bool armed) noexcept {
+    if (!validTrack(track)) return false;
+    return send({CommandType::ArmTrack, track, armed ? 1.0f : 0.0f});
+}
+
 bool Engine::setArmedTrack(int track) noexcept {
     if (track != -1 && !validTrack(track)) return false;
-    return send({CommandType::ArmTrack, track});
+    bool ok = true;
+    for (int t = 0; t < kNumTracks; ++t) ok = setTrackArmed(t, t == track) && ok;
+    return ok;
+}
+
+bool Engine::setTrackAudioInput(int track, int channel, bool stereo) noexcept {
+    if (!validTrack(track) || channel < 0 || channel >= kMaxInputs) return false;
+    Command c{CommandType::TrackAudioInput, track, stereo ? 1.0f : 0.0f};
+    c.position = channel;
+    return send(c);
 }
 
 bool Engine::setInputMonitor(bool on) noexcept {
     return send({CommandType::InputMonitor, 0, on ? 1.0f : 0.0f});
 }
 
-bool Engine::record(std::shared_ptr<RecordSink> sink) {
-    if (!sink) return false;
-    Command c{CommandType::Record};
-    c.sink = sink.get();
+bool Engine::record(const std::vector<TrackSink>& sinks, bool midi) {
+    for (const TrackSink& entry : sinks)
+        if (!validTrack(entry.track) || !entry.sink) return false;
+    if (sinks.empty() && !midi) return false;
     {
         std::lock_guard<std::mutex> lock(sinkMutex_);
-        diskSink_ = std::move(sink);
+        for (const TrackSink& entry : sinks) diskSinks_[static_cast<std::size_t>(entry.track)] = entry.sink;
     }
-    if (send(c)) return true;
-    releaseRecordSink();
+    // Erst die Dateien an die Spuren haengen, dann starten: Die Engine nimmt
+    // erst mit dem Record-Kommando auf, alle Spuren also ab demselben Block.
+    bool ok = true;
+    for (const TrackSink& entry : sinks) {
+        Command c{CommandType::TrackRecordSink, entry.track};
+        c.sink = entry.sink.get();
+        ok = send(c) && ok;
+    }
+    if (ok && send({CommandType::Record, 0, midi ? 1.0f : 0.0f})) return true;
+    // Gescheitert: Der Stopp schliesst die schon angehaengten Dateien.
+    stop();
     return false;
 }
 
-void Engine::releaseRecordSink() {
+void Engine::releaseRecordSinks() {
     std::lock_guard<std::mutex> lock(sinkMutex_);
-    diskSink_.reset();
+    for (auto& sink : diskSinks_) sink.reset();
 }
-
-bool Engine::recordMidi() noexcept { return send({CommandType::RecordMidi}); }
 
 float Engine::takeTrackPeak(int track) noexcept {
     if (!validTrack(track)) return 0.0f;
@@ -226,8 +247,9 @@ float Engine::takeBusPeak(int bus) noexcept {
     return busPeak_[static_cast<std::size_t>(bus)].exchange(0.0f, std::memory_order_relaxed);
 }
 
-float Engine::takeInputPeak() noexcept {
-    return inputPeak_.exchange(0.0f, std::memory_order_relaxed);
+float Engine::takeInputPeak(int track) noexcept {
+    if (!validTrack(track)) return 0.0f;
+    return inputPeak_[static_cast<std::size_t>(track)].exchange(0.0f, std::memory_order_relaxed);
 }
 
 // --- Disk-Thread -------------------------------------------------------------
@@ -236,12 +258,14 @@ bool Engine::serviceDisk() {
     bool worked = false;
     for (auto& stream : streams_) worked = stream.service() || worked;
 
-    std::shared_ptr<RecordSink> sink;
+    // Kopie unter der Sperre, geschrieben wird ohne sie (kein Allozieren: festes Feld).
+    std::array<std::shared_ptr<RecordSink>, kNumTracks> sinks;
     {
         std::lock_guard<std::mutex> lock(sinkMutex_);
-        sink = diskSink_;
+        sinks = diskSinks_;
     }
-    if (sink) worked = sink->service() || worked;
+    for (const auto& sink : sinks)
+        if (sink) worked = sink->service() || worked;
     return worked;
 }
 
@@ -257,6 +281,7 @@ void Engine::prepare(double sampleRate, int /*numInputs*/, int /*numOutputs*/, i
     trackR_.assign(size, 0.0f);
     pluginL_.assign(size, 0.0f);
     pluginR_.assign(size, 0.0f);
+    silence_.assign(size, 0.0f);
     for (auto& bus : buses_) {
         bus.left.assign(size, 0.0f);
         bus.right.assign(size, 0.0f);
@@ -300,6 +325,13 @@ void Engine::silenceTrack(std::size_t ti, std::int64_t dueMicros) noexcept {
     t.held = {};
 }
 
+bool Engine::trackInput(const Track& t, const float*& left, const float*& right) const noexcept {
+    if (t.midiInput != kInputAudio || t.inChannel >= numIn_) return false;
+    left = in_[static_cast<std::size_t>(t.inChannel)];
+    right = (t.inStereo && t.inChannel + 1 < numIn_) ? in_[static_cast<std::size_t>(t.inChannel + 1)] : left;
+    return true;
+}
+
 void Engine::drainCommands() noexcept {
     const std::int64_t now = nowMicros();
     bool mixChanged = false;
@@ -313,10 +345,11 @@ void Engine::drainCommands() noexcept {
                 break;
             case CommandType::Stop:
                 wantPlay_ = false;  // rolling_ endet nach dem Ausblenden
-                if (recordSink_) {
-                    recordSink_->finish();
-                    recordSink_ = nullptr;
+                for (Track& track : tracks_) {
+                    if (track.sink) track.sink->finish();
+                    track.sink = nullptr;
                 }
+                recording_ = false;
                 if (midiRecording_) {
                     midiRecordOut_.push({MidiRecordEvent::Kind::End, {}, position_});
                     midiRecording_ = false;
@@ -348,22 +381,33 @@ void Engine::drainCommands() noexcept {
                 masterGain_ = c.value;
                 break;
             case CommandType::ArmTrack:
-                // Gehaltene Noten der bisherigen Spur verstummen lassen.
-                if (validTrack(armedTrack_) && armedTrack_ != c.track)
-                    silenceTrack(static_cast<std::size_t>(armedTrack_), now);
-                armedTrack_ = c.track;
+                if (t) {
+                    // Gehaltene Noten einer abgeschalteten Spur verstummen lassen.
+                    if (t->armed && c.value == 0.0f) silenceTrack(static_cast<std::size_t>(c.track), now);
+                    t->armed = c.value != 0.0f;
+                    anyArmed_ = false;
+                    for (const Track& track : tracks_) anyArmed_ = anyArmed_ || track.armed;
+                }
+                break;
+            case CommandType::TrackAudioInput:
+                if (t) {
+                    t->inChannel = static_cast<int>(c.position);
+                    t->inStereo = c.value != 0.0f;
+                }
+                break;
+            case CommandType::TrackRecordSink:
+                if (t) {
+                    if (t->sink && t->sink != c.sink) t->sink->finish();
+                    t->sink = c.sink;
+                }
                 break;
             case CommandType::InputMonitor:
                 monitor_ = c.value != 0.0f;
                 break;
             case CommandType::Record:
-                if (recordSink_) recordSink_->finish();
-                recordSink_ = c.sink;
-                wantPlay_ = true;
-                rolling_ = true;
-                break;
-            case CommandType::RecordMidi:
-                if (!midiRecording_) {
+                recording_ = false;
+                for (const Track& track : tracks_) recording_ = recording_ || track.sink != nullptr;
+                if (c.value != 0.0f && !midiRecording_) {
                     midiRecording_ = true;
                     midiRecordOut_.push({MidiRecordEvent::Kind::Begin, {}, position_});
                 }
@@ -548,8 +592,8 @@ int Engine::gatherMidi(std::size_t ti, int numFrames, std::int64_t blockMicros) 
     };
     const bool anyHeld = (t.held[0] | t.held[1]) != 0;
 
-    // Live-MIDI: nur fuer die scharfgeschaltete Spur und nur, wenn der Kanal passt.
-    if (static_cast<int>(ti) == armedTrack_ && t.midiInput != kInputAudio) {
+    // Live-MIDI: nur fuer scharfgeschaltete MIDI-Spuren und nur, wenn der Kanal passt.
+    if (t.armed && t.midiInput != kInputAudio) {
         const double framesPerMicro = sampleRate_ / 1'000'000.0;
         for (int i = 0; i < liveMidiCount_; ++i) {
             const LiveMidi& live = liveMidi_[static_cast<std::size_t>(i)];
@@ -563,7 +607,7 @@ int Engine::gatherMidi(std::size_t ti, int numFrames, std::int64_t blockMicros) 
                 const std::int64_t age = std::clamp<std::int64_t>(blockMicros - live.micros, 0, 200'000);
                 const auto ageFrames = static_cast<std::int64_t>(static_cast<double>(age) * framesPerMicro);
                 const std::int64_t pos = position_ - ageFrames - outputLatency_.load(std::memory_order_relaxed);
-                midiRecordOut_.push({MidiRecordEvent::Kind::Message, live.message, pos});
+                midiRecordOut_.push({MidiRecordEvent::Kind::Message, live.message, pos, static_cast<int>(ti)});
             }
         }
     }
@@ -606,21 +650,26 @@ void Engine::renderBlock(int numFrames, std::int64_t blockMicros) noexcept {
     std::memset(L, 0, bytes);
     std::memset(R, 0, bytes);
 
-    const bool haveInput = inL_ != nullptr;
-    const bool monitoring = monitor_ && haveInput && armedTrack_ >= 0;
-
-    // Eingangspegel fuer die Anzeige der scharfgeschalteten Spur.
-    if (haveInput && armedTrack_ >= 0) {
-        float peak = 0.0f;
-        for (int i = 0; i < numFrames; ++i)
-            peak = std::max(peak, std::max(std::fabs(inL_[i]), std::fabs(inR_[i])));
-        raisePeak(inputPeak_, peak);
+    // Eingangspegel der scharfgeschalteten Audio-Spuren fuer die Anzeige;
+    // Mithoeren, sobald eine von ihnen einen Eingang hat.
+    bool monitoring = false;
+    if (anyArmed_ && numIn_ > 0) {
+        for (std::size_t ti = 0; ti < tracks_.size(); ++ti) {
+            const Track& t = tracks_[ti];
+            const float* left = nullptr;
+            const float* right = nullptr;
+            if (!t.armed || !trackInput(t, left, right)) continue;
+            float peak = 0.0f;
+            for (int i = 0; i < numFrames; ++i) peak = std::max(peak, std::max(std::fabs(left[i]), std::fabs(right[i])));
+            raisePeak(inputPeak_[ti], peak);
+            monitoring = monitoring || monitor_;
+        }
     }
 
     // Synthesizer mit klingenden Stimmen und Plugins laufen auch bei stehendem Transport weiter.
     bool anySynth = anyPlugin_;
     for (const auto& synth : synths_) anySynth = anySynth || synth.active();
-    const bool liveMidi = liveMidiCount_ > 0 && armedTrack_ >= 0;
+    const bool liveMidi = liveMidiCount_ > 0 && anyArmed_;
 
     // Clips und Noten werden um die Plugin-Latenz vorausgelesen.
     const std::int64_t sourcePos = position_ + latency_;
@@ -636,8 +685,17 @@ void Engine::renderBlock(int numFrames, std::int64_t blockMicros) noexcept {
         }
     }
 
-    // Aufnahme: den Eingang dieses Blocks an den Disk-Thread weiterreichen.
-    if (rolling_ && recordSink_ && haveInput) recordSink_->push(position_, inL_, inR_, numFrames);
+    // Aufnahme: den Eingang jeder aufnehmenden Spur an den Disk-Thread weiterreichen.
+    // Fehlt ein Kanal (Geraet mit weniger Eingaengen), wird Stille geschrieben.
+    if (rolling_ && recording_) {
+        for (const Track& t : tracks_) {
+            if (!t.sink) continue;
+            const float* left = silence_.data();
+            const float* right = silence_.data();
+            trackInput(t, left, right);
+            t.sink->push(position_, left, right, numFrames);
+        }
+    }
 
     for (auto& bus : buses_) {
         std::memset(bus.left.data(), 0, bytes);
@@ -682,7 +740,9 @@ void Engine::renderBlock(int numFrames, std::int64_t blockMicros) noexcept {
 
         const bool hasClips = rolling_ && stream.active();
         const bool hasTone = rolling_ && t.toneHz > 0.0f;
-        const bool hasInput = monitoring && static_cast<int>(ti) == armedTrack_;
+        const float* inLeft = nullptr;
+        const float* inRight = nullptr;
+        const bool hasInput = monitoring && t.armed && trackInput(t, inLeft, inRight);
         const bool midiToBuiltIn = midiToSynth && instrument == nullptr;
         const bool hasSynth = synths_[ti].active() || (midiToBuiltIn && midiCount > 0);
         const bool active = hasClips || hasTone || hasInput || hasSynth || hasPlugins;
@@ -725,8 +785,8 @@ void Engine::renderBlock(int numFrames, std::int64_t blockMicros) noexcept {
         // Mithoeren: Der Eingang laeuft durch Effekte, Fader und Panorama der Spur.
         if (hasInput) {
             for (int i = 0; i < numFrames; ++i) {
-                tl[i] += inL_[i];
-                tr[i] += inR_[i];
+                tl[i] += inLeft[i];
+                tr[i] += inRight[i];
             }
         }
 
@@ -898,12 +958,8 @@ void Engine::process(const float* const* in, int numInputs, float* const* out, i
     int done = 0;
     while (done < numFrames) {
         const int n = std::min(numFrames - done, maxFrames_);
-        if (in != nullptr && numInputs > 0) {
-            inL_ = in[0] + done;
-            inR_ = (numInputs > 1 ? in[1] : in[0]) + done;
-        } else {
-            inL_ = inR_ = nullptr;
-        }
+        numIn_ = (in != nullptr) ? std::clamp(numInputs, 0, kMaxInputs) : 0;
+        for (int c = 0; c < numIn_; ++c) in_[static_cast<std::size_t>(c)] = in[c] + done;
         renderBlock(n, blockMicros + static_cast<std::int64_t>(done * microsPerFrame));
 
         const std::size_t bytes = static_cast<std::size_t>(n) * sizeof(float);
@@ -918,7 +974,7 @@ void Engine::process(const float* const* in, int numInputs, float* const* out, i
         }
         done += n;
     }
-    inL_ = inR_ = nullptr;
+    numIn_ = 0;
 
     // Latenzmessung: Das Testsignal ersetzt alles, was die Engine sonst ausgibt.
     if (probe_ && numOutputs > 0) {
@@ -930,5 +986,5 @@ void Engine::process(const float* const* in, int numInputs, float* const* out, i
 
     positionOut_.store(position_, std::memory_order_relaxed);
     playingOut_.store(wantPlay_, std::memory_order_relaxed);
-    recordingOut_.store(recordSink_ != nullptr || midiRecording_, std::memory_order_relaxed);
+    recordingOut_.store(recording_ || midiRecording_, std::memory_order_relaxed);
 }

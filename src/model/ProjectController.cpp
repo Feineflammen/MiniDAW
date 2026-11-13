@@ -249,6 +249,7 @@ void ProjectController::clearProject() {
         setTrackMute(t, false);
         setTrackSolo(t, false);
         setTrackInput(t, kTrackInputAudio);
+        setTrackAudioInput(t, 0, true);
         setTrackMidiOutput(t, kTrackOutputSynth);
     }
     setMasterGain(1.0f);
@@ -277,6 +278,8 @@ bool ProjectController::saveProject(const std::filesystem::path& path, std::stri
         out.mute = track.mute;
         out.solo = track.solo;
         out.input = track.input;
+        out.audioChannel = track.audioChannel;
+        out.audioStereo = track.audioStereo;
         out.midiOutput = track.midiOutput;
         out.sends = track.sends;
         out.output = track.output;
@@ -336,6 +339,7 @@ bool ProjectController::loadProject(const std::filesystem::path& path, std::stri
         setTrackMute(t, in.mute);
         setTrackSolo(t, in.solo);
         setTrackInput(t, in.input);
+        setTrackAudioInput(t, in.audioChannel, in.audioStereo);
         setTrackMidiOutput(t, in.midiOutput);
         setTrackOutput(t, in.output);
         for (int b = 0; b < kProjectBuses; ++b) setTrackSend(t, b, in.sends[static_cast<std::size_t>(b)]);
@@ -411,6 +415,16 @@ void ProjectController::setTrackInput(int track, int input) {
     modified_ = true;
     project_.tracks[static_cast<std::size_t>(track)].input = input;
     engine_.setTrackMidiInput(track, input);
+}
+
+void ProjectController::setTrackAudioInput(int track, int channel, bool stereo) {
+    if (!validTrack(track) || channel < 0 || channel >= Engine::kMaxInputs) return;
+    if (isRecording()) return;
+    TrackModel& model = project_.tracks[static_cast<std::size_t>(track)];
+    if (model.audioChannel != channel || model.audioStereo != stereo) modified_ = true;
+    model.audioChannel = channel;
+    model.audioStereo = stereo;
+    engine_.setTrackAudioInput(track, channel, stereo);
 }
 
 void ProjectController::setTrackMidiOutput(int track, int output) {
@@ -583,33 +597,36 @@ void ProjectController::syncMidi(int track) {
     engine_.setTrackMidiSequence(track, std::move(sequence));
 }
 
-// Schliesst die MIDI-Aufnahme ab: offene Noten beenden, Clip anlegen.
+// Schliesst die MIDI-Aufnahme ab: je Spur offene Noten beenden, Clip anlegen.
 void ProjectController::finishMidiRecording(std::int64_t end) {
-    const int track = recordTrack_;
     midiRecording_ = false;
-    recordTrack_ = -1;
-    if (!midiRecordBegun_) return;
+    const bool begun = midiRecordBegun_;
     midiRecordBegun_ = false;
-
     const std::int64_t length = std::max<std::int64_t>(1, end - midiRecordStart_);
-    for (int pitch = 0; pitch < 128; ++pitch) {
-        OpenNote& open = midiRecordOpen_[static_cast<std::size_t>(pitch)];
-        if (!open.open) continue;
-        midiRecordNotes_.push_back({open.start, std::max<std::int64_t>(1, length - open.start),
-                                    static_cast<std::uint8_t>(pitch), open.velocity});
-        open.open = false;
-    }
-    if (midiRecordNotes_.empty() || !validTrack(track)) return;
+    for (int track = 0; track < kProjectTracks; ++track) {
+        MidiTake& take = midiTakes_[static_cast<std::size_t>(track)];
+        if (!take.active) continue;
+        take.active = false;
+        std::vector<MidiNote> notes = std::move(take.notes);
+        take.notes.clear();
+        for (int pitch = 0; pitch < 128; ++pitch) {
+            OpenNote& open = take.open[static_cast<std::size_t>(pitch)];
+            if (open.open && begun)
+                notes.push_back({open.start, std::max<std::int64_t>(1, length - open.start),
+                                 static_cast<std::uint8_t>(pitch), open.velocity});
+            open.open = false;
+        }
+        if (!begun || notes.empty()) continue;
 
-    MidiClipModel clip;
-    clip.name = L"MIDI";
-    clip.start = midiRecordStart_;
-    clip.length = length;
-    clip.notes = std::move(midiRecordNotes_);
-    midiRecordNotes_.clear();
-    std::sort(clip.notes.begin(), clip.notes.end(),
-              [](const MidiNote& a, const MidiNote& b) { return a.start < b.start; });
-    addMidiClip(track, std::move(clip));
+        MidiClipModel clip;
+        clip.name = L"MIDI";
+        clip.start = midiRecordStart_;
+        clip.length = length;
+        clip.notes = std::move(notes);
+        std::sort(clip.notes.begin(), clip.notes.end(),
+                  [](const MidiNote& a, const MidiNote& b) { return a.start < b.start; });
+        addMidiClip(track, std::move(clip));
+    }
 }
 
 // --- Aufnahme ----------------------------------------------------------------
@@ -628,11 +645,31 @@ std::int64_t ProjectController::appliedLatencyFrames() const {
     return std::max<std::int64_t>(0, estimatedLatencyFrames() + offset);
 }
 
+void ProjectController::setTrackArmed(int track, bool armed) {
+    if (!validTrack(track)) return;
+    if (isRecording()) return;  // waehrend der Aufnahme nicht umschalten
+    armed_[static_cast<std::size_t>(track)] = armed;
+    engine_.setTrackArmed(track, armed);
+}
+
+bool ProjectController::anyArmed() const noexcept {
+    for (const bool armed : armed_)
+        if (armed) return true;
+    return false;
+}
+
 void ProjectController::armTrack(int track) {
     if (track != -1 && !validTrack(track)) return;
-    if (recordSink_) return;  // waehrend der Aufnahme nicht umschalten
-    armedTrack_ = track;
-    engine_.setArmedTrack(track);
+    if (isRecording()) return;
+    for (int t = 0; t < kProjectTracks; ++t) setTrackArmed(t, t == track);
+}
+
+bool ProjectController::isTrackRecording(int track) const noexcept {
+    if (!validTrack(track)) return false;
+    if (midiRecording_ && midiTakes_[static_cast<std::size_t>(track)].active) return true;
+    for (const AudioTake& take : audioTakes_)
+        if (take.track == track) return true;
+    return false;
 }
 
 void ProjectController::setMonitor(bool on) {
@@ -643,76 +680,101 @@ void ProjectController::setMonitor(bool on) {
 bool ProjectController::startRecording(std::string& message) {
     message.clear();
     if (isRecording()) { message = "Es l\u00E4uft bereits eine Aufnahme."; return false; }
-    if (!validTrack(armedTrack_)) {
+
+    std::vector<int> audioTracks, midiTracks;
+    for (int t = 0; t < kProjectTracks; ++t) {
+        if (!armed_[static_cast<std::size_t>(t)]) continue;
+        if (project_.tracks[static_cast<std::size_t>(t)].input == kTrackInputAudio) audioTracks.push_back(t);
+        else midiTracks.push_back(t);  // Spur mit MIDI-Eingang: Noten, keine Audiodatei
+    }
+    if (audioTracks.empty() && midiTracks.empty()) {
         message = "Keine Spur scharfgeschaltet. Erst R an einer Spur anklicken.";
         return false;
     }
 
-    // Spur mit MIDI-Eingang: Es werden Noten aufgenommen, keine Audiodatei.
-    if (project_.tracks[static_cast<std::size_t>(armedTrack_)].input != kTrackInputAudio) {
+    std::vector<Engine::TrackSink> sinks;
+    if (!audioTracks.empty()) {
+        if (inputChannels_ < 1) { message = "Kein Audio-Eingang verf\u00FCgbar."; return false; }
+        if (recordingFolder_.empty()) { message = "Kein Aufnahmeordner festgelegt."; return false; }
+        for (const int t : audioTracks) {
+            const TrackModel& track = project_.tracks[static_cast<std::size_t>(t)];
+            if (track.audioChannel >= inputChannels_) {
+                message = "Spur " + std::to_string(t + 1) + ": Eingang " + std::to_string(track.audioChannel + 1) +
+                          " gibt es am Ger\u00E4t nicht (" + std::to_string(inputChannels_) + " Eing\u00E4nge).";
+                return false;
+            }
+        }
+
+        std::error_code ec;
+        std::filesystem::create_directories(recordingFolder_, ec);
+        if (ec) { message = "Aufnahmeordner l\u00E4sst sich nicht anlegen."; return false; }
+
+        // Dateinamen aus Datum, Uhrzeit und Spur; bei Namensgleichheit hochzaehlen.
+        const std::time_t now = std::time(nullptr);
+        std::tm local{};
+#ifdef _WIN32
+        localtime_s(&local, &now);
+#else
+        localtime_r(&now, &local);
+#endif
+        char stamp[64];
+        std::strftime(stamp, sizeof stamp, "%Y-%m-%d_%H-%M-%S", &local);
+
+        for (const int t : audioTracks) {
+            const TrackModel& track = project_.tracks[static_cast<std::size_t>(t)];
+            std::filesystem::path path;
+            for (int n = 0;; ++n) {
+                std::string name = std::string("Aufnahme_") + stamp + "_Spur" + std::to_string(t + 1);
+                if (n > 0) name += "_" + std::to_string(n);
+                path = recordingFolder_ / (name + ".wav");
+                if (!std::filesystem::exists(path, ec)) break;
+            }
+            const int channels = (track.audioStereo && track.audioChannel + 1 < inputChannels_) ? 2 : 1;
+            std::string error;
+            auto sink = RecordSink::create(path, channels, static_cast<int>(sampleRate_ + 0.5), error);
+            if (!sink) {
+                for (const auto& made : sinks) std::filesystem::remove(made.sink->path(), ec);
+                message = "Aufnahmedatei: " + error;
+                return false;
+            }
+            sinks.push_back({t, std::move(sink)});
+        }
+    }
+
+    if (!midiTracks.empty()) {
         MidiRecordEvent stale;
         while (engine_.popMidiRecord(stale)) {}
-        midiRecordNotes_.clear();
-        midiRecordOpen_ = {};
+        for (MidiTake& take : midiTakes_) take = MidiTake{};
+        for (const int t : midiTracks) midiTakes_[static_cast<std::size_t>(t)].active = true;
         midiRecordBegun_ = false;
-        if (!engine_.recordMidi()) { message = "Aufnahme lie\u00DF sich nicht starten."; return false; }
-        midiRecording_ = true;
-        recordTrack_ = armedTrack_;
-        return true;
     }
 
-    if (inputChannels_ < 1) { message = "Kein Audio-Eingang verf\u00FCgbar."; return false; }
-    if (recordingFolder_.empty()) { message = "Kein Aufnahmeordner festgelegt."; return false; }
-
-    std::error_code ec;
-    std::filesystem::create_directories(recordingFolder_, ec);
-    if (ec) { message = "Aufnahmeordner l\u00E4sst sich nicht anlegen."; return false; }
-
-    // Dateiname aus Datum und Uhrzeit; bei Namensgleichheit hochzaehlen.
-    const std::time_t now = std::time(nullptr);
-    std::tm local{};
-#ifdef _WIN32
-    localtime_s(&local, &now);
-#else
-    localtime_r(&now, &local);
-#endif
-    char stamp[64];
-    std::strftime(stamp, sizeof stamp, "%Y-%m-%d_%H-%M-%S", &local);
-    std::filesystem::path path;
-    for (int n = 0;; ++n) {
-        std::string name = std::string("Aufnahme_") + stamp;
-        if (n > 0) name += "_" + std::to_string(n);
-        path = recordingFolder_ / (name + ".wav");
-        if (!std::filesystem::exists(path, ec)) break;
-    }
-
-    std::string error;
-    auto sink = RecordSink::create(path, inputChannels_, static_cast<int>(sampleRate_ + 0.5), error);
-    if (!sink) { message = "Aufnahmedatei: " + error; return false; }
-
-    recordSink_ = sink;
-    recordTrack_ = armedTrack_;
-    if (!engine_.record(std::move(sink))) {
-        recordSink_.reset();
-        recordTrack_ = -1;
-        std::filesystem::remove(path, ec);
+    if (!engine_.record(sinks, !midiTracks.empty())) {
+        std::error_code ec;
+        for (const auto& made : sinks) std::filesystem::remove(made.sink->path(), ec);
+        engine_.releaseRecordSinks();
+        for (MidiTake& take : midiTakes_) take.active = false;
         message = "Aufnahme lie\u00DF sich nicht starten.";
         return false;
     }
+    for (auto& made : sinks) audioTakes_.push_back({made.track, std::move(made.sink)});
+    midiRecording_ = !midiTracks.empty();
     return true;
 }
 
 bool ProjectController::recordProgress(std::int64_t& start, std::int64_t& frames) const noexcept {
-    if (midiRecording_) {
-        if (!midiRecordBegun_) return false;
+    for (const AudioTake& take : audioTakes_) {
+        if (!take.sink->started()) continue;
+        start = take.sink->startPosition();
+        frames = take.sink->framesCaptured();
+        return true;
+    }
+    if (midiRecording_ && midiRecordBegun_) {
         start = midiRecordStart_;
         frames = std::max<std::int64_t>(0, engine_.position() - midiRecordStart_);
         return true;
     }
-    if (!recordSink_ || !recordSink_->started()) return false;
-    start = recordSink_->startPosition();
-    frames = recordSink_->framesCaptured();
-    return true;
+    return false;
 }
 
 bool ProjectController::poll(std::string& message) {
@@ -727,7 +789,8 @@ bool ProjectController::poll(std::string& message) {
                                retiringPlugins_.end());
     }
 
-    // MIDI-Aufnahme: Ereignisse abholen, Noten zusammensetzen, am Ende den Clip anlegen.
+    // MIDI-Aufnahme: Ereignisse abholen, Noten je Spur zusammensetzen, am Ende die Clips anlegen.
+    bool changed = false;
     if (midiRecording_) {
         MidiRecordEvent e;
         while (midiRecording_ && engine_.popMidiRecord(e)) {
@@ -735,37 +798,41 @@ bool ProjectController::poll(std::string& message) {
                 midiRecordBegun_ = true;
                 midiRecordStart_ = e.position;
             } else if (e.kind == MidiRecordEvent::Kind::End) {
-                const std::size_t before = validTrack(recordTrack_)
-                    ? project_.tracks[static_cast<std::size_t>(recordTrack_)].midiClips.size() : 0;
-                const int track = recordTrack_;
+                std::size_t before = 0;
+                for (const TrackModel& track : project_.tracks) before += track.midiClips.size();
                 finishMidiRecording(e.position);
-                return validTrack(track) &&
-                       project_.tracks[static_cast<std::size_t>(track)].midiClips.size() != before;
-            } else if (midiRecordBegun_) {
+                std::size_t after = 0;
+                for (const TrackModel& track : project_.tracks) after += track.midiClips.size();
+                changed = changed || after != before;
+            } else if (midiRecordBegun_ && validTrack(e.track) && midiTakes_[static_cast<std::size_t>(e.track)].active) {
+                MidiTake& take = midiTakes_[static_cast<std::size_t>(e.track)];
                 const std::int64_t at = std::max<std::int64_t>(0, e.position - midiRecordStart_);
-                OpenNote& open = midiRecordOpen_[e.message.data1];
+                OpenNote& open = take.open[e.message.data1];
                 if (e.message.isNoteOn() || e.message.isNoteOff()) {
                     if (open.open) {  // vorherige Note auf dieser Taste abschliessen
-                        midiRecordNotes_.push_back({open.start, std::max<std::int64_t>(1, at - open.start),
-                                                    e.message.data1, open.velocity});
+                        take.notes.push_back({open.start, std::max<std::int64_t>(1, at - open.start),
+                                              e.message.data1, open.velocity});
                         open.open = false;
                     }
                     if (e.message.isNoteOn()) open = {true, at, e.message.data2};
                 }
             }
         }
-        return false;
     }
 
-    if (!recordSink_ || !recordSink_->done()) return false;
+    // Audio: Jede Datei, die fertig geschrieben ist, wird zum Clip ihrer Spur.
+    for (std::size_t i = 0; i < audioTakes_.size();) {
+        if (!audioTakes_[i].sink->done()) { ++i; continue; }
+        const AudioTake take = std::move(audioTakes_[i]);
+        audioTakes_.erase(audioTakes_.begin() + static_cast<std::ptrdiff_t>(i));
+        if (audioTakes_.empty()) engine_.releaseRecordSinks();
+        changed = finishAudioTake(take.track, take.sink, message) || changed;
+    }
+    return changed;
+}
 
-    // Die Datei ist fertig geschrieben: Aufnahme abschliessen und Clip anlegen.
-    const std::shared_ptr<RecordSink> sink = std::move(recordSink_);
-    const int track = recordTrack_;
-    recordSink_.reset();
-    recordTrack_ = -1;
-    engine_.releaseRecordSink();
-
+// Legt aus einer fertig geschriebenen Aufnahme den Clip an.
+bool ProjectController::finishAudioTake(int track, const std::shared_ptr<RecordSink>& sink, std::string& message) {
     std::error_code ec;
     if (!sink->started() || sink->framesCaptured() <= 0) {
         std::filesystem::remove(sink->path(), ec);
@@ -801,12 +868,14 @@ bool ProjectController::poll(std::string& message) {
 
 void ProjectController::finishRecordingOnShutdown() {
     midiRecording_ = false;  // eine laufende MIDI-Aufnahme wird verworfen
-    if (!recordSink_) return;
-    recordSink_->finish();  // der Audio-Thread laeuft nicht mehr, also darf das hier passieren
+    for (MidiTake& take : midiTakes_) take.active = false;
+    if (audioTakes_.empty()) return;
+    // Der Audio-Thread laeuft nicht mehr, also duerfen die Dateien hier abgeschlossen werden.
+    for (const AudioTake& take : audioTakes_) take.sink->finish();
     std::string message;
-    for (int i = 0; i < 600 && recordSink_; ++i) {
+    for (int i = 0; i < 600 && !audioTakes_.empty(); ++i) {
         poll(message);
-        if (recordSink_) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        if (!audioTakes_.empty()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 }
 

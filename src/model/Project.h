@@ -76,6 +76,10 @@ struct TrackModel {
     bool mute = false;
     bool solo = false;
     int input = kTrackInputAudio;
+    // Audio-Eingang: erster Kanal des Geraets (0-basiert), mono oder mit dem
+    // folgenden Kanal als Stereopaar.
+    int audioChannel = 0;
+    bool audioStereo = true;
     int midiOutput = kTrackOutputSynth;
     SlotArray slots;                           // Instrument und Effekte
     std::array<float, kProjectBuses> sends{};  // Send-Pegel an die Busse, linear

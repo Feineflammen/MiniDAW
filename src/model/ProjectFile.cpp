@@ -207,6 +207,10 @@ bool writeProjectFile(const std::filesystem::path& path, const SavedProject& pro
         out << "  stumm " << (track.mute ? 1 : 0) << '\n';
         out << "  solo " << (track.solo ? 1 : 0) << '\n';
         out << "  eingang " << inputName(track.input) << '\n';
+        // Audio-Eingang: "3" fuer Kanal 3 allein, "3-4" fuer das Paar.
+        out << "  audioeingang " << (track.audioChannel + 1);
+        if (track.audioStereo) out << '-' << (track.audioChannel + 2);
+        out << '\n';
         out << "  midiausgang " << (track.midiOutput == kTrackOutputSynth ? std::string("synth") : std::to_string(track.midiOutput + 1)) << '\n';
         out << "  ausgang " << (track.output < 0 ? std::string("master") : "bus " + std::to_string(track.output + 1)) << '\n';
         for (int b = 0; b < kProjectBuses; ++b)
@@ -341,6 +345,13 @@ bool readProjectFile(const std::filesystem::path& path, SavedProject& project, s
                     std::max(0.0f, static_cast<float>(std::strtod(value.c_str(), nullptr)));
         }
         else if (key == "eingang") track->input = inputFromName(rest);
+        else if (key == "audioeingang") {
+            const int first = std::atoi(rest.c_str());
+            if (first >= 1 && first <= 64) {
+                track->audioChannel = first - 1;
+                track->audioStereo = rest.find('-') != std::string::npos;
+            }
+        }
         else if (key == "midiausgang") {
             const int channel = std::atoi(rest.c_str());
             track->midiOutput = (rest != "synth" && channel >= 1 && channel <= 16) ? channel - 1 : kTrackOutputSynth;

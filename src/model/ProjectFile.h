@@ -35,6 +35,8 @@ struct SavedTrack {
     bool mute = false;
     bool solo = false;
     int input = kTrackInputAudio;
+    int audioChannel = 0;
+    bool audioStereo = true;
     int midiOutput = kTrackOutputSynth;
     std::vector<SavedSlot> slots;
     std::array<float, kProjectBuses> sends{};

@@ -101,6 +101,8 @@ public:
     // Eingang (kTrackInputAudio, kTrackInputMidiAll oder Kanal 0..15) und
     // MIDI-Ausgang (kTrackOutputSynth oder Kanal 0..15) einer Spur.
     void setTrackInput(int track, int input);
+    // Audio-Eingang einer Spur: erster Kanal (0-basiert), mono oder als Paar mit dem naechsten.
+    void setTrackAudioInput(int track, int channel, bool stereo);
     void setTrackMidiOutput(int track, int output);
 
     // Setzt das Plugin einer Spur (nullptr = keins). Ein Instrument bekommt das
@@ -151,17 +153,21 @@ public:
     // Um so viel werden Aufnahmen tatsaechlich verschoben.
     std::int64_t appliedLatencyFrames() const;
 
-    // Schaltet eine Spur fuer die Aufnahme scharf, -1 = keine. Immer nur eine Spur.
+    // Scharfgeschaltete Spuren nehmen beim Start gemeinsam auf: Audio-Spuren
+    // jede von ihrem Eingang in eine eigene Datei, MIDI-Spuren ihre Noten.
+    void setTrackArmed(int track, bool armed);
+    bool trackArmed(int track) const noexcept { return validTrack(track) && armed_[static_cast<std::size_t>(track)]; }
+    bool anyArmed() const noexcept;
+    // Schaltet genau diese Spur scharf und alle anderen ab; -1 = keine.
     void armTrack(int track);
-    int armedTrack() const noexcept { return armedTrack_; }
     void setMonitor(bool on);
     bool monitor() const noexcept { return monitor_; }
 
-    // Startet Wiedergabe und Aufnahme auf der scharfgeschalteten Spur.
+    // Startet Wiedergabe und Aufnahme auf allen scharfgeschalteten Spuren.
     // Beendet wird mit Engine::stop().
     bool startRecording(std::string& message);
-    bool isRecording() const noexcept { return recordSink_ != nullptr || midiRecording_; }
-    int recordTrack() const noexcept { return recordTrack_; }
+    bool isRecording() const noexcept { return !audioTakes_.empty() || midiRecording_; }
+    bool isTrackRecording(int track) const noexcept;
     // Fuer die Anzeige waehrend der Aufnahme. false, solange noch nichts aufgenommen ist.
     bool recordProgress(std::int64_t& start, std::int64_t& frames) const noexcept;
 
@@ -186,6 +192,7 @@ private:
     void syncMidi(int track);
     void clearProject();
     void finishMidiRecording(std::int64_t end);
+    bool finishAudioTake(int track, const std::shared_ptr<RecordSink>& sink, std::string& message);
 
     Engine& engine_;
     Project project_;
@@ -199,22 +206,30 @@ private:
     std::vector<std::shared_ptr<AudioPlugin>> retiringPlugins_;  // warten auf Rueckmeldung der Engine
 
     int inputChannels_ = 0;
-    int armedTrack_ = -1;
+    std::array<bool, kProjectTracks> armed_{};
     bool monitor_ = false;
     bool metronome_ = false;
     int recordOffsetMs_ = 0;
     std::filesystem::path recordingFolder_;
     std::function<std::int64_t()> latencyProvider_;
-    std::shared_ptr<RecordSink> recordSink_;
-    int recordTrack_ = -1;
+    // Laufende Audio-Aufnahmen, eine Datei je Spur
+    struct AudioTake {
+        int track = 0;
+        std::shared_ptr<RecordSink> sink;
+    };
+    std::vector<AudioTake> audioTakes_;
 
-    // Laufende MIDI-Aufnahme
+    // Laufende MIDI-Aufnahme, je Spur eigene Noten
     bool midiRecording_ = false;
     bool midiRecordBegun_ = false;
     std::int64_t midiRecordStart_ = 0;
-    std::vector<MidiNote> midiRecordNotes_;
     struct OpenNote { bool open = false; std::int64_t start = 0; std::uint8_t velocity = 0; };
-    std::array<OpenNote, 128> midiRecordOpen_{};
+    struct MidiTake {
+        bool active = false;
+        std::vector<MidiNote> notes;
+        std::array<OpenNote, 128> open{};
+    };
+    std::array<MidiTake, kProjectTracks> midiTakes_{};
 
     PeakBuilder peakBuilder_;
 };

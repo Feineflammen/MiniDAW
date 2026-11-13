@@ -25,9 +25,9 @@ constexpr wchar_t kAboutText[] =
     L"Kleine Musik-Software für Windows: 16 Spuren, Audio und MIDI, VST3, Mischpult.\n\n"
     L"Idee, Vorgaben und Tests: Feineflammen. Der Programmcode wurde vollständig von einer KI "
     L"geschrieben (Claude von Anthropic), die Grafiken von ChatGPT (OpenAI).\n\n"
-    L"Freie Software unter der GNU General Public License, Version 3: kostenlos benutzen, "
-    L"weitergeben und verändern; veränderte Fassungen ebenfalls unter der GPLv3 mit "
-    L"Quellcode. Kostenlos und ohne Gewähr; vor wichtigen Aufnahmen Sicherungskopien anlegen.\n\n"
+    L"Freie Software unter der GPLv3: kostenlos benutzen, weitergeben und verändern; "
+    L"veränderte Fassungen ebenfalls unter der GPLv3 mit Quellcode. Ohne Gewähr; vor "
+    L"wichtigen Aufnahmen Sicherungskopien anlegen.\n\n"
     L"Quellcode und Lizenztext: github.com/Feineflammen/daw\n\n"
     L"Enthält das VST 3 SDK (MIT) und das ASIO SDK (GPLv3) von Steinberg. VST und ASIO sind "
     L"Marken der Steinberg Media Technologies GmbH.\n\n"
@@ -55,12 +55,12 @@ using State = SplashWindow::State;
 
 // Links wird das Bild abgedunkelt, damit der Text darauf lesbar ist.
 void darken(std::uint8_t* pixels, int width, int height, bool about) {
-    const float reach = about ? 0.62f : 0.55f;   // bis wohin abgedunkelt wird (Anteil der Breite)
-    const float strongest = about ? 0.28f : 0.6f;  // Helligkeit ganz links
+    const float reach = about ? 0.8f : 0.55f;     // bis wohin abgedunkelt wird (Anteil der Breite)
+    const float strongest = about ? 0.2f : 0.6f;  // Helligkeit ganz links
     const int end = static_cast<int>(static_cast<float>(width) * reach);
     for (int x = 0; x < end; ++x) {
         const float t = static_cast<float>(x) / static_cast<float>(end);
-        const float factor = strongest + (1.0f - strongest) * t * t;
+        const float factor = strongest + (1.0f - strongest) * std::pow(t, about ? 2.2f : 2.0f);
         for (int y = 0; y < height; ++y) {
             std::uint8_t* p = pixels + (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)) * 4;
             for (int c = 0; c < 3; ++c) p[c] = static_cast<std::uint8_t>(static_cast<float>(p[c]) * factor);
@@ -158,8 +158,8 @@ void render(const State& s, HDC dc) {
     }
     drawText(dc, L"MiniDAW", {px(36), px(24), s.width, px(80)}, 40.0f * k, FW_SEMIBOLD, white, DT_SINGLELINE);
     drawText(dc, kVersion, {px(38), px(76), s.width, px(98)}, 14.0f * k, FW_NORMAL, soft, DT_SINGLELINE);
-    drawText(dc, kAboutText, {px(38), px(112), static_cast<int>(static_cast<float>(s.width) * 0.53f), s.height - px(44)},
-             13.0f * k, FW_NORMAL, RGB(226, 229, 236), DT_WORDBREAK);
+    drawText(dc, kAboutText, {px(38), px(108), static_cast<int>(static_cast<float>(s.width) * 0.5f), s.height - px(42)},
+             12.5f * k, FW_NORMAL, RGB(226, 229, 236), DT_WORDBREAK);
     drawText(dc, L"Klick oder Taste schließt das Fenster.", {px(38), s.height - px(36), s.width / 2, s.height - px(14)},
              12.0f * k, FW_NORMAL, RGB(140, 150, 166), DT_SINGLELINE | DT_VCENTER);
 }

@@ -11,6 +11,8 @@
 ProjectController::ProjectController(Engine& engine) : engine_(engine) {
     for (int t = 0; t < kProjectTracks; ++t)
         project_.tracks[static_cast<std::size_t>(t)].name = L"Spur " + std::to_wstring(t + 1);
+    for (int b = 0; b < kProjectBuses; ++b)
+        project_.buses[static_cast<std::size_t>(b)].name = L"Bus " + std::to_wstring(b + 1);
 }
 
 std::shared_ptr<AudioFile> ProjectController::openFile(const std::filesystem::path& path,
@@ -217,11 +219,26 @@ std::int64_t ProjectController::contentLength() const noexcept {
 void ProjectController::clearProject() {
     engine_.stop();
     engine_.locate(0);
+    // Alle Plugins entfernen.
+    for (int strip = 0; strip < kProjectStrips; ++strip) {
+        for (int s = 0; s < kSlotsPerStrip; ++s) {
+            const SlotModel* info = slot(strip, s);
+            if (!info || !info->used()) continue;
+            std::string ignored;
+            if (persistence_) persistence_->restore(strip, s, {}, {}, ignored);
+            else setPlugin(strip, s, nullptr, L"");
+        }
+    }
+    for (int b = 0; b < kProjectBuses; ++b) {
+        project_.buses[static_cast<std::size_t>(b)].name = L"Bus " + std::to_wstring(b + 1);
+        setBusGain(b, 1.0f);
+        setBusPan(b, 0.0f);
+        setBusMute(b, false);
+    }
     for (int t = 0; t < kProjectTracks; ++t) {
         TrackModel& track = project_.tracks[static_cast<std::size_t>(t)];
-        std::string ignored;
-        if (persistence_) persistence_->restore(t, {}, {}, ignored);
-        else setTrackPlugin(t, nullptr, L"");
+        for (int b = 0; b < kProjectBuses; ++b) setTrackSend(t, b, 0.0f);
+        setTrackOutput(t, -1);
         track.clips.clear();
         track.midiClips.clear();
         syncTrack(t);
@@ -261,10 +278,34 @@ bool ProjectController::saveProject(const std::filesystem::path& path, std::stri
         out.solo = track.solo;
         out.input = track.input;
         out.midiOutput = track.midiOutput;
-        if (persistence_ && persistence_->capture(t, out.plugin, out.pluginState)) out.pluginName = track.pluginName;
+        out.sends = track.sends;
+        out.output = track.output;
         for (const ClipModel& clip : track.clips)
             out.clips.push_back({clip.file->path, clip.start, clip.offset, clip.length});
         out.midiClips = track.midiClips;
+    }
+    // Plugins aller Kanalzuege mit ihren Einstellungen.
+    for (int strip = 0; strip < kProjectStrips && persistence_; ++strip) {
+        std::vector<SavedSlot>* list = strip < kProjectTracks ? &saved.tracks[static_cast<std::size_t>(strip)].slots
+                                       : strip < kMasterStripIndex
+                                           ? &saved.buses[static_cast<std::size_t>(strip - kFirstBusStrip)].slots
+                                           : &saved.masterSlots;
+        for (int s = 0; s < kSlotsPerStrip; ++s) {
+            const SlotModel* info = slot(strip, s);
+            if (!info || !info->used()) continue;
+            SavedSlot entry;
+            entry.slot = s;
+            entry.name = info->name;
+            if (persistence_->capture(strip, s, entry.file, entry.state)) list->push_back(std::move(entry));
+        }
+    }
+    for (int b = 0; b < kProjectBuses; ++b) {
+        const BusModel& bus = project_.buses[static_cast<std::size_t>(b)];
+        SavedBus& out = saved.buses[static_cast<std::size_t>(b)];
+        out.name = bus.name;
+        out.gain = bus.gain;
+        out.pan = bus.pan;
+        out.mute = bus.mute;
     }
     if (!writeProjectFile(path, saved, message)) return false;
     projectPath_ = path;
@@ -296,6 +337,8 @@ bool ProjectController::loadProject(const std::filesystem::path& path, std::stri
         setTrackSolo(t, in.solo);
         setTrackInput(t, in.input);
         setTrackMidiOutput(t, in.midiOutput);
+        setTrackOutput(t, in.output);
+        for (int b = 0; b < kProjectBuses; ++b) setTrackSend(t, b, in.sends[static_cast<std::size_t>(b)]);
 
         for (const SavedClip& savedClip : in.clips) {
             std::string error;
@@ -318,15 +361,30 @@ bool ProjectController::loadProject(const std::filesystem::path& path, std::stri
         track.midiClips = in.midiClips;
         syncMidi(t);
 
-        if (!in.plugin.empty()) {
+    }
+
+    // Plugins aller Kanalzuege.
+    const auto restoreSlots = [&](int strip, const std::vector<SavedSlot>& slots) {
+        for (const SavedSlot& entry : slots) {
+            if (entry.file.empty()) continue;
             std::string error;
-            if (!persistence_ || !persistence_->restore(t, in.plugin, in.pluginState, error)) {
+            if (!persistence_ || !persistence_->restore(strip, entry.slot, entry.file, entry.state, error)) {
                 ++failedPlugins;
                 if (firstProblem.empty())
-                    firstProblem = toUtf8(in.pluginName) + ": " + (error.empty() ? "Plugins sind hier nicht verf\u00FCgbar" : error);
+                    firstProblem = toUtf8(entry.name) + ": " + (error.empty() ? "Plugins sind hier nicht verf\u00FCgbar" : error);
             }
         }
+    };
+    for (int t = 0; t < kProjectTracks; ++t) restoreSlots(t, saved.tracks[static_cast<std::size_t>(t)].slots);
+    for (int b = 0; b < kProjectBuses; ++b) {
+        const SavedBus& in = saved.buses[static_cast<std::size_t>(b)];
+        if (!in.name.empty()) project_.buses[static_cast<std::size_t>(b)].name = in.name;
+        setBusGain(b, in.gain);
+        setBusPan(b, in.pan);
+        setBusMute(b, in.mute);
+        restoreSlots(kFirstBusStrip + b, in.slots);
     }
+    restoreSlots(kMasterStripIndex, saved.masterSlots);
 
     projectPath_ = path;
     modified_ = false;
@@ -362,24 +420,77 @@ void ProjectController::setTrackMidiOutput(int track, int output) {
     engine_.setTrackMidiOutput(track, output);
 }
 
-void ProjectController::setTrackPlugin(int track, std::shared_ptr<AudioPlugin> plugin, std::wstring name) {
-    if (!validTrack(track)) return;
-    auto& slot = plugins_[static_cast<std::size_t>(track)];
-    if (!engine_.setTrackPlugin(track, plugin.get())) return;
+SlotArray* ProjectController::slotsOf(int strip) noexcept {
+    if (strip >= 0 && strip < kProjectTracks) return &project_.tracks[static_cast<std::size_t>(strip)].slots;
+    if (strip >= kFirstBusStrip && strip < kMasterStripIndex)
+        return &project_.buses[static_cast<std::size_t>(strip - kFirstBusStrip)].slots;
+    if (strip == kMasterStripIndex) return &project_.masterSlots;
+    return nullptr;
+}
+
+const SlotModel* ProjectController::slot(int strip, int slot) const noexcept {
+    if (slot < 0 || slot >= kSlotsPerStrip) return nullptr;
+    const SlotArray* slots = const_cast<ProjectController*>(this)->slotsOf(strip);
+    return slots ? &(*slots)[static_cast<std::size_t>(slot)] : nullptr;
+}
+
+void ProjectController::setPlugin(int strip, int slot, std::shared_ptr<AudioPlugin> plugin, std::wstring name) {
+    SlotArray* slots = slotsOf(strip);
+    if (!slots || slot < 0 || slot >= kSlotsPerStrip) return;
+    if (!engine_.setPlugin(strip, slot, plugin.get())) return;
     modified_ = true;
-    if (slot) retiringPlugins_.push_back(std::move(slot));
-    slot = std::move(plugin);
-    TrackModel& model = project_.tracks[static_cast<std::size_t>(track)];
-    model.pluginName = slot ? std::move(name) : std::wstring();
-    model.pluginIsInstrument = slot && slot->isInstrument();
+    auto& owner = plugins_[static_cast<std::size_t>(strip)][static_cast<std::size_t>(slot)];
+    if (owner) retiringPlugins_.push_back(std::move(owner));
+    owner = std::move(plugin);
+    SlotModel& model = (*slots)[static_cast<std::size_t>(slot)];
+    model.name = owner ? std::move(name) : std::wstring();
+    if (owner && model.name.empty()) model.name = L"Plugin";
+    model.instrument = owner && owner->isInstrument();
+}
+
+void ProjectController::setTrackSend(int track, int bus, float level) {
+    if (!validTrack(track) || bus < 0 || bus >= kProjectBuses) return;
+    level = std::clamp(level, 0.0f, 4.0f);
+    modified_ = true;
+    project_.tracks[static_cast<std::size_t>(track)].sends[static_cast<std::size_t>(bus)] = level;
+    engine_.setTrackSend(track, bus, level);
+}
+
+void ProjectController::setTrackOutput(int track, int bus) {
+    if (!validTrack(track) || bus < -1 || bus >= kProjectBuses) return;
+    modified_ = true;
+    project_.tracks[static_cast<std::size_t>(track)].output = bus;
+    engine_.setTrackOutput(track, bus);
+}
+
+void ProjectController::setBusGain(int bus, float gain) {
+    if (bus < 0 || bus >= kProjectBuses) return;
+    modified_ = true;
+    project_.buses[static_cast<std::size_t>(bus)].gain = std::max(0.0f, gain);
+    engine_.setBusGain(bus, gain);
+}
+
+void ProjectController::setBusPan(int bus, float pan) {
+    if (bus < 0 || bus >= kProjectBuses) return;
+    pan = std::clamp(pan, -1.0f, 1.0f);
+    modified_ = true;
+    project_.buses[static_cast<std::size_t>(bus)].pan = pan;
+    engine_.setBusPan(bus, pan);
+}
+
+void ProjectController::setBusMute(int bus, bool mute) {
+    if (bus < 0 || bus >= kProjectBuses) return;
+    modified_ = true;
+    project_.buses[static_cast<std::size_t>(bus)].mute = mute;
+    engine_.setBusMute(bus, mute);
 }
 
 void ProjectController::releasePlugins() {
-    for (auto& track : project_.tracks) {
-        track.pluginName.clear();
-        track.pluginIsInstrument = false;
-    }
-    for (auto& slot : plugins_) slot.reset();
+    for (int strip = 0; strip < kProjectStrips; ++strip)
+        if (SlotArray* slots = slotsOf(strip))
+            for (auto& slot : *slots) slot = {};
+    for (auto& strip : plugins_)
+        for (auto& owner : strip) owner.reset();
     retiringPlugins_.clear();
 }
 

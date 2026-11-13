@@ -41,13 +41,13 @@ public:
     // --- ui::PluginHost ---
     std::vector<std::wstring> pluginNames() override;
     std::wstring pluginFolder() override { return vst3::pluginFolder().wstring(); }
-    bool load(int track, int index, std::wstring& error) override;
-    void unload(int track) override;
-    bool openEditor(int track, std::wstring& error) override;
+    bool load(int strip, int slot, int index, std::wstring& error) override;
+    void unload(int strip, int slot) override;
+    bool openEditor(int strip, int slot, std::wstring& error) override;
 
     // --- PluginPersistence (Projekt speichern und laden) ---
-    bool capture(int track, std::filesystem::path& file, std::vector<char>& state) override;
-    bool restore(int track, const std::filesystem::path& file, const std::vector<char>& state,
+    bool capture(int strip, int slot, std::filesystem::path& file, std::vector<char>& state) override;
+    bool restore(int strip, int slot, const std::filesystem::path& file, const std::vector<char>& state,
                  std::string& error) override;
 
 private:
@@ -56,14 +56,15 @@ private:
         std::shared_ptr<Vst3Plugin> plugin;
         std::filesystem::path path;            // Datei, aus der das Plugin stammt
     };
-    void install(int track, std::shared_ptr<Vst3Plugin> plugin, const std::filesystem::path& path);
+    Slot* find(int strip, int slot);
+    void install(int strip, int slot, std::shared_ptr<Vst3Plugin> plugin, const std::filesystem::path& path);
 
     ProjectController& controller_;
     double sampleRate_;
     int maxFrames_;
     HWND owner_ = nullptr;
     std::vector<PluginEntry> entries_;
-    std::array<Slot, kProjectTracks> slots_;
+    std::array<std::array<Slot, kSlotsPerStrip>, kProjectStrips> slots_;
 };
 
 }  // namespace vst3

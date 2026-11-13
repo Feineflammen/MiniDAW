@@ -91,6 +91,8 @@ bool MainWindow::create(HINSTANCE instance, int showCommand, std::string& error)
     AppendMenuW(edit, MF_STRING, kEditNudgeRightBig, L"Clip 10 ms sp\u00E4ter\tUmschalt+\u2192");
     AppendMenuW(edit, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(edit, MF_STRING, kEditDelete, L"Clip &l\u00F6schen\tEntf");
+    const HMENU view = CreatePopupMenu();
+    AppendMenuW(view, MF_STRING, kViewMixer, L"&Mischpult ein/aus\tF3");
     audioMenu_ = CreatePopupMenu();
     AppendMenuW(audioMenu_, MF_STRING | MF_GRAYED, 0, L"(wird beim \u00D6ffnen gef\u00FCllt)");
     const HMENU tools = CreatePopupMenu();
@@ -98,6 +100,7 @@ bool MainWindow::create(HINSTANCE instance, int showCommand, std::string& error)
     const HMENU bar = CreateMenu();
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"&Datei");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(edit), L"&Bearbeiten");
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(view), L"&Ansicht");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(audioMenu_), L"&Audio");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(tools), L"E&xtras");
 
@@ -163,6 +166,11 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
                 static const Key kKeys[] = {Key::Split, Key::NudgeLeft, Key::NudgeRight, Key::NudgeLeftBig,
                                             Key::NudgeRightBig, Key::Delete};
                 view_.key(kKeys[LOWORD(wParam) - kEditSplit]);
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return 0;
+            }
+            if (HIWORD(wParam) == 0 && LOWORD(wParam) == kViewMixer) {
+                view_.key(Key::ToggleMixer);
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 return 0;
             }
@@ -285,6 +293,7 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
                 return 0;
             }
             if (wParam == VK_SPACE) view_.key(Key::Space);
+            else if (wParam == VK_F3) view_.key(Key::ToggleMixer);
             else if (wParam == VK_HOME) view_.key(Key::Home);
             else if (wParam == VK_DELETE) view_.key(Key::Delete);
             else if (wParam == VK_ESCAPE) view_.key(Key::Escape);

@@ -9,37 +9,47 @@ namespace {
 // Die Meldungen des Hosts sind reines ASCII.
 std::wstring widen(const std::string& text) { return std::wstring(text.begin(), text.end()); }
 
-bool validTrack(int track) { return track >= 0 && track < kProjectTracks; }
-
 }  // namespace
+
+// Platz 0 (Instrument) gibt es nur auf Spuren.
+PluginManager::Slot* PluginManager::find(int strip, int slot) {
+    if (strip < 0 || strip >= kProjectStrips || slot < 0 || slot >= kSlotsPerStrip) return nullptr;
+    if (slot == 0 && strip >= kProjectTracks) return nullptr;
+    return &slots_[static_cast<std::size_t>(strip)][static_cast<std::size_t>(slot)];
+}
 
 int PluginManager::setAudioFormat(double sampleRate, int maxFrames) {
     if (sampleRate == sampleRate_ && maxFrames <= maxFrames_) return 0;
     sampleRate_ = sampleRate;
     maxFrames_ = std::max(maxFrames, maxFrames_);
     int failed = 0;
-    for (int t = 0; t < kProjectTracks; ++t) {
-        std::filesystem::path file;
-        std::vector<char> state;
-        if (!capture(t, file, state)) continue;
-        std::string error;
-        if (!restore(t, file, state, error)) {
-            unload(t);
-            ++failed;
+    for (int strip = 0; strip < kProjectStrips; ++strip) {
+        for (int s = 0; s < kSlotsPerStrip; ++s) {
+            std::filesystem::path file;
+            std::vector<char> state;
+            if (!capture(strip, s, file, state)) continue;
+            std::string error;
+            if (!restore(strip, s, file, state, error)) {
+                unload(strip, s);
+                ++failed;
+            }
         }
     }
     return failed;
 }
 
 void PluginManager::idle() {
-    for (auto& slot : slots_)
-        if (slot.plugin) slot.plugin->idle();
+    for (auto& strip : slots_)
+        for (auto& slot : strip)
+            if (slot.plugin) slot.plugin->idle();
 }
 
 void PluginManager::shutdown() {
-    for (auto& slot : slots_) {
-        slot.window.reset();
-        slot.plugin.reset();
+    for (auto& strip : slots_) {
+        for (auto& slot : strip) {
+            slot.window.reset();
+            slot.plugin.reset();
+        }
     }
 }
 
@@ -51,79 +61,83 @@ std::vector<std::wstring> PluginManager::pluginNames() {
     return names;
 }
 
-bool PluginManager::load(int track, int index, std::wstring& error) {
-    if (!validTrack(track) || index < 0 || index >= static_cast<int>(entries_.size())) {
-        error = L"Ungültige Auswahl";
+bool PluginManager::load(int strip, int slot, int index, std::wstring& error) {
+    if (!find(strip, slot) || index < 0 || index >= static_cast<int>(entries_.size())) {
+        error = L"Ung\u00FCltige Auswahl";
         return false;
     }
-
+    const PluginEntry& entry = entries_[static_cast<std::size_t>(index)];
     std::string reason;
-    std::shared_ptr<Vst3Plugin> plugin = loadPlugin(entries_[static_cast<std::size_t>(index)].path,
-                                                    sampleRate_, maxFrames_, reason);
+    std::shared_ptr<Vst3Plugin> plugin = loadPlugin(entry.path, sampleRate_, maxFrames_, reason);
     if (!plugin) {
-        error = entries_[static_cast<std::size_t>(index)].name + L": " + widen(reason);
+        error = entry.name + L": " + widen(reason);
         return false;
     }
-
-    install(track, std::move(plugin), entries_[static_cast<std::size_t>(index)].path);
+    install(strip, slot, std::move(plugin), entry.path);
     return true;
 }
 
-// Setzt ein fertig geladenes Plugin auf die Spur.
-void PluginManager::install(int track, std::shared_ptr<Vst3Plugin> plugin, const std::filesystem::path& path) {
+// Setzt ein fertig geladenes Plugin auf den Platz.
+void PluginManager::install(int strip, int slot, std::shared_ptr<Vst3Plugin> plugin,
+                            const std::filesystem::path& path) {
     // Erst das Fenster des bisherigen Plugins schliessen, dann austauschen. Das
     // alte Plugin haelt der ProjectController, bis der Audio-Thread es loslaesst.
-    Slot& slot = slots_[static_cast<std::size_t>(track)];
-    slot.window.reset();
+    Slot* target = find(strip, slot);
+    if (!target) return;
+    target->window.reset();
     const std::wstring name = plugin->name();
-    controller_.setTrackPlugin(track, plugin, name);
-    slot.plugin = std::move(plugin);
-    slot.path = path;
+    controller_.setPlugin(strip, slot, plugin, name);
+    target->plugin = std::move(plugin);
+    target->path = path;
 }
 
-bool PluginManager::capture(int track, std::filesystem::path& file, std::vector<char>& state) {
-    if (!validTrack(track)) return false;
-    Slot& slot = slots_[static_cast<std::size_t>(track)];
-    if (!slot.plugin) return false;
-    file = slot.path;
-    slot.plugin->saveState(state);  // liefert das Plugin nichts, wird es ohne Einstellungen gespeichert
+bool PluginManager::capture(int strip, int slot, std::filesystem::path& file, std::vector<char>& state) {
+    Slot* target = find(strip, slot);
+    if (!target || !target->plugin) return false;
+    file = target->path;
+    target->plugin->saveState(state);  // liefert das Plugin nichts, wird es ohne Einstellungen gespeichert
     return true;
 }
 
-bool PluginManager::restore(int track, const std::filesystem::path& file, const std::vector<char>& state,
+bool PluginManager::restore(int strip, int slot, const std::filesystem::path& file, const std::vector<char>& state,
                             std::string& error) {
-    if (!validTrack(track)) return false;
     if (file.empty()) {
-        unload(track);
+        unload(strip, slot);
         return true;
     }
     std::shared_ptr<Vst3Plugin> plugin = loadPlugin(file, sampleRate_, maxFrames_, error);
     if (!plugin) return false;
+    // Alte Projektdateien kennen keine Plaetze: Instrumente auf 0, Effekte auf 1.
+    if (slot < 0) slot = (plugin->isInstrument() && strip < kProjectTracks) ? 0 : 1;
+    if (!find(strip, slot)) {
+        error = "Ungueltiger Plugin-Platz";
+        return false;
+    }
     // Einstellungen setzen, bevor der Audio-Thread das Plugin bekommt.
     if (!state.empty()) plugin->loadState(state);
-    install(track, std::move(plugin), file);
+    install(strip, slot, std::move(plugin), file);
     return true;
 }
 
-void PluginManager::unload(int track) {
-    if (!validTrack(track)) return;
-    Slot& slot = slots_[static_cast<std::size_t>(track)];
-    slot.window.reset();
-    controller_.setTrackPlugin(track, nullptr, L"");
-    slot.plugin.reset();
-    slot.path.clear();
+void PluginManager::unload(int strip, int slot) {
+    Slot* target = find(strip, slot);
+    if (!target) return;
+    target->window.reset();
+    controller_.setPlugin(strip, slot, nullptr, L"");
+    target->plugin.reset();
+    target->path.clear();
 }
 
-bool PluginManager::openEditor(int track, std::wstring& error) {
-    if (!validTrack(track)) return false;
-    Slot& slot = slots_[static_cast<std::size_t>(track)];
-    if (!slot.plugin) {
-        error = L"Auf dieser Spur ist kein Plugin geladen.";
+bool PluginManager::openEditor(int strip, int slot, std::wstring& error) {
+    Slot* target = find(strip, slot);
+    if (!target) return false;
+    if (!target->plugin) {
+        error = L"Auf diesem Platz ist kein Plugin geladen.";
         return false;
     }
-    if (!slot.window) slot.window = std::make_unique<PluginWindow>(*slot.plugin, owner_);
+    if (!target->window) target->window = std::make_unique<PluginWindow>(*target->plugin, owner_);
     std::string reason;
-    if (!slot.window->open(reason)) {
+    if (!target->window->open(reason)) {
         error = widen(reason);
         return false;
     }

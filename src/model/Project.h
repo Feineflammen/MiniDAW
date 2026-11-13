@@ -14,6 +14,22 @@
 // den ProjectController.
 
 inline constexpr int kProjectTracks = 16;
+inline constexpr int kProjectBuses = 4;
+inline constexpr int kProjectInserts = 4;
+// Plugin-Plaetze je Kanalzug: 0 = Instrument (nur Spuren), 1..4 = Effekte.
+inline constexpr int kSlotsPerStrip = 1 + kProjectInserts;
+// Kanalzuege: Spuren 0..15, Busse 16..19, Master 20 (wie in der Engine).
+inline constexpr int kFirstBusStrip = kProjectTracks;
+inline constexpr int kMasterStripIndex = kProjectTracks + kProjectBuses;
+inline constexpr int kProjectStrips = kMasterStripIndex + 1;
+
+// Was auf einem Plugin-Platz liegt (fuer die Anzeige).
+struct SlotModel {
+    std::wstring name;  // leer = Platz frei
+    bool instrument = false;
+    bool used() const noexcept { return !name.empty(); }
+};
+using SlotArray = std::array<SlotModel, kSlotsPerStrip>;
 
 // Eine geladene Audiodatei mit ihren Uebersichtsdaten. Mehrere Clips koennen
 // dieselbe Datei benutzen.
@@ -61,14 +77,25 @@ struct TrackModel {
     bool solo = false;
     int input = kTrackInputAudio;
     int midiOutput = kTrackOutputSynth;
-    std::wstring pluginName;       // Name des geladenen Plugins, leer = keins
-    bool pluginIsInstrument = false;
+    SlotArray slots;                           // Instrument und Effekte
+    std::array<float, kProjectBuses> sends{};  // Send-Pegel an die Busse, linear
+    int output = -1;                           // -1 = Master, 0..3 = Bus
     std::vector<ClipModel> clips;
     std::vector<MidiClipModel> midiClips;
 };
 
+struct BusModel {
+    std::wstring name;
+    float gain = 1.0f;
+    float pan = 0.0f;
+    bool mute = false;
+    SlotArray slots;  // Platz 0 bleibt leer
+};
+
 struct Project {
     std::array<TrackModel, kProjectTracks> tracks;
+    std::array<BusModel, kProjectBuses> buses;
+    SlotArray masterSlots;  // Platz 0 bleibt leer
     float masterGain = 1.0f;
     double bpm = 120.0;  // Tempo fuer Raster und Metronom, Taktart ist 4/4
 };

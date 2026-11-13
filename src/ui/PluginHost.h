@@ -16,13 +16,16 @@ public:
     // Ordner, in dem gesucht wird, fuer Hinweise an den Benutzer.
     virtual std::wstring pluginFolder() = 0;
 
+    // Plaetze werden ueber Kanalzug (strip: 0..15 Spuren, 16..19 Busse,
+    // 20 Master) und Platz (slot: 0 Instrument, 1..4 Effekte) angesprochen.
+
     // Laedt das Plugin mit diesem Index (aus der zuletzt gelieferten Liste) auf
-    // die Spur. Bei false steht der Grund in error.
-    virtual bool load(int track, int index, std::wstring& error) = 0;
-    // Entfernt das Plugin der Spur.
-    virtual void unload(int track) = 0;
-    // Oeffnet das Fenster des Plugins der Spur.
-    virtual bool openEditor(int track, std::wstring& error) = 0;
+    // den Platz. Bei false steht der Grund in error.
+    virtual bool load(int strip, int slot, int index, std::wstring& error) = 0;
+    // Leert den Platz.
+    virtual void unload(int strip, int slot) = 0;
+    // Oeffnet das Fenster des Plugins auf dem Platz.
+    virtual bool openEditor(int strip, int slot, std::wstring& error) = 0;
 };
 
 }  // namespace ui

@@ -30,6 +30,9 @@ public:
     // Instrument: erzeugt Klang aus MIDI. Sonst Effekt: bearbeitet den Klang der Spur.
     virtual bool isInstrument() const noexcept = 0;
 
+    // Wie viele Frames das Plugin den Klang verzoegert (fuer den Latenzausgleich).
+    virtual int latencyFrames() const noexcept { return 0; }
+
     // Audio-Thread. left/right enthalten den Eingang (beim Instrument Stille)
     // und werden mit dem Ausgang ueberschrieben. Die Ereignisse sind nach
     // offset geordnet. Darf weder warten noch Speicher anfordern.

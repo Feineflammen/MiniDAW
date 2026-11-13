@@ -12,16 +12,18 @@
 #include <string>
 #include <vector>
 
-// Sichert und laedt die Plugins der Spuren. Der ProjectController kennt keine
-// Plugin-Technik; die Umsetzung liegt beim VST3-Teil.
+// Sichert und laedt die Plugins der Kanalzuege. Der ProjectController kennt
+// keine Plugin-Technik; die Umsetzung liegt beim VST3-Teil.
+// strip: 0..15 Spuren, 16..19 Busse, 20 Master; slot: 0 Instrument, 1..4 Effekte.
 class PluginPersistence {
 public:
     virtual ~PluginPersistence() = default;
-    // Liefert Datei und Einstellungen des Plugins der Spur. false, wenn keins geladen ist.
-    virtual bool capture(int track, std::filesystem::path& file, std::vector<char>& state) = 0;
-    // Laedt das Plugin aus file auf die Spur und stellt seine Einstellungen her.
-    // Ein leerer Pfad entfernt das Plugin der Spur.
-    virtual bool restore(int track, const std::filesystem::path& file, const std::vector<char>& state,
+    // Liefert Datei und Einstellungen des Plugins auf diesem Platz. false, wenn er leer ist.
+    virtual bool capture(int strip, int slot, std::filesystem::path& file, std::vector<char>& state) = 0;
+    // Laedt das Plugin aus file auf den Platz und stellt seine Einstellungen her.
+    // Ein leerer Pfad leert den Platz. slot -1 (alte Projektdateien): ein
+    // Instrument kommt auf Platz 0, ein Effekt auf Platz 1.
+    virtual bool restore(int strip, int slot, const std::filesystem::path& file, const std::vector<char>& state,
                          std::string& error) = 0;
 };
 
@@ -89,6 +91,13 @@ public:
     void setTrackSolo(int track, bool solo);
     void setMasterGain(float gain);
 
+    // Mixer: Sends nach dem Fader (linear), Ausgang (-1 = Master, 0..3 = Bus), Busse.
+    void setTrackSend(int track, int bus, float level);
+    void setTrackOutput(int track, int bus);
+    void setBusGain(int bus, float gain);
+    void setBusPan(int bus, float pan);
+    void setBusMute(int bus, bool mute);
+
     // Eingang (kTrackInputAudio, kTrackInputMidiAll oder Kanal 0..15) und
     // MIDI-Ausgang (kTrackOutputSynth oder Kanal 0..15) einer Spur.
     void setTrackInput(int track, int input);
@@ -98,7 +107,9 @@ public:
     // MIDI der Spur anstelle des eingebauten Synthesizers, ein Effekt bearbeitet
     // ihren Klang. Das bisherige Plugin bleibt am Leben, bis der Audio-Thread es
     // nicht mehr benutzt (siehe poll()).
-    void setTrackPlugin(int track, std::shared_ptr<AudioPlugin> plugin, std::wstring name);
+    void setPlugin(int strip, int slot, std::shared_ptr<AudioPlugin> plugin, std::wstring name);
+    // Anzeige-Daten eines Platzes, nullptr bei ungueltiger Angabe.
+    const SlotModel* slot(int strip, int slot) const noexcept;
     // Vor dem Beenden rufen, nachdem der Audio-Thread gestoppt ist: gibt alle Plugins frei.
     void releasePlugins();
 
@@ -183,7 +194,8 @@ private:
     bool modified_ = false;
     double sampleRate_ = 44100.0;
     std::vector<std::weak_ptr<AudioFile>> files_;
-    std::array<std::shared_ptr<AudioPlugin>, kProjectTracks> plugins_;
+    SlotArray* slotsOf(int strip) noexcept;
+    std::array<std::array<std::shared_ptr<AudioPlugin>, kSlotsPerStrip>, kProjectStrips> plugins_;
     std::vector<std::shared_ptr<AudioPlugin>> retiringPlugins_;  // warten auf Rueckmeldung der Engine
 
     int inputChannels_ = 0;

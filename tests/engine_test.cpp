@@ -17,6 +17,7 @@
 #include <sstream>
 #include <functional>
 #include <string>
+#include <map>
 #include <memory>
 #include <thread>
 #include <tuple>
@@ -1338,14 +1339,15 @@ void testControllerPlugins() {
         ProjectController controller(*rig.engine);
         std::string message;
 
-        controller.setTrackPlugin(2, std::make_shared<Counted>(true), L"Erstes");
-        CHECK(controller.project().tracks[2].pluginName == L"Erstes");
-        CHECK(controller.project().tracks[2].pluginIsInstrument);
+        controller.setPlugin(2, 0, std::make_shared<Counted>(true), L"Erstes");
+        CHECK(controller.slot(2, 0)->name == L"Erstes");
+        CHECK(controller.slot(2, 0)->instrument);
+        CHECK(controller.slot(99, 0) == nullptr && controller.slot(2, 9) == nullptr);
         rig.render();
 
         // Austausch: Das alte Plugin lebt, bis die Engine es zurueckmeldet.
-        controller.setTrackPlugin(2, std::make_shared<Counted>(false), L"Zweites");
-        CHECK(!controller.project().tracks[2].pluginIsInstrument);
+        controller.setPlugin(2, 0, std::make_shared<Counted>(false), L"Zweites");
+        CHECK(!controller.slot(2, 0)->instrument);
         CHECK(Counted::alive == 2);
         controller.poll(message);
         CHECK(Counted::alive == 2);  // der Audio-Thread koennte es noch benutzen
@@ -1354,18 +1356,24 @@ void testControllerPlugins() {
         CHECK(Counted::alive == 1);
 
         // Entfernen.
-        controller.setTrackPlugin(2, nullptr, L"egal");
-        CHECK(controller.project().tracks[2].pluginName.empty());
+        controller.setPlugin(2, 0, nullptr, L"egal");
+        CHECK(!controller.slot(2, 0)->used());
         rig.render();
         controller.poll(message);
         CHECK(Counted::alive == 0);
 
         // Was beim Beenden noch geladen ist, gibt releasePlugins() frei.
-        controller.setTrackPlugin(5, std::make_shared<Counted>(true), L"Rest");
+        controller.setPlugin(5, 0, std::make_shared<Counted>(true), L"Rest");
+        controller.setPlugin(kFirstBusStrip + 2, 3, std::make_shared<Counted>(false), L"Hall");
+        controller.setPlugin(kMasterStripIndex, 1, std::make_shared<Counted>(false), L"Limiter");
+        controller.setPlugin(kFirstBusStrip, 0, std::make_shared<Counted>(true), L"geht nicht");  // kein Instrument auf Bussen
+        CHECK(!controller.slot(kFirstBusStrip, 0)->used());
+        CHECK(controller.slot(kMasterStripIndex, 1)->name == L"Limiter");
         rig.render();
-        CHECK(Counted::alive == 1);
+        CHECK(Counted::alive == 3);
         controller.releasePlugins();
         CHECK(Counted::alive == 0);
+        CHECK(!controller.slot(kMasterStripIndex, 1)->used());
     }
     CHECK(Counted::alive == 0);
 }
@@ -1378,22 +1386,34 @@ struct FakePersistence final : PluginPersistence {
         std::filesystem::path file;
         std::vector<char> state;
     };
-    std::array<Entry, kProjectTracks> slots;
+    ProjectController* controller = nullptr;  // bekommt die "geladenen" Plugins wie beim echten Host
+    std::map<int, Entry> slots;               // Schluessel: strip * 8 + slot
     int restoreCalls = 0;
     bool failRestore = false;
 
-    bool capture(int track, std::filesystem::path& file, std::vector<char>& state) override {
-        const Entry& e = slots[static_cast<std::size_t>(track)];
-        if (e.file.empty()) return false;
-        file = e.file;
-        state = e.state;
+    static int key(int strip, int slot) { return strip * 8 + slot; }
+    bool has(int strip, int slot) const { return slots.count(key(strip, slot)) != 0; }
+    const Entry& at(int strip, int slot) const { return slots.at(key(strip, slot)); }
+
+    bool capture(int strip, int slot, std::filesystem::path& file, std::vector<char>& state) override {
+        const auto it = slots.find(key(strip, slot));
+        if (it == slots.end()) return false;
+        file = it->second.file;
+        state = it->second.state;
         return true;
     }
-    bool restore(int track, const std::filesystem::path& file, const std::vector<char>& state,
+    bool restore(int strip, int slot, const std::filesystem::path& file, const std::vector<char>& state,
                  std::string& error) override {
-        if (!file.empty()) ++restoreCalls;
-        if (failRestore && !file.empty()) { error = "Datei fehlt"; return false; }
-        slots[static_cast<std::size_t>(track)] = {file, state};
+        if (slot < 0) slot = 0;  // altes Format: hier immer ein Instrument
+        if (file.empty()) {
+            slots.erase(key(strip, slot));
+            if (controller) controller->setPlugin(strip, slot, nullptr, L"");
+            return true;
+        }
+        ++restoreCalls;
+        if (failRestore) { error = "Datei fehlt"; return false; }
+        slots[key(strip, slot)] = {file, state};
+        if (controller) controller->setPlugin(strip, slot, std::make_shared<Counted>(slot == 0), file.stem().wstring());
         return true;
     }
 };
@@ -1437,7 +1457,16 @@ void testProjectFile() {
         controller.setTrackInput(6, kTrackInputMidiAll);
         controller.setMasterGain(0.8f);
         controller.setBpm(97.0);
-        plugins.slots[5] = {"C:/Plugins/Piano.vst3", {1, 2, 3, 0, static_cast<char>(0xFF)}};
+        plugins.controller = &controller;
+        std::string error;
+        CHECK(plugins.restore(5, 0, "C:/Plugins/Piano.vst3", {1, 2, 3, 0, static_cast<char>(0xFF)}, error));
+        CHECK(plugins.restore(kFirstBusStrip + 1, 2, "C:/Plugins/Hall.vst3", {9}, error));
+        CHECK(plugins.restore(kMasterStripIndex, 1, "C:/Plugins/Limiter.vst3", {}, error));
+        controller.setTrackSend(0, 1, 0.5f);
+        controller.setTrackOutput(2, 3);
+        controller.setBusGain(1, 0.7f);
+        controller.setBusPan(1, 0.25f);
+        controller.setBusMute(0, true);  // Bus 1 ist unbenutzt; Spur 3 laeuft ueber Bus 4
         CHECK(controller.modified());
         CHECK(controller.contentLength() == 96000 + 48000 || controller.contentLength() == 48000 + kSourceFrames);
 
@@ -1459,10 +1488,12 @@ void testProjectFile() {
         std::stringstream text;
         text << in.rdbuf();
         const std::string content = text.str();
-        CHECK(content.rfind("MiniDAW-Projekt 1", 0) == 0);
+        CHECK(content.rfind("MiniDAW-Projekt 2", 0) == 0);
         CHECK(content.find(" Audio/drin.wav\n") != std::string::npos);
         CHECK(content.find("tempo 97") != std::string::npos);
-        CHECK(content.find("pluginzustand 01020300ff") != std::string::npos);
+        CHECK(content.find("slotzustand 0 01020300ff") != std::string::npos);
+        CHECK(content.find("bus 2\n") != std::string::npos);
+        CHECK(content.find("masterkanal\n  slot 1 ") != std::string::npos);
     }
 
     // Laden in ein frisches Programm: Alles ist wieder da.
@@ -1471,6 +1502,7 @@ void testProjectFile() {
         ProjectController controller(*rig.engine);
         controller.setSampleRate(kRate);
         FakePersistence plugins;
+        plugins.controller = &controller;
         controller.setPluginPersistence(&plugins);
         controller.addClip(9, outside, 0, message);  // wird vom Laden ersetzt
 
@@ -1496,9 +1528,16 @@ void testProjectFile() {
             CHECK(m.name == L"Bass \u00FC" && m.start == 96000 && m.length == 48000);
             CHECK(m.notes.size() == 2 && m.notes[1].start == 24000 && m.notes[1].pitch == 43 && m.notes[1].velocity == 64);
         }
-        CHECK(plugins.restoreCalls == 1);
-        CHECK(plugins.slots[5].file == std::filesystem::path("C:/Plugins/Piano.vst3"));
-        CHECK(plugins.slots[5].state.size() == 5 && plugins.slots[5].state[4] == static_cast<char>(0xFF));
+        CHECK(plugins.restoreCalls == 3);
+        CHECK(plugins.has(5, 0) && plugins.at(5, 0).file == std::filesystem::path("C:/Plugins/Piano.vst3"));
+        CHECK(plugins.has(5, 0) && plugins.at(5, 0).state.size() == 5 && plugins.at(5, 0).state[4] == static_cast<char>(0xFF));
+        CHECK(plugins.has(kFirstBusStrip + 1, 2) && plugins.at(kFirstBusStrip + 1, 2).state == std::vector<char>{9});
+        CHECK(plugins.has(kMasterStripIndex, 1));
+        CHECK(controller.slot(5, 0)->used() && controller.slot(kMasterStripIndex, 1)->used());
+        CHECK(std::fabs(p.tracks[0].sends[1] - 0.5f) < 1e-6f && p.tracks[0].sends[0] == 0.0f);
+        CHECK(p.tracks[2].output == 3 && p.tracks[0].output == -1);
+        CHECK(std::fabs(p.buses[1].gain - 0.7f) < 1e-6f && std::fabs(p.buses[1].pan - 0.25f) < 1e-6f);
+        CHECK(p.buses[0].mute && !p.buses[3].mute && p.buses[1].name == L"Bus 2");
 
         // Das geladene Projekt klingt auch: Der Clip auf Spur 3 (solo) wird abgespielt.
         rig.service();
@@ -1523,7 +1562,20 @@ void testProjectFile() {
         controller.newProject();
         CHECK(controller.project().tracks[0].clips.empty() && controller.project().tracks[5].midiClips.empty());
         CHECK(controller.project().bpm == 120.0 && controller.projectPath().empty() && !controller.modified());
-        CHECK(plugins.slots[5].file.empty());
+        CHECK(plugins.slots.empty() && !controller.slot(5, 0)->used());
+        CHECK(controller.project().buses[0].mute == false && controller.project().tracks[2].output == -1);
+
+        // Altes Format (ein Plugin je Spur) wird weiter gelesen.
+        const auto old = folder / "alt.mdaw";
+        {
+            std::ofstream out(old);
+            out << "MiniDAW-Projekt 1\nsamplerate 48000\ntempo 100\nmaster 1\nspur 4\n  name Alt\n"
+                   "  plugin C:/Plugins/Alt.vst3\n  pluginname Alt\n  pluginzustand 0a0b\n";
+        }
+        CHECK(controller.loadProject(old, message));
+        CHECK(plugins.has(3, 0) && plugins.at(3, 0).state == (std::vector<char>{10, 11}));
+        CHECK(controller.project().tracks[3].name == L"Alt");
+        controller.newProject();
         while (!controller.peaksIdle()) std::this_thread::yield();
     }
 
@@ -1538,7 +1590,7 @@ void testProjectFile() {
         controller.setPluginPersistence(&plugins);
         CHECK(controller.loadProject(projectPath, message));
         CHECK(message.find("1 Audiodatei") != std::string::npos);
-        CHECK(message.find("1 Plugin") != std::string::npos);
+        CHECK(message.find("3 Plugin") != std::string::npos);
         CHECK(controller.project().tracks[0].clips.size() == 1);
         CHECK(controller.project().tracks[2].clips.empty());
         while (!controller.peaksIdle()) std::this_thread::yield();
@@ -1817,6 +1869,180 @@ void testClipEditing() {
     while (!controller.peaksIdle()) std::this_thread::yield();
 }
 
+// --- Mixer: Effekt-Plaetze, Sends, Busse, Latenzausgleich -------------------
+
+// Instrument, das immer einen festen Wert ausgibt.
+struct ConstantSource final : AudioPlugin {
+    float value;
+    explicit ConstantSource(float v) : value(v) {}
+    bool isInstrument() const noexcept override { return true; }
+    void process(float* l, float* r, int n, const PluginMidiEvent*, int, const PluginTransport&) noexcept override {
+        for (int i = 0; i < n; ++i) { l[i] = value; r[i] = value; }
+    }
+};
+
+// Effekt: x * factor + offset.
+struct Affine final : AudioPlugin {
+    float factor, offset;
+    Affine(float f, float o) : factor(f), offset(o) {}
+    bool isInstrument() const noexcept override { return false; }
+    void process(float* l, float* r, int n, const PluginMidiEvent*, int, const PluginTransport&) noexcept override {
+        for (int i = 0; i < n; ++i) { l[i] = l[i] * factor + offset; r[i] = r[i] * factor + offset; }
+    }
+};
+
+// Effekt, der den Klang um latency Frames verzoegert und das auch meldet.
+struct Delayer final : AudioPlugin {
+    int latency;
+    std::vector<float> bl, br;
+    std::size_t pos = 0;
+    explicit Delayer(int frames) : latency(frames), bl(static_cast<std::size_t>(frames), 0.0f), br(bl) {}
+    bool isInstrument() const noexcept override { return false; }
+    int latencyFrames() const noexcept override { return latency; }
+    void process(float* l, float* r, int n, const PluginMidiEvent*, int, const PluginTransport&) noexcept override {
+        for (int i = 0; i < n; ++i) {
+            const float a = bl[pos], b = br[pos];
+            bl[pos] = l[i];
+            br[pos] = r[i];
+            l[i] = a;
+            r[i] = b;
+            pos = (pos + 1) % bl.size();
+        }
+    }
+};
+
+void testMixerRouting() {
+    Rig rig;
+    ConstantSource source(0.5f);
+    Affine doubler(2.0f, 0.0f), plusTenth(1.0f, 0.1f), half(0.5f, 0.0f);
+    Engine& e = *rig.engine;
+    const auto settle = [&] { for (int b = 0; b < 3; ++b) rig.render(); return rig.render(); };
+
+    CHECK(e.setPlugin(0, Engine::kInstrumentSlot, &source));
+    CHECK(e.setTrackPan(0, -1.0f));  // links mit Verstaerkung 1, rechts 0
+    auto [pl, pr] = settle();
+    CHECK(std::fabs(pl - 0.5f) < 1e-6f && pr == 0.0f);
+
+    // Effekte in Reihenfolge: (0.5 * 2) + 0.1 = 1.1, nicht (0.5 + 0.1) * 2 = 1.2.
+    CHECK(e.setPlugin(0, 1, &doubler));
+    CHECK(e.setPlugin(0, 2, &plusTenth));
+    std::tie(pl, pr) = settle();
+    CHECK(std::fabs(pl - 1.1f) < 1e-5f);
+    CHECK(e.setPlugin(0, 1, nullptr) && e.setPlugin(0, 2, nullptr));
+    CHECK(!e.setPlugin(Engine::kFirstBus, Engine::kInstrumentSlot, &source));  // Instrument nur auf Spuren
+    CHECK(!e.setPlugin(Engine::kNumStrips, 1, &half));
+
+    // Send an Bus 1 (nach dem Fader), Bus ganz links: 0.5 + 0.5 * 0.5 = 0.75.
+    CHECK(e.setTrackSend(0, 0, 0.5f));
+    CHECK(e.setBusPan(0, -1.0f));
+    std::tie(pl, pr) = settle();
+    CHECK(std::fabs(pl - 0.75f) < 1e-5f);
+    CHECK(e.takeBusPeak(0) > 0.2f && e.takeBusPeak(1) == 0.0f);
+
+    CHECK(e.setBusMute(0, true));
+    std::tie(pl, pr) = settle();
+    CHECK(std::fabs(pl - 0.5f) < 1e-5f);
+    CHECK(e.setBusMute(0, false));
+    CHECK(e.setBusGain(0, 2.0f));  // 0.5 + 0.25 * 2
+    std::tie(pl, pr) = settle();
+    CHECK(std::fabs(pl - 1.0f) < 1e-5f);
+    CHECK(e.setBusGain(0, 1.0f));
+
+    // Spur stumm: auch die Sends schweigen.
+    CHECK(e.setTrackMute(0, true));
+    std::tie(pl, pr) = settle();
+    CHECK(pl == 0.0f && pr == 0.0f);
+    CHECK(e.setTrackMute(0, false));
+    CHECK(e.setTrackSend(0, 0, 0.0f));
+
+    // Ausgang auf Bus 2 statt Master: Was ankommt, laeuft durch dessen Fader.
+    CHECK(e.setTrackOutput(0, 1));
+    CHECK(e.setBusPan(1, -1.0f));
+    CHECK(e.setBusGain(1, 0.5f));
+    std::tie(pl, pr) = settle();
+    CHECK(std::fabs(pl - 0.25f) < 1e-5f && pr == 0.0f);
+    CHECK(e.takeBusPeak(1) > 0.2f);
+    CHECK(e.setBusGain(1, 1.0f));
+    CHECK(e.setTrackOutput(0, -1));
+    CHECK(!e.setTrackOutput(0, 4));
+
+    // Master-Effekt.
+    CHECK(e.setPlugin(Engine::kMasterStrip, 1, &half));
+    std::tie(pl, pr) = settle();
+    CHECK(std::fabs(pl - 0.25f) < 1e-5f);
+
+    // Alles entfernen und zurueckgemeldete Plugins einsammeln.
+    e.setPlugin(Engine::kMasterStrip, 1, nullptr);
+    e.setPlugin(0, Engine::kInstrumentSlot, nullptr);
+    rig.render();
+    int released = 0;
+    AudioPlugin* p = nullptr;
+    while (e.popReleasedPlugin(p)) ++released;
+    CHECK(released == 4);  // Verdoppler, +0.1, Haelfte, Quelle
+}
+
+void testLatencyCompensation() {
+    makeSource();
+    const auto path = tempFile("minidaw_test_source.wav");
+    std::string message;
+    Rig rig;
+    ProjectController controller(*rig.engine);
+    controller.setSampleRate(kRate);
+    Engine& e = *rig.engine;
+
+    // Dieselbe Datei auf drei Spuren ab 10000: Spur 1 direkt zum Master (links),
+    // Spur 2 mit verzoegerndem Effekt (rechts), Spur 3 ueber einen Bus mit
+    // verzoegerndem Effekt (stumm, nur fuer die Latenz). Dazu ein Master-Effekt.
+    for (int t = 0; t < 3; ++t) CHECK(controller.addClip(t, path, 10000, message));
+    controller.setTrackPan(0, -1.0f);
+    controller.setTrackPan(1, 1.0f);
+    controller.setTrackMute(2, true);
+    Delayer trackDelay(100), busDelay(64), masterDelay(32);
+    CHECK(e.setPlugin(1, 1, &trackDelay));
+    CHECK(e.setPlugin(Engine::kFirstBus, 1, &busDelay));
+    CHECK(e.setTrackOutput(2, 0));
+    CHECK(e.setPlugin(Engine::kMasterStrip, 2, &masterDelay));
+    rig.render();
+    CHECK(e.pluginLatency() == 100 + 64 + 32);
+
+    // Abspielen ab 0. Erwartet: Beide Seiten liegen genau auf der Zeitachse,
+    // obwohl die rechte Spur 100 Frames Plugin-Latenz hat.
+    for (int b = 0; b < 4; ++b) { rig.service(); rig.render(); }
+    rig.engine->locate(0);
+    rig.render();
+    rig.service();
+    rig.engine->play();
+    std::vector<float> left, right;
+    for (int b = 0; b < 80; ++b) {
+        rig.service();
+        rig.render();
+        left.insert(left.end(), rig.l.begin(), rig.l.end());
+        right.insert(right.end(), rig.r.begin(), rig.r.end());
+    }
+    bool leftOk = true, rightOk = true;
+    for (std::int64_t p = 10500; p < 20000; ++p) {
+        const auto i = static_cast<std::size_t>(p);
+        if (std::fabs(left[i] - sourceL(p - 10000)) > 1e-5f) leftOk = false;
+        if (std::fabs(right[i] - sourceR(p - 10000)) > 1e-5f) rightOk = false;
+    }
+    CHECK(leftOk);
+    CHECK(rightOk);
+    // Vor dem Clip ist es still (nichts kommt zu frueh).
+    bool silentBefore = true;
+    for (std::size_t i = 2000; i < 9990; ++i)
+        if (left[i] != 0.0f || right[i] != 0.0f) silentBefore = false;
+    CHECK(silentBefore);
+
+    e.setPlugin(1, 1, nullptr);
+    e.setPlugin(Engine::kFirstBus, 1, nullptr);
+    e.setPlugin(Engine::kMasterStrip, 2, nullptr);
+    rig.render();
+    CHECK(e.pluginLatency() == 0);
+    AudioPlugin* p = nullptr;
+    while (e.popReleasedPlugin(p)) {}
+    while (!controller.peaksIdle()) std::this_thread::yield();
+}
+
 }  // namespace
 
 int main() {
@@ -1853,6 +2079,8 @@ int main() {
     testOfflineRender();
     testLatencyProbe();
     testClipEditing();
+    testMixerRouting();
+    testLatencyCompensation();
     {
         std::error_code ec;
         std::filesystem::remove_all(tempFile("minidaw_test_aufnahmen"), ec);

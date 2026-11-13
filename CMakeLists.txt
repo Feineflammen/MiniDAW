@@ -76,6 +76,7 @@ if(WIN32)
         src/ui/Canvas.cpp
         src/ui/MainView.cpp
         src/ui/MainWindow.cpp
+        src/ui/MixerView.cpp
         src/ui/PianoRoll.cpp
         src/vst3/PluginManager.cpp
         src/vst3/PluginWindow.cpp

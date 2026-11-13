@@ -67,12 +67,23 @@ struct DemoPluginHost final : ui::PluginHost {
         return {L"Beispiel-Piano", L"Beispiel-Orgel", L"Beispiel-Hall", L"Beispiel-Kompressor"};
     }
     std::wstring pluginFolder() override { return L"C:\\Program Files\\Common Files\\VST3"; }
-    bool load(int, int, std::wstring&) override { return false; }
-    void unload(int) override {}
-    bool openEditor(int, std::wstring&) override { return false; }
+    bool load(int, int, int, std::wstring&) override { return false; }
+    void unload(int, int) override {}
+    bool openEditor(int, int, std::wstring&) override { return false; }
 };
 
-int runScreenshot(const std::filesystem::path& output) {
+// Plugin fuer den Screenshot-Modus: laesst den Klang unveraendert, belegt nur einen Platz.
+struct DemoPlugin final : AudioPlugin {
+    explicit DemoPlugin(bool instrument, int latency = 0) : instrument_(instrument), latency_(latency) {}
+    bool isInstrument() const noexcept override { return instrument_; }
+    int latencyFrames() const noexcept override { return latency_; }
+    void process(float*, float*, int, const PluginMidiEvent*, int, const PluginTransport&) noexcept override {}
+    bool instrument_;
+    int latency_;
+};
+
+// mixer: das Mischpult statt der Spuren zeigen.
+int runScreenshot(const std::filesystem::path& output, bool mixer) {
     constexpr int kRate = 44100;
     constexpr int kBlock = 512;
 
@@ -113,6 +124,20 @@ int runScreenshot(const std::filesystem::path& output) {
     controller.setTrackMidiOutput(6, 9);
     controller.setTrackInput(3, kTrackInputMidiAll);
 
+    // Mischpult: ein paar belegte Plaetze, Sends und ein Bus als Ausgang.
+    controller.setPlugin(5, 0, std::make_shared<DemoPlugin>(true), L"Beispiel-Piano");
+    controller.setPlugin(5, 1, std::make_shared<DemoPlugin>(false), L"Beispiel-EQ");
+    controller.setPlugin(1, 1, std::make_shared<DemoPlugin>(false, 512), L"Beispiel-Kompressor");
+    controller.setPlugin(kFirstBusStrip, 1, std::make_shared<DemoPlugin>(false), L"Beispiel-Hall");
+    controller.setPlugin(kMasterStripIndex, 1, std::make_shared<DemoPlugin>(false, 64), L"Beispiel-Limiter");
+    controller.setTrackSend(0, 0, 0.5f);
+    controller.setTrackSend(2, 0, 0.3f);
+    controller.setTrackSend(5, 0, 0.7f);
+    controller.setTrackSend(5, 1, 0.2f);
+    controller.setTrackOutput(4, 1);
+    controller.setBusGain(1, 0.7f);
+    controller.setBusPan(1, 0.3f);
+
     while (!controller.peaksIdle()) Sleep(10);
 
     // Ein Stueck abspielen, damit Abspielzeiger und Pegel etwas zeigen.
@@ -134,7 +159,8 @@ int runScreenshot(const std::filesystem::path& output) {
     view.openPianoRoll(5, 0);
     DemoPluginHost demoPlugins;
     view.setPluginHost(&demoPlugins);
-    view.openPluginPicker(1);
+    if (mixer) view.setMixerMode(true);
+    else view.openPluginPicker(1);
     view.tick();
 
     std::string error;
@@ -659,7 +685,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (argv && argc >= 3 && std::wcscmp(argv[1], L"--screenshot") == 0) {
-        result = runScreenshot(argv[2]);
+        result = runScreenshot(argv[2], argc >= 4 && std::wcscmp(argv[3], L"mixer") == 0);
     } else {
         // Eine Projektdatei als Argument (zum Beispiel per "Oeffnen mit") wird gleich geladen.
         result = runApp(instance, showCommand, (argv && argc >= 2) ? std::filesystem::path(argv[1])

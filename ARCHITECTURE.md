@@ -73,6 +73,31 @@ Busse senden nicht an andere Busse. Dadurch sind Rückkopplungen ausgeschlossen
 und der Latenzausgleich bleibt einfach: Jeder Pfad wird auf die Latenz des
 längsten Pfads verzögert.
 
+### Kanalzüge und Plätze
+
+- Kanalzüge (`strip`): 0..15 Spuren, 16..19 Busse, 20 Master. Jeder hat fünf
+  Plätze (`slot`): 0 Instrument (nur Spuren), 1..4 Effekte.
+- Ein Instrument auf Platz 0 ersetzt den eingebauten Synthesizer. Ein Effekt
+  auf Platz 0 bearbeitet den Klang wie ein Insert (so landen alte Projekte mit
+  einem Effekt je Spur). Ein Instrument auf einem Effektplatz bekommt das MIDI
+  der Spur und überschreibt den Klang.
+- Sends liegen hinter Fader und Panorama (post-fader). Mute einer Spur schaltet
+  auch ihre Sends stumm. Busse sind solo-sicher: Solo einer Spur schaltet die
+  Busse nicht ab, nur die anderen Spuren.
+
+### Latenzausgleich
+
+- Jedes Plugin meldet `latencyFrames()`. Die Engine rechnet bei jeder Änderung
+  neu: größte Latenz der Spuren, größte der Busse, Summe der Master-Plätze.
+- Jede Spur wird hinter ihren Plugins auf die größte Spurlatenz verzögert
+  (`engine/DelayLine`), jeder Bus auf die größte Buslatenz; Spuren, die direkt
+  auf den Master gehen, zusätzlich um die Buslatenz.
+- Statt das Ergebnis zu verzögern, liest die Engine Clips, MIDI und die
+  Position für die Plugins um die Gesamtlatenz voraus. Was man hört, liegt
+  dadurch genau auf dem Abspielzeiger. Metronom und Aufnahme laufen auf der
+  echten Position; live gespielte Noten werden nicht verzögert.
+- Nach Stop rechnen die Spuren weiter, bis die Verzögerungen leer sind.
+
 ## Audio-Clips und Streaming
 
 Jede Spur hat einen `TrackStream` mit einem Ringpuffer (65536 Frames Stereo).
@@ -195,7 +220,8 @@ liegen in `%APPDATA%\MiniDAW\einstellungen.txt`.
 - Die Engine kennt nur `engine/AudioPlugin`: `process()` mit Stereo-Puffern,
   MIDI-Ereignissen des Blocks und Transport. Ein Instrument bekommt das MIDI
   der Spur anstelle des eingebauten Synthesizers; ein Effekt bearbeitet den
-  Klang der Spur vor Fader und Panorama. Bisher ein Plugin je Spur.
+  Klang vor Fader und Panorama. Bis zu ein Instrument und vier Effekte je
+  Spur, vier Effekte je Bus und am Master (siehe Signalfluss).
 - Besitz: Die Engine bekommt nur einen Zeiger. Der `ProjectController` hält
   das Plugin; ein ersetztes Plugin lebt weiter, bis der Audio-Thread es über
   `popReleasedPlugin()` zurückmeldet. Zerstört wird im UI-Thread.
@@ -219,8 +245,8 @@ liegen in `%APPDATA%\MiniDAW\einstellungen.txt`.
   daran Aufrufreihenfolge, Referenzzählung, MIDI-Übersetzung und Parameterwege.
 
 Offen: Plugins laufen im selben Prozess, ein abstürzendes Plugin reißt die DAW
-mit. Plugin-Zustand wird noch nicht gespeichert (kommt mit dem Projekt in
-Schritt 9). Latenz der Plugins wird noch nicht ausgeglichen (Schritt 8).
+mit. Ändert ein Plugin seine Latenz während des Betriebs, wird das erst beim
+nächsten Laden eines Plugins berücksichtigt.
 
 ## Clips bearbeiten
 
@@ -284,7 +310,7 @@ Windows-Code. Sie bilden die Bibliothek `dawcore`, die auch die Tests benutzen.
 | 6b | MIDI-Clips, MIDI-Aufnahme, Kanalwahl je Spur, MIDI-Ausgabegerät | Code und Offline-Tests fertig, vom Benutzer NICHT getestet (übersprungen) |
 | 6c | Piano Roll, Tempo, Taktraster, Metronom | Code fertig, per Screenshot geprüft, Bedientest offen |
 | 7 | VST3-Hosting: Laden, Verarbeiten, Editor-Fenster (ein Plugin je Spur) | fertig, mit echtem Plugin gespielt |
-| 8 | Mixer komplett: Inserts, Sends, Busse, Pegel, Latenzausgleich | offen |
+| 8 | Mixer komplett: Inserts, Sends, Busse, Pegel, Latenzausgleich | Code und Offline-Tests fertig (Latenzausgleich samplegenau geprüft), per Screenshot geprüft, Bedientest offen |
 | 9 | Projekt speichern und laden, WAV-Export | Code und Offline-Tests fertig, Bedientest offen; Undo/Redo offen |
 | 10 | Automation | offen |
 
@@ -297,12 +323,17 @@ ohne Knackser klingt.
 - `ui/MainView` enthält die gesamte Oberfläche: Aufteilung, Zeichnen und
   Bedienlogik. Sie kennt kein Fenster und bekommt Eingaben als Methodenaufrufe.
   Alle Elemente zeichnet sie selbst, es gibt keine nativen Steuerelemente.
+- `ui/MixerView` ist das Mischpult (F3 oder Knopf "Mixer" links über den
+  Spuren). Es ersetzt dann Spurköpfe, Zeitachse und Noten-Editor. Plugin-Wünsche
+  gibt es per Rückruf an `MainView`, die die Plugin-Auswahl öffnet.
+- `ui/Theme.h` enthält Farben und Fader-Kurve, die alle Ansichten teilen.
 - `ui/MainWindow` ist das Win32-Fenster: Nachrichten, Zeitgeber (etwa 30
   Bilder pro Sekunde), Drag & Drop, Bildschirmskalierung.
 - Die Oberfläche ändert das Projekt nur über den `ProjectController` und liest
   Position und Pegel aus der Engine.
 - `minidaw --screenshot bild.png` zeichnet die Oberfläche mit Beispieldaten in
-  eine Datei, ohne Fenster und Audiogerät. Der Build auf GitHub erzeugt das
+  eine Datei, ohne Fenster und Audiogerät; mit `mixer` als drittem Argument
+  das Mischpult. Der Build auf GitHub erzeugt das
   Bild bei jedem Push, damit sich Änderungen an der Oberfläche prüfen lassen.
 
 Wellenformen kommen aus `disk/PeakData`: kleinster und größter Wert je 256
@@ -325,8 +356,10 @@ zwei Samples.
   Lesen übersprungen, damit ältere Programmversionen neuere Dateien nicht
   zerstören.
 - Gespeichert werden Tempo, Master, je Spur Name, Regler, Eingang, Ausgang,
-  Plugin (Pfad und Einstellungen als Hex-Text), Audio-Clips (Pfad, Position,
-  Ausschnitt) und MIDI-Clips mit Noten. Audiodateien bleiben, wo sie sind:
+  Sends, Ziel (Master oder Bus), Plugins je Platz (Pfad und Einstellungen als
+  Hex-Text), Audio-Clips (Pfad, Position, Ausschnitt) und MIDI-Clips mit Noten;
+  dazu je Bus Regler und Plugins und die Plugins des Masters. Dateiversion 2;
+  Dateien der Version 1 (ein Plugin je Spur) werden weiter gelesen. Audiodateien bleiben, wo sie sind:
   Pfade unterhalb des Projektordners stehen relativ in der Datei, andere
   vollständig.
 - Geschrieben wird erst in eine Nachbardatei, dann umbenannt. Scheitert das

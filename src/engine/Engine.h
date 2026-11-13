@@ -4,6 +4,7 @@
 #include "disk/RecordSink.h"
 #include "disk/TrackStream.h"
 #include "engine/AudioPlugin.h"
+#include "engine/DelayLine.h"
 #include "engine/LatencyProbe.h"
 #include "engine/Synth.h"
 #include "midi/MidiMessage.h"
@@ -54,6 +55,15 @@ struct MidiRecordEvent {
 class Engine final : public AudioCallback {
 public:
     static constexpr int kNumTracks = 16;
+    static constexpr int kNumBuses = 4;
+    static constexpr int kNumInserts = 4;
+    // Kanalzuege: Spuren 0..15, Busse 16..19, Master 20.
+    static constexpr int kFirstBus = kNumTracks;
+    static constexpr int kMasterStrip = kNumTracks + kNumBuses;
+    static constexpr int kNumStrips = kMasterStrip + 1;
+    // Plugin-Plaetze je Kanalzug: 0 = Instrument (nur Spuren), 1..4 = Effekte.
+    static constexpr int kInstrumentSlot = 0;
+    static constexpr int kNumSlots = 1 + kNumInserts;
     static constexpr float kTestToneLevel = 0.15f;
 
     // Werte fuer den MIDI-Eingang einer Spur; 0..15 waehlt einen einzelnen Kanal.
@@ -76,6 +86,18 @@ public:
     bool setTrackMute(int track, bool mute) noexcept;
     bool setTrackSolo(int track, bool solo) noexcept;
     bool setMasterGain(float gain) noexcept;
+
+    // Sends (nach Fader und Panorama) einer Spur an die Busse, linear, 0 = aus.
+    bool setTrackSend(int track, int bus, float level) noexcept;
+    // Ausgang einer Spur: -1 = Master, 0..3 = Bus.
+    bool setTrackOutput(int track, int bus) noexcept;
+    bool setBusGain(int bus, float gain) noexcept;
+    bool setBusPan(int bus, float pan) noexcept;
+    bool setBusMute(int bus, bool mute) noexcept;
+
+    // Gesamtlatenz der Plugins in Frames. Um so viel liest die Engine die
+    // Zeitachse voraus, damit das Gehoerte trotzdem zur Position passt.
+    int pluginLatency() const noexcept { return latencyOut_.load(std::memory_order_relaxed); }
 
     // Tempo in Schlaegen pro Minute (nur fuer das Metronom) und Metronom an/aus.
     // Das Metronom klickt waehrend der Wiedergabe auf jedem Schlag, betont auf der Eins (4/4).
@@ -107,10 +129,14 @@ public:
     // Gibt Objekte frei, die der Audio-Thread nicht mehr braucht. Regelmaessig rufen.
     void collectGarbage();
 
-    // Setzt das Plugin einer Spur (nullptr = keins). Ein Instrument bekommt
-    // das MIDI der Spur anstelle des eingebauten Synthesizers, ein Effekt
-    // bearbeitet ihren Klang vor dem Fader. Das bisherige Plugin der Spur
+    // Setzt ein Plugin auf einen Platz eines Kanalzugs (nullptr = leer).
+    // Platz 0 einer Spur ist das Instrument: Es bekommt das MIDI der Spur
+    // anstelle des eingebauten Synthesizers. Die Plaetze 1..4 sind Effekte und
+    // werden in dieser Reihenfolge vor dem Fader gerechnet. Das bisherige Plugin
     // erscheint in popReleasedPlugin(), sobald der Audio-Thread es losgelassen hat.
+    bool setPlugin(int strip, int slot, AudioPlugin* plugin) noexcept;
+    // Kurzform fuer genau ein Plugin je Spur: ein Instrument auf Platz 0,
+    // einen Effekt auf Platz 1; der jeweils andere Platz wird geleert.
     bool setTrackPlugin(int track, AudioPlugin* plugin) noexcept;
     bool popReleasedPlugin(AudioPlugin*& plugin) noexcept { return releasedPlugins_.pop(plugin); }
 
@@ -163,6 +189,7 @@ public:
     // Liefert den hoechsten Pegel seit dem letzten Aufruf und setzt ihn zurueck.
     float takeTrackPeak(int track) noexcept;
     float takeMasterPeak() noexcept;
+    float takeBusPeak(int bus) noexcept;
     float takeInputPeak() noexcept;
 
     // --- Disk-Thread -----------------------------------------------------
@@ -187,6 +214,7 @@ private:
         ArmTrack, InputMonitor, Record, RecordMidi,
         TrackMidiInput, TrackMidiOutput, TrackMidiSequence,
         Tempo, Metronome, TrackPlugin, Offline, Probe,
+        TrackSend, TrackOutput, BusGain, BusPan, BusMute,
     };
 
     struct Command {
@@ -221,7 +249,23 @@ private:
         std::int64_t seqNextPos = -1;    // Position, an der die Wiedergabe fortsetzt
         bool seqDirty = false;           // Sequenz wurde ersetzt
         std::array<std::uint64_t, 2> held{};  // klingende Noten aus der Sequenz
-        AudioPlugin* plugin = nullptr;
+        // Mixer
+        std::array<AudioPlugin*, kNumSlots> slots{};
+        std::array<float, kNumBuses> send{};     // angestrebter Send-Pegel
+        std::array<float, kNumBuses> sendCur{};  // aktueller (ueberblendet)
+        int output = -1;                         // -1 = Master, sonst Bus
+        DelayLine delay;                         // Latenzausgleich
+    };
+
+    struct Bus {
+        float gain = 1.0f;
+        float pan = 0.0f;
+        bool mute = false;
+        float curL = 0.0f, curR = 0.0f;
+        float tgtL = 0.0f, tgtR = 0.0f;
+        std::array<AudioPlugin*, kNumSlots> slots{};  // Platz 0 bleibt leer
+        DelayLine delay;
+        std::vector<float> left, right;  // Eingang des Blocks
     };
 
     struct LiveMidi {
@@ -238,6 +282,10 @@ private:
     void renderBlock(int numFrames, std::int64_t blockMicros) noexcept;
     int gatherMidi(std::size_t trackIndex, int numFrames, std::int64_t blockMicros) noexcept;
     void silenceTrack(std::size_t trackIndex, std::int64_t dueMicros) noexcept;
+    AudioPlugin** slotPointer(int strip, int slot) noexcept;
+    void recomputeLatency() noexcept;
+    void runInserts(std::array<AudioPlugin*, kNumSlots>& slots, float* left, float* right, int numFrames,
+                    const PluginMidiEvent* events, int numEvents, const PluginTransport& transport) noexcept;
 
     SpscQueue<Command, 1024> commands_;
     SpscQueue<const MidiSequence*, 256> garbage_;  // Audio -> UI: nicht mehr benoetigt
@@ -259,6 +307,13 @@ private:
     double sampleRate_ = 48000.0;
     int maxFrames_ = 0;
     std::array<Track, kNumTracks> tracks_{};
+    std::array<Bus, kNumBuses> buses_{};
+    std::array<AudioPlugin*, kNumSlots> masterSlots_{};
+    DelayLine masterDirectDelay_;   // gleicht die Spuren, die direkt zum Master gehen, an die Busse an
+    int latency_ = 0;               // Gesamtlatenz der Plugins
+    bool anyPlugin_ = false;
+    std::int64_t tailFrames_ = 0;   // so lange laufen Verzoegerungen noch nach
+    int lastLiveCount_ = 0;         // so viele Ereignisse am Anfang von blockEvents_ sind live
     float masterGain_ = 1.0f;
     float masterCur_ = 1.0f;
     float transportCur_ = 0.0f;  // blendet die Wiedergabe bei Start und Stopp
@@ -294,6 +349,8 @@ private:
     std::atomic<bool> recordingOut_{false};
     std::array<std::atomic<float>, kNumTracks> trackPeak_{};
     std::atomic<float> masterPeak_{0.0f};
+    std::array<std::atomic<float>, kNumBuses> busPeak_{};
+    std::atomic<int> latencyOut_{0};
     std::atomic<float> inputPeak_{0.0f};
     std::atomic<std::uint32_t> underruns_{0};
 

@@ -129,7 +129,7 @@ public:
     ~Vst3Plugin() override;
 
     const std::wstring& name() const noexcept { return name_; }
-    int latencyFrames() const noexcept { return latency_; }
+    int latencyFrames() const noexcept override { return latency_; }
 
     // Bedienoberflaeche des Plugins oder nullptr. Der Aufrufer gibt sie mit release() frei.
     Steinberg::IPlugView* createView();

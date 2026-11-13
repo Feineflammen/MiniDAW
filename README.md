@@ -41,7 +41,7 @@ build\Release\minidaw.exe
 
 Tests ausführen: `ctest --test-dir build -C Release --output-on-failure`
 
-Aktueller Stand: Projekte speichern, laden und als WAV exportieren.
+Aktueller Stand: Mischpult mit Effekten, Bussen und Latenzausgleich; Projekte speichern, laden und als WAV exportieren.
 
 ## Bedienung
 
@@ -78,7 +78,16 @@ Links neben dem Lineal stehen Taktposition, Tempo (Klick +1, Rechtsklick −1, M
 
 Noten-Editor: Doppelklick auf einen MIDI-Clip öffnet ihn, Doppelklick auf eine leere Stelle einer MIDI-Spur legt einen neuen Clip von vier Takten an. Klick setzt eine Note, Ziehen verschiebt sie, Ziehen am rechten Rand ändert die Länge, Rechtsklick oder Entf löscht. Unten lässt sich der Anschlag je Note ziehen. Mausrad scrollt durch die Tonhöhen, Umschalt + Mausrad waagerecht, Strg + Mausrad zoomt. Esc oder × schließt.
 
-Plugins: Das Feld "Plugin …" ganz rechts am Spurkopf öffnet eine Liste der VST3-Plugins aus `C:\Program Files\Common Files\VST3`. Ein Instrument ersetzt den eingebauten Synthesizer der Spur, ein Effekt bearbeitet ihren Klang. "Fenster" öffnet die Oberfläche des Plugins.
+Plugins: Das Feld "Plugin …" ganz rechts am Spurkopf öffnet eine Liste der VST3-Plugins aus `C:\Program Files\Common Files\VST3` für das Instrument der Spur; es ersetzt den eingebauten Synthesizer. "Fenster" öffnet die Oberfläche des Plugins. Effekte kommen im Mischpult dazu.
+
+Mischpult: F3, Menü "Ansicht" oder der Knopf "Mixer" links über den Spuren. Je Spur ein Kanalzug, dann Bus 1 bis 4 und der Master. Von oben nach unten:
+
+- Instrument und FX 1 bis 4: Klick auf einen leeren Platz öffnet die Plugin-Liste, Klick auf einen belegten Platz sein Fenster, Rechtsklick tauscht oder entfernt das Plugin ("Kein Effekt").
+- 1 bis 4: Sends zu den Bussen, hinter dem Fader. Doppelklick schaltet zwischen aus und 0 dB.
+- "→ Master" / "→ Bus n": wohin die Spur geht (Klick weiter, Rechtsklick zurück, Mausrad).
+- Panorama, Fader mit Pegelanzeige (Ziehen, mit Umschalt fein; Mausrad 1 dB; Doppelklick 0 dB), M und S.
+
+Busse sind für Hall, Delay oder eine gemeinsame Gruppe gedacht: Effekt auf den Bus, Sends der Spuren aufdrehen. Die Verzögerung der Plugins gleicht die DAW automatisch aus; "Plugin-Latenz" oben zeigt, um wie viel.
 
 Unten rechts zeigt eine LED jede eingehende MIDI-Nachricht, daneben steht im Klartext, was ankam (Kanal, Note, Anschlag). Rot bedeutet einen Übertragungsfehler.
 

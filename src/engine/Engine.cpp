@@ -129,11 +129,48 @@ void Engine::collectGarbage() {
     while (garbage_.pop(old)) delete old;
 }
 
-bool Engine::setTrackPlugin(int track, AudioPlugin* plugin) noexcept {
-    if (!validTrack(track)) return false;
-    Command c{CommandType::TrackPlugin, track};
+bool Engine::setPlugin(int strip, int slot, AudioPlugin* plugin) noexcept {
+    if (strip < 0 || strip >= kNumStrips || slot < 0 || slot >= kNumSlots) return false;
+    if (slot == kInstrumentSlot && strip >= kNumTracks) return false;  // Instrumente nur auf Spuren
+    Command c{CommandType::TrackPlugin, strip};
+    c.position = slot;
     c.plugin = plugin;
     return send(c);
+}
+
+bool Engine::setTrackPlugin(int track, AudioPlugin* plugin) noexcept {
+    if (!validTrack(track)) return false;
+    const int slot = (plugin && !plugin->isInstrument()) ? 1 : kInstrumentSlot;
+    return setPlugin(track, 1 - slot, nullptr) && setPlugin(track, slot, plugin);
+}
+
+bool Engine::setTrackSend(int track, int bus, float level) noexcept {
+    if (!validTrack(track) || bus < 0 || bus >= kNumBuses) return false;
+    Command c{CommandType::TrackSend, track, std::max(0.0f, level)};
+    c.position = bus;
+    return send(c);
+}
+
+bool Engine::setTrackOutput(int track, int bus) noexcept {
+    if (!validTrack(track) || bus < -1 || bus >= kNumBuses) return false;
+    Command c{CommandType::TrackOutput, track};
+    c.position = bus;
+    return send(c);
+}
+
+bool Engine::setBusGain(int bus, float gain) noexcept {
+    if (bus < 0 || bus >= kNumBuses) return false;
+    return send({CommandType::BusGain, bus, std::max(0.0f, gain)});
+}
+
+bool Engine::setBusPan(int bus, float pan) noexcept {
+    if (bus < 0 || bus >= kNumBuses) return false;
+    return send({CommandType::BusPan, bus, std::clamp(pan, -1.0f, 1.0f)});
+}
+
+bool Engine::setBusMute(int bus, bool mute) noexcept {
+    if (bus < 0 || bus >= kNumBuses) return false;
+    return send({CommandType::BusMute, bus, mute ? 1.0f : 0.0f});
 }
 
 bool Engine::postMidi(MidiMessage message, bool fromKeyboard) {
@@ -184,6 +221,11 @@ float Engine::takeMasterPeak() noexcept {
     return masterPeak_.exchange(0.0f, std::memory_order_relaxed);
 }
 
+float Engine::takeBusPeak(int bus) noexcept {
+    if (bus < 0 || bus >= kNumBuses) return 0.0f;
+    return busPeak_[static_cast<std::size_t>(bus)].exchange(0.0f, std::memory_order_relaxed);
+}
+
 float Engine::takeInputPeak() noexcept {
     return inputPeak_.exchange(0.0f, std::memory_order_relaxed);
 }
@@ -215,6 +257,14 @@ void Engine::prepare(double sampleRate, int /*numInputs*/, int /*numOutputs*/, i
     trackR_.assign(size, 0.0f);
     pluginL_.assign(size, 0.0f);
     pluginR_.assign(size, 0.0f);
+    for (auto& bus : buses_) {
+        bus.left.assign(size, 0.0f);
+        bus.right.assign(size, 0.0f);
+        bus.delay.prepare();
+    }
+    for (auto& t : tracks_) t.delay.prepare();
+    masterDirectDelay_.prepare();
+    tailFrames_ = 0;
 
     for (auto& t : tracks_) {
         t.phase = 0.0;
@@ -225,7 +275,13 @@ void Engine::prepare(double sampleRate, int /*numInputs*/, int /*numOutputs*/, i
     for (auto& synth : synths_) synth.prepare(sampleRate);
     liveMidiCount_ = 0;
     updateTargets();
-    for (auto& t : tracks_) { t.curL = t.tgtL; t.curR = t.tgtR; }
+    recomputeLatency();
+    for (auto& t : tracks_) {
+        t.curL = t.tgtL;
+        t.curR = t.tgtR;
+        t.sendCur = t.send;
+    }
+    for (auto& bus : buses_) { bus.curL = bus.tgtL; bus.curR = bus.tgtR; }
     masterCur_ = masterGain_;
     transportCur_ = wantPlay_ ? 1.0f : 0.0f;
 }
@@ -337,16 +393,37 @@ void Engine::drainCommands() noexcept {
                 metronome_ = c.value != 0.0f;
                 break;
             case CommandType::TrackPlugin:
-                if (t) {
-                    if (t->plugin) releasedPlugins_.push(t->plugin);  // der Besitzer darf es jetzt zerstoeren
-                    t->plugin = c.plugin;
-                    // Was bisher klang, verstummt; die Sequenz setzt neu ein.
-                    synths_[static_cast<std::size_t>(c.track)].allNotesOff();
-                    t->held = {};
-                    t->seqDirty = true;
+                if (AudioPlugin** slot = slotPointer(c.track, static_cast<int>(c.position))) {
+                    if (*slot) releasedPlugins_.push(*slot);  // der Besitzer darf es jetzt zerstoeren
+                    *slot = c.plugin;
+                    if (t) {
+                        // Was bisher klang, verstummt; die Sequenz setzt neu ein.
+                        synths_[static_cast<std::size_t>(c.track)].allNotesOff();
+                        t->held = {};
+                        t->seqDirty = true;
+                    }
+                    recomputeLatency();
                 } else if (c.plugin) {
                     releasedPlugins_.push(c.plugin);
                 }
+                break;
+            case CommandType::TrackSend:
+                if (t) t->send[static_cast<std::size_t>(c.position)] = c.value;
+                break;
+            case CommandType::TrackOutput:
+                if (t) t->output = static_cast<int>(c.position);
+                break;
+            case CommandType::BusGain:
+                buses_[static_cast<std::size_t>(c.track)].gain = c.value;
+                mixChanged = true;
+                break;
+            case CommandType::BusPan:
+                buses_[static_cast<std::size_t>(c.track)].pan = c.value;
+                mixChanged = true;
+                break;
+            case CommandType::BusMute:
+                buses_[static_cast<std::size_t>(c.track)].mute = c.value != 0.0f;
+                mixChanged = true;
                 break;
             case CommandType::TrackMidiSequence:
                 if (t) {
@@ -381,6 +458,74 @@ void Engine::updateTargets() noexcept {
         t.tgtR = t.gain * std::sin(angle);
         if (t.pan <= -1.0f) t.tgtR = 0.0f;
         if (t.pan >= 1.0f) t.tgtL = 0.0f;
+    }
+
+    // Busse: kein Solo (sie bleiben hoerbar, wenn eine Spur solo ist).
+    for (auto& bus : buses_) {
+        if (bus.mute) { bus.tgtL = 0.0f; bus.tgtR = 0.0f; continue; }
+        const float angle = (bus.pan + 1.0f) * kQuarterPi;
+        bus.tgtL = bus.gain * std::cos(angle);
+        bus.tgtR = bus.gain * std::sin(angle);
+        if (bus.pan <= -1.0f) bus.tgtR = 0.0f;
+        if (bus.pan >= 1.0f) bus.tgtL = 0.0f;
+    }
+}
+
+AudioPlugin** Engine::slotPointer(int strip, int slot) noexcept {
+    if (slot < 0 || slot >= kNumSlots) return nullptr;
+    const auto s = static_cast<std::size_t>(slot);
+    if (strip >= 0 && strip < kNumTracks) return &tracks_[static_cast<std::size_t>(strip)].slots[s];
+    if (slot == kInstrumentSlot) return nullptr;
+    if (strip >= kFirstBus && strip < kMasterStrip) return &buses_[static_cast<std::size_t>(strip - kFirstBus)].slots[s];
+    if (strip == kMasterStrip) return &masterSlots_[s];
+    return nullptr;
+}
+
+// Latenzausgleich: Jede Spur wird auf die Spur mit der groessten Plugin-Latenz
+// verzoegert, jeder Bus auf den langsamsten Bus, die direkt zum Master gehenden
+// Spuren um die Bus-Latenz. Damit alles trotzdem zur Zeitachse passt, liest die
+// Engine Clips und Noten um die Gesamtlatenz voraus.
+void Engine::recomputeLatency() noexcept {
+    const auto sum = [](const std::array<AudioPlugin*, kNumSlots>& slots, bool& any) {
+        int total = 0;
+        for (AudioPlugin* p : slots) {
+            if (!p) continue;
+            any = true;
+            total += std::max(0, p->latencyFrames());
+        }
+        return std::min(total, DelayLine::kCapacity - 1);
+    };
+    bool any = false;
+    std::array<int, kNumTracks> trackLatency{};
+    std::array<int, kNumBuses> busLatency{};
+    int maxTrack = 0, maxBus = 0;
+    for (std::size_t i = 0; i < tracks_.size(); ++i) {
+        trackLatency[i] = sum(tracks_[i].slots, any);
+        maxTrack = std::max(maxTrack, trackLatency[i]);
+    }
+    for (std::size_t i = 0; i < buses_.size(); ++i) {
+        busLatency[i] = sum(buses_[i].slots, any);
+        maxBus = std::max(maxBus, busLatency[i]);
+    }
+    const int masterLatency = sum(masterSlots_, any);
+    for (std::size_t i = 0; i < tracks_.size(); ++i) tracks_[i].delay.setDelay(maxTrack - trackLatency[i]);
+    for (std::size_t i = 0; i < buses_.size(); ++i) buses_[i].delay.setDelay(maxBus - busLatency[i]);
+    masterDirectDelay_.setDelay(maxBus);
+    anyPlugin_ = any;
+    latency_ = maxTrack + maxBus + masterLatency;
+    latencyOut_.store(latency_, std::memory_order_relaxed);
+    for (auto& t : tracks_) t.seqDirty = true;  // Noten setzen an der neuen Leseposition ein
+}
+
+// Rechnet die Effekt-Plaetze 1..4 nacheinander. Ein Instrument auf einem
+// Effekt-Platz bekommt das MIDI der Spur.
+void Engine::runInserts(std::array<AudioPlugin*, kNumSlots>& slots, float* left, float* right, int numFrames,
+                        const PluginMidiEvent* events, int numEvents, const PluginTransport& transport) noexcept {
+    for (int s = 1; s < kNumSlots; ++s) {
+        AudioPlugin* p = slots[static_cast<std::size_t>(s)];
+        if (!p) continue;
+        const bool instrument = p->isInstrument();
+        p->process(left, right, numFrames, instrument ? events : nullptr, instrument ? numEvents : 0, transport);
     }
 }
 
@@ -423,22 +568,25 @@ int Engine::gatherMidi(std::size_t ti, int numFrames, std::int64_t blockMicros) 
         }
     }
 
-    // Noten aus den MIDI-Clips.
+    lastLiveCount_ = count;
+
+    // Noten aus den MIDI-Clips, um die Plugin-Latenz vorausgelesen.
+    const std::int64_t sourcePos = position_ + latency_;
     if (rolling_ && wantPlay_ && t.sequence) {
         const auto& events = t.sequence->events;
-        if (t.seqDirty || t.seqNextPos != position_) {
+        if (t.seqDirty || t.seqNextPos != sourcePos) {
             // Sprung oder neue Daten: klingende Noten beenden und neu einsetzen.
             if (anyHeld) releaseHeld();
             const auto it = std::lower_bound(
-                events.begin(), events.end(), position_,
+                events.begin(), events.end(), sourcePos,
                 [](const MidiSequence::Event& e, std::int64_t pos) { return e.frame < pos; });
             t.seqIndex = static_cast<std::size_t>(it - events.begin());
             t.seqDirty = false;
         }
-        const std::int64_t end = position_ + numFrames;
+        const std::int64_t end = sourcePos + numFrames;
         while (t.seqIndex < events.size() && events[t.seqIndex].frame < end) {
             const MidiSequence::Event& e = events[t.seqIndex++];
-            if (!add(static_cast<int>(e.frame - position_), e.message)) continue;
+            if (!add(static_cast<int>(e.frame - sourcePos), e.message)) continue;
             const auto word = static_cast<std::size_t>(e.message.data1 >> 6);
             const std::uint64_t bit = std::uint64_t{1} << (e.message.data1 & 63);
             if (e.message.isNoteOn()) t.held[word] |= bit;
@@ -470,17 +618,19 @@ void Engine::renderBlock(int numFrames, std::int64_t blockMicros) noexcept {
     }
 
     // Synthesizer mit klingenden Stimmen und Plugins laufen auch bei stehendem Transport weiter.
-    bool anySynth = false;
+    bool anySynth = anyPlugin_;
     for (const auto& synth : synths_) anySynth = anySynth || synth.active();
-    for (const auto& track : tracks_) anySynth = anySynth || track.plugin != nullptr;
     const bool liveMidi = liveMidiCount_ > 0 && armedTrack_ >= 0;
+
+    // Clips und Noten werden um die Plugin-Latenz vorausgelesen.
+    const std::int64_t sourcePos = position_ + latency_;
 
     if (!rolling_) {
         // Transport steht: Stroeme auf die aktuelle Position vorbereiten,
         // damit beim Start sofort Daten da sind.
         for (auto& stream : streams_)
-            if (stream.active()) stream.prime(position_);
-        if (!monitoring && !anySynth && !liveMidi) {
+            if (stream.active()) stream.prime(sourcePos);
+        if (!monitoring && !anySynth && !liveMidi && tailFrames_ <= 0) {
             liveMidiCount_ = 0;
             return;
         }
@@ -489,6 +639,11 @@ void Engine::renderBlock(int numFrames, std::int64_t blockMicros) noexcept {
     // Aufnahme: den Eingang dieses Blocks an den Disk-Thread weiterreichen.
     if (rolling_ && recordSink_ && haveInput) recordSink_->push(position_, inL_, inR_, numFrames);
 
+    for (auto& bus : buses_) {
+        std::memset(bus.left.data(), 0, bytes);
+        std::memset(bus.right.data(), 0, bytes);
+    }
+
     const float invFrames = 1.0f / static_cast<float>(numFrames);
     const float transportTarget = (rolling_ && wantPlay_) ? 1.0f : 0.0f;
     if (offline_) transportCur_ = transportTarget;  // beim Export nichts ein- oder ausblenden
@@ -496,42 +651,52 @@ void Engine::renderBlock(int numFrames, std::int64_t blockMicros) noexcept {
     const bool transportFading = transportCur_ != 1.0f || transportTarget != 1.0f;
     const double microsPerFrame = 1'000'000.0 / sampleRate_;
     const int outputLatency = outputLatency_.load(std::memory_order_relaxed);
+    const PluginTransport transport{rolling_ && wantPlay_, sourcePos, tempo_, sampleRate_};
     float* tl = trackL_.data();
     float* tr = trackR_.data();
+    bool anyActive = false;
 
     for (std::size_t ti = 0; ti < tracks_.size(); ++ti) {
         Track& t = tracks_[ti];
         TrackStream& stream = streams_[ti];
 
-        // MIDI dieser Spur: an den eingebauten Synthesizer oder an das MIDI-Geraet.
+        // MIDI dieser Spur: an Instrument, eingebauten Synthesizer oder MIDI-Geraet.
         const int midiCount = gatherMidi(ti, numFrames, blockMicros);
         const bool midiToSynth = t.midiOutput == kOutputSynth;
         if (!midiToSynth) {
             for (int i = 0; i < midiCount; ++i) {
                 const BlockEvent& e = blockEvents_[static_cast<std::size_t>(i)];
-                // Senden, wenn das zugehoerige Audio aus dem Lautsprecher kommt.
+                // Senden, wenn das zugehoerige Audio aus dem Lautsprecher kommt. Noten aus
+                // Clips sind um die Plugin-Latenz vorausgelesen und warten entsprechend laenger.
+                const int ahead = i >= lastLiveCount_ ? latency_ : 0;
                 const auto due = blockMicros +
-                                 static_cast<std::int64_t>((e.offset + outputLatency) * microsPerFrame);
+                                 static_cast<std::int64_t>((e.offset + outputLatency + ahead) * microsPerFrame);
                 midiOut_.push({onChannel(e.message, t.midiOutput), due});
             }
         }
 
+        AudioPlugin* const first = t.slots[kInstrumentSlot];
+        AudioPlugin* const instrument = (first && first->isInstrument()) ? first : nullptr;
+        bool hasPlugins = false;
+        for (AudioPlugin* p : t.slots) hasPlugins = hasPlugins || p != nullptr;
+
         const bool hasClips = rolling_ && stream.active();
         const bool hasTone = rolling_ && t.toneHz > 0.0f;
         const bool hasInput = monitoring && static_cast<int>(ti) == armedTrack_;
-        AudioPlugin* const instrument = (t.plugin && t.plugin->isInstrument()) ? t.plugin : nullptr;
-        AudioPlugin* const effect = (t.plugin && !t.plugin->isInstrument()) ? t.plugin : nullptr;
         const bool midiToBuiltIn = midiToSynth && instrument == nullptr;
         const bool hasSynth = synths_[ti].active() || (midiToBuiltIn && midiCount > 0);
-        if (!hasClips && !hasTone && !hasInput && !hasSynth && t.plugin == nullptr) {
+        const bool active = hasClips || hasTone || hasInput || hasSynth || hasPlugins;
+        anyActive = anyActive || active;
+        if (!active && tailFrames_ <= 0) {
             t.curL = t.tgtL;
             t.curR = t.tgtR;
+            t.sendCur = t.send;
             continue;
         }
 
         // Quelle der Spur nach tl/tr: Audio-Clips, dazu gegebenenfalls der Testton.
         if (hasClips) {
-            if (stream.read(position_, tl, tr, numFrames) < numFrames)
+            if (stream.read(sourcePos, tl, tr, numFrames) < numFrames)
                 underruns_.fetch_add(1, std::memory_order_relaxed);
         } else {
             std::memset(tl, 0, bytes);
@@ -557,7 +722,7 @@ void Engine::renderBlock(int numFrames, std::int64_t blockMicros) noexcept {
             }
         }
 
-        // Mithoeren: Der Eingang laeuft durch Fader und Panorama der Spur.
+        // Mithoeren: Der Eingang laeuft durch Effekte, Fader und Panorama der Spur.
         if (hasInput) {
             for (int i = 0; i < numFrames; ++i) {
                 tl[i] += inL_[i];
@@ -582,10 +747,9 @@ void Engine::renderBlock(int numFrames, std::int64_t blockMicros) noexcept {
             if (numFrames > done) synth.render(tl + done, tr + done, numFrames - done);
         }
 
-        // Plugin der Spur: Ein Instrument bekommt das MIDI und kommt zum Klang
-        // der Spur dazu, ein Effekt bearbeitet alles, was bis hier entstanden ist.
-        if (t.plugin != nullptr) {
-            const PluginTransport transport{rolling_ && wantPlay_, position_, tempo_, sampleRate_};
+        // Platz 0: Ein Instrument bekommt das MIDI und kommt zum Klang der Spur
+        // dazu; ein Effekt auf diesem Platz bearbeitet alles bis hier.
+        if (first != nullptr) {
             if (instrument != nullptr) {
                 std::memset(pluginL_.data(), 0, bytes);
                 std::memset(pluginR_.data(), 0, bytes);
@@ -596,11 +760,17 @@ void Engine::renderBlock(int numFrames, std::int64_t blockMicros) noexcept {
                     tr[i] += pluginR_[static_cast<std::size_t>(i)];
                 }
             } else {
-                effect->process(tl, tr, numFrames, nullptr, 0, transport);
+                first->process(tl, tr, numFrames, nullptr, 0, transport);
             }
         }
 
-        // Fader und Panorama, ueber den Block ueberblendet.
+        // Effekte 1..4, dann Latenzausgleich.
+        runInserts(t.slots, tl, tr, numFrames, blockEvents_.data(), midiToSynth ? midiCount : 0, transport);
+        t.delay.process(tl, tr, numFrames);
+
+        // Fader und Panorama, ueber den Block ueberblendet; dann Ausgang und Sends.
+        float* outL = t.output < 0 ? L : buses_[static_cast<std::size_t>(t.output)].left.data();
+        float* outR = t.output < 0 ? R : buses_[static_cast<std::size_t>(t.output)].right.data();
         const float stepL = (t.tgtL - t.curL) * invFrames;
         const float stepR = (t.tgtR - t.curR) * invFrames;
         float gl = t.curL, gr = t.curR;
@@ -610,15 +780,67 @@ void Engine::renderBlock(int numFrames, std::int64_t blockMicros) noexcept {
             gr += stepR;
             const float l = tl[i] * gl;
             const float r = tr[i] * gr;
-            L[i] += l;
-            R[i] += r;
+            tl[i] = l;
+            tr[i] = r;
+            outL[i] += l;
+            outR[i] += r;
             peak = std::max(peak, std::max(std::fabs(l), std::fabs(r)));
         }
         t.curL = t.tgtL;
         t.curR = t.tgtR;
         raisePeak(trackPeak_[ti], peak);
+
+        for (std::size_t b = 0; b < buses_.size(); ++b) {
+            const float target = t.send[b];
+            float level = t.sendCur[b];
+            if (target == 0.0f && level == 0.0f) continue;
+            const float step = (target - level) * invFrames;
+            float* bl = buses_[b].left.data();
+            float* br = buses_[b].right.data();
+            for (int i = 0; i < numFrames; ++i) {
+                level += step;
+                bl[i] += tl[i] * level;
+                br[i] += tr[i] * level;
+            }
+            t.sendCur[b] = target;
+        }
     }
     liveMidiCount_ = 0;
+
+    // Verzoegerungen laufen nach, bis alles, was in ihnen steckt, heraus ist.
+    if (anyActive) tailFrames_ = static_cast<std::int64_t>(latency_) + numFrames;
+    else tailFrames_ = std::max<std::int64_t>(0, tailFrames_ - numFrames);
+
+    // Direkt zum Master gehende Spuren warten auf die Busse.
+    masterDirectDelay_.process(L, R, numFrames);
+
+    // Busse: Effekte, Latenzausgleich, Fader und Panorama, dann zum Master.
+    for (std::size_t b = 0; b < buses_.size(); ++b) {
+        Bus& bus = buses_[b];
+        float* bl = bus.left.data();
+        float* br = bus.right.data();
+        runInserts(bus.slots, bl, br, numFrames, nullptr, 0, transport);
+        bus.delay.process(bl, br, numFrames);
+        const float stepL = (bus.tgtL - bus.curL) * invFrames;
+        const float stepR = (bus.tgtR - bus.curR) * invFrames;
+        float gl = bus.curL, gr = bus.curR;
+        float peak = 0.0f;
+        for (int i = 0; i < numFrames; ++i) {
+            gl += stepL;
+            gr += stepR;
+            const float l = bl[i] * gl;
+            const float r = br[i] * gr;
+            L[i] += l;
+            R[i] += r;
+            peak = std::max(peak, std::max(std::fabs(l), std::fabs(r)));
+        }
+        bus.curL = bus.tgtL;
+        bus.curR = bus.tgtR;
+        raisePeak(busPeak_[b], peak);
+    }
+
+    // Effekte auf dem Master.
+    runInserts(masterSlots_, L, R, numFrames, nullptr, 0, transport);
 
     // Metronom: kurzer Klick auf jedem Schlag, hoeher auf der Eins.
     if (metronome_ && rolling_ && wantPlay_) {

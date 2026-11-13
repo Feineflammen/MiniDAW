@@ -1,5 +1,6 @@
 #include "model/ProjectFile.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -8,7 +9,7 @@
 namespace {
 
 const char* const kMagic = "MiniDAW-Projekt";
-constexpr int kVersion = 1;
+constexpr int kVersion = 2;  // 2: Effekt-Plaetze, Sends, Busse
 
 std::string pathToUtf8(const std::filesystem::path& path) {
     const std::u8string u8 = path.generic_u8string();
@@ -94,6 +95,26 @@ void splitLine(const std::string& line, std::string& key, std::string& rest) {
     rest = line.substr(end);
 }
 
+// "<zahl> <rest>" zerlegen.
+bool numberAndRest(const std::string& text, int& number, std::string& rest) {
+    char* end = nullptr;
+    const long value = std::strtol(text.c_str(), &end, 10);
+    if (end == text.c_str()) return false;
+    number = static_cast<int>(value);
+    while (*end == ' ') ++end;
+    rest = end;
+    return true;
+}
+
+// Liefert den Eintrag fuer Platz index, legt ihn bei Bedarf an.
+SavedSlot& slotEntry(std::vector<SavedSlot>& slots, int index) {
+    for (SavedSlot& slot : slots)
+        if (slot.slot == index) return slot;
+    slots.push_back({});
+    slots.back().slot = index;
+    return slots.back();
+}
+
 }  // namespace
 
 std::string toUtf8(const std::wstring& text) {
@@ -156,6 +177,19 @@ std::wstring fromUtf8(const std::string& text) {
     return out;
 }
 
+namespace {
+
+void writeSlots(std::ostringstream& out, const std::vector<SavedSlot>& slots) {
+    for (const SavedSlot& slot : slots) {
+        if (slot.slot < 0 || slot.file.empty()) continue;
+        out << "  slot " << slot.slot << ' ' << pathToUtf8(slot.file) << '\n';
+        out << "  slotname " << slot.slot << ' ' << toUtf8(slot.name) << '\n';
+        if (!slot.state.empty()) out << "  slotzustand " << slot.slot << ' ' << toHex(slot.state) << '\n';
+    }
+}
+
+}  // namespace
+
 bool writeProjectFile(const std::filesystem::path& path, const SavedProject& project, std::string& error) {
     const std::filesystem::path folder = path.parent_path();
     std::ostringstream out;
@@ -174,11 +208,11 @@ bool writeProjectFile(const std::filesystem::path& path, const SavedProject& pro
         out << "  solo " << (track.solo ? 1 : 0) << '\n';
         out << "  eingang " << inputName(track.input) << '\n';
         out << "  midiausgang " << (track.midiOutput == kTrackOutputSynth ? std::string("synth") : std::to_string(track.midiOutput + 1)) << '\n';
-        if (!track.plugin.empty()) {
-            out << "  plugin " << pathToUtf8(track.plugin) << '\n';
-            out << "  pluginname " << toUtf8(track.pluginName) << '\n';
-            if (!track.pluginState.empty()) out << "  pluginzustand " << toHex(track.pluginState) << '\n';
-        }
+        out << "  ausgang " << (track.output < 0 ? std::string("master") : "bus " + std::to_string(track.output + 1)) << '\n';
+        for (int b = 0; b < kProjectBuses; ++b)
+            if (track.sends[static_cast<std::size_t>(b)] > 0.0f)
+                out << "  send " << (b + 1) << ' ' << formatNumber(track.sends[static_cast<std::size_t>(b)]) << '\n';
+        writeSlots(out, track.slots);
         for (const SavedClip& clip : track.clips) {
             out << "  audioclip " << clip.start << ' ' << clip.offset << ' ' << clip.length << ' '
                 << storedPath(clip.file, folder) << '\n';
@@ -190,6 +224,20 @@ bool writeProjectFile(const std::filesystem::path& path, const SavedProject& pro
                     << static_cast<int>(note.velocity) << '\n';
             }
         }
+    }
+
+    for (int b = 0; b < kProjectBuses; ++b) {
+        const SavedBus& bus = project.buses[static_cast<std::size_t>(b)];
+        out << "bus " << (b + 1) << '\n';
+        out << "  name " << toUtf8(bus.name) << '\n';
+        out << "  lautstaerke " << formatNumber(bus.gain) << '\n';
+        out << "  panorama " << formatNumber(bus.pan) << '\n';
+        out << "  stumm " << (bus.mute ? 1 : 0) << '\n';
+        writeSlots(out, bus.slots);
+    }
+    if (!project.masterSlots.empty()) {
+        out << "masterkanal\n";
+        writeSlots(out, project.masterSlots);
     }
 
     // Erst in eine Nachbardatei schreiben und dann umbenennen: Geht beim
@@ -234,6 +282,8 @@ bool readProjectFile(const std::filesystem::path& path, SavedProject& project, s
     }
 
     SavedTrack* track = nullptr;
+    SavedBus* bus = nullptr;
+    std::vector<SavedSlot>* slots = nullptr;  // Plugin-Plaetze des aktuellen Abschnitts
     MidiClipModel* midiClip = nullptr;
     while (std::getline(file, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -243,10 +293,36 @@ bool readProjectFile(const std::filesystem::path& path, SavedProject& project, s
         if (key == "samplerate") project.sampleRate = std::strtod(rest.c_str(), nullptr);
         else if (key == "tempo") project.bpm = std::strtod(rest.c_str(), nullptr);
         else if (key == "master") project.masterGain = static_cast<float>(std::strtod(rest.c_str(), nullptr));
-        else if (key == "spur") {
+        else if (key == "spur" || key == "bus" || key == "masterkanal") {
+            // Neuer Abschnitt.
             const int index = std::atoi(rest.c_str());
-            track = (index >= 1 && index <= kProjectTracks) ? &project.tracks[static_cast<std::size_t>(index - 1)] : nullptr;
+            track = nullptr;
+            bus = nullptr;
+            slots = nullptr;
             midiClip = nullptr;
+            if (key == "spur" && index >= 1 && index <= kProjectTracks) {
+                track = &project.tracks[static_cast<std::size_t>(index - 1)];
+                slots = &track->slots;
+            } else if (key == "bus" && index >= 1 && index <= kProjectBuses) {
+                bus = &project.buses[static_cast<std::size_t>(index - 1)];
+                slots = &bus->slots;
+            } else if (key == "masterkanal") {
+                slots = &project.masterSlots;
+            }
+        } else if ((key == "slot" || key == "slotname" || key == "slotzustand") && slots) {
+            int index = 0;
+            std::string value;
+            if (!numberAndRest(rest, index, value) || index < 0 || index >= kSlotsPerStrip) continue;
+            if (index == 0 && !track) continue;  // Instrumente nur auf Spuren
+            SavedSlot& slot = slotEntry(*slots, index);
+            if (key == "slot") slot.file = pathFromUtf8(value);
+            else if (key == "slotname") slot.name = fromUtf8(value);
+            else if (!fromHex(value, slot.state)) slot.state.clear();
+        } else if (bus) {
+            if (key == "name") bus->name = fromUtf8(rest);
+            else if (key == "lautstaerke") bus->gain = static_cast<float>(std::strtod(rest.c_str(), nullptr));
+            else if (key == "panorama") bus->pan = static_cast<float>(std::strtod(rest.c_str(), nullptr));
+            else if (key == "stumm") bus->mute = rest == "1";
         } else if (!track) {
             continue;  // Unbekanntes oder Zeilen einer ungueltigen Spur ueberspringen
         } else if (key == "name") track->name = fromUtf8(rest);
@@ -254,14 +330,27 @@ bool readProjectFile(const std::filesystem::path& path, SavedProject& project, s
         else if (key == "panorama") track->pan = static_cast<float>(std::strtod(rest.c_str(), nullptr));
         else if (key == "stumm") track->mute = rest == "1";
         else if (key == "solo") track->solo = rest == "1";
+        else if (key == "ausgang") {
+            const int index = rest.rfind("bus ", 0) == 0 ? std::atoi(rest.c_str() + 4) : 0;
+            track->output = (index >= 1 && index <= kProjectBuses) ? index - 1 : -1;
+        } else if (key == "send") {
+            int index = 0;
+            std::string value;
+            if (numberAndRest(rest, index, value) && index >= 1 && index <= kProjectBuses)
+                track->sends[static_cast<std::size_t>(index - 1)] =
+                    std::max(0.0f, static_cast<float>(std::strtod(value.c_str(), nullptr)));
+        }
         else if (key == "eingang") track->input = inputFromName(rest);
         else if (key == "midiausgang") {
             const int channel = std::atoi(rest.c_str());
             track->midiOutput = (rest != "synth" && channel >= 1 && channel <= 16) ? channel - 1 : kTrackOutputSynth;
-        } else if (key == "plugin") track->plugin = pathFromUtf8(rest);
-        else if (key == "pluginname") track->pluginName = fromUtf8(rest);
-        else if (key == "pluginzustand") {
-            if (!fromHex(rest, track->pluginState)) track->pluginState.clear();
+        } else if (key == "plugin") {
+            slotEntry(track->slots, -1).file = pathFromUtf8(rest);  // Format 1: ein Plugin je Spur
+        } else if (key == "pluginname") {
+            slotEntry(track->slots, -1).name = fromUtf8(rest);
+        } else if (key == "pluginzustand") {
+            SavedSlot& slot = slotEntry(track->slots, -1);
+            if (!fromHex(rest, slot.state)) slot.state.clear();
         } else if (key == "audioclip") {
             SavedClip clip;
             char* cursor = nullptr;

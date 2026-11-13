@@ -18,6 +18,16 @@ struct SavedClip {
     std::int64_t length = 0;
 };
 
+// Ein Plugin-Platz: Datei des Plugins, Anzeigename und Einstellungen, wie das
+// Plugin sie selbst liefert. slot -1 kommt aus alten Dateien (ein Plugin je
+// Spur); dann entscheidet der Typ des Plugins ueber den Platz.
+struct SavedSlot {
+    int slot = -1;
+    std::filesystem::path file;
+    std::wstring name;
+    std::vector<char> state;
+};
+
 struct SavedTrack {
     std::wstring name;
     float gain = 1.0f;
@@ -26,11 +36,19 @@ struct SavedTrack {
     bool solo = false;
     int input = kTrackInputAudio;
     int midiOutput = kTrackOutputSynth;
-    std::filesystem::path plugin;   // leer = kein Plugin
-    std::wstring pluginName;
-    std::vector<char> pluginState;  // Einstellungen des Plugins, wie es sie selbst liefert
+    std::vector<SavedSlot> slots;
+    std::array<float, kProjectBuses> sends{};
+    int output = -1;  // -1 = Master
     std::vector<SavedClip> clips;
     std::vector<MidiClipModel> midiClips;
+};
+
+struct SavedBus {
+    std::wstring name;
+    float gain = 1.0f;
+    float pan = 0.0f;
+    bool mute = false;
+    std::vector<SavedSlot> slots;
 };
 
 struct SavedProject {
@@ -38,6 +56,8 @@ struct SavedProject {
     double bpm = 120.0;
     float masterGain = 1.0f;
     std::array<SavedTrack, kProjectTracks> tracks;
+    std::array<SavedBus, kProjectBuses> buses;
+    std::vector<SavedSlot> masterSlots;
 };
 
 // Das Dateiformat ist zeilenweiser Text in UTF-8, damit man es lesen und

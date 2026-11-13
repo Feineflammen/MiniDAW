@@ -3,6 +3,7 @@
 #include "engine/Engine.h"
 #include "model/ProjectController.h"
 #include "ui/Canvas.h"
+#include "ui/MixerView.h"
 #include "ui/PianoRoll.h"
 #include "ui/PluginHost.h"
 
@@ -20,6 +21,7 @@ enum class Key {
     Space, Home, Delete, Record, Escape,
     NudgeLeft, NudgeRight, NudgeLeftBig, NudgeRightBig,  // Clip um 1 bzw. 10 ms verschieben
     Split,                                                // Clip am Abspielzeiger teilen
+    ToggleMixer,                                          // zwischen Spuren und Mischpult umschalten
 };
 
 // Die gesamte Oberflaeche: Transportleiste, Spurkoepfe, Zeitachse.
@@ -34,8 +36,11 @@ public:
     void setMidiOutInfo(std::wstring name) { midiOutInfo_ = std::move(name); }
     // Zugang zu den Plugins; ohne ihn bleiben die Plugin-Felder ohne Funktion.
     void setPluginHost(PluginHost* host) { pluginHost_ = host; }
-    // Oeffnet die Plugin-Auswahl fuer eine Spur.
+    // Oeffnet die Plugin-Auswahl fuer das Instrument einer Spur.
     void openPluginPicker(int track);
+    // Mischpult statt Spuren und Zeitachse zeigen.
+    void setMixerMode(bool on);
+    bool mixerMode() const noexcept { return mixerMode_; }
     // Wird gerufen, wenn der Benutzer das MIDI-Ausgabegeraet weiterschalten will.
     std::function<void()> onCycleMidiOut;
     void selectClip(int track, int index, bool midi = false) { selTrack_ = track; selIndex_ = index; selMidi_ = midi; }
@@ -88,11 +93,15 @@ private:
     // Zeichnen
     void drawTopBar(Canvas& c);
     void drawRuler(Canvas& c);
+    void drawRulerInfo(Canvas& c);
+    Rect mixerArea() const;
     void drawTimeline(Canvas& c);
     void drawHeaders(Canvas& c);
     void drawStatusBar(Canvas& c);
     void drawPluginPicker(Canvas& c);
     bool pickerMouseDown(float x, float y);
+    void openPicker(int strip, int slot, const Rect& anchor);
+    void openEditor(int strip, int slot);
     void drawClip(Canvas& c, const ClipModel& clip, int track, std::int64_t start, bool selected,
                   float alpha);
     void drawMidiClip(Canvas& c, const MidiClipModel& clip, int track, std::int64_t start, bool selected,
@@ -117,11 +126,15 @@ private:
     ProjectController& controller_;
     Engine& engine_;
     PianoRoll pianoRoll_;
+    MixerView mixer_;
+    bool mixerMode_ = false;
     bool editorDrag_ = false;  // der laufende Ziehvorgang gehoert dem Noten-Editor
 
     // Plugin-Auswahl: eine Liste, die ueber der Zeitachse aufklappt.
     PluginHost* pluginHost_ = nullptr;
-    int pickerTrack_ = -1;  // -1 = geschlossen
+    int pickerStrip_ = -1;  // -1 = geschlossen
+    int pickerSlot_ = 0;
+    Rect pickerAnchor_{};   // Feld, an dem die Liste aufklappt
     int pickerScroll_ = 0;
     std::vector<std::wstring> pickerNames_;
 

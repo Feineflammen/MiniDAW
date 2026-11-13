@@ -18,6 +18,8 @@ enum MenuCommand { kFileNew = 1001, kFileOpen, kFileSave, kFileSaveAs, kFileExpo
 enum ToolsCommand { kToolsMeasureLatency = 1101 };
 // Befehle des Menues "Bearbeiten"; das Fenster reicht sie selbst an die Ansicht weiter.
 enum EditCommand { kEditSplit = 1201, kEditNudgeLeft, kEditNudgeRight, kEditNudgeLeftBig, kEditNudgeRightBig, kEditDelete };
+// Menue "Ansicht".
+enum ViewCommand { kViewMixer = 1301 };
 // Eintraege im Menue "Audio": Ausgabegeraet i = kAudioOutputBase + i, Eingabegeraet
 // i = kAudioInputBase + i, kein Eingang = kAudioNoInput.
 enum AudioCommand { kAudioOutputBase = 2000, kAudioInputBase = 2200, kAudioNoInput = 2399 };

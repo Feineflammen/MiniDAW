@@ -1,7 +1,12 @@
-# daw
+# MiniDAW
 
 Kleine DAW für Windows: 16 Spuren (Audio/MIDI), VST3, Mixer. Hobbyprojekt in
 C++20 ohne Fremdbibliotheken. Freie Software unter der GPLv3, kostenlos für alle.
+
+Was es kann: Aufnahme mehrerer Spuren gleichzeitig (WASAPI oder ASIO) mit
+gemessener Latenz, MIDI mit Noten-Editor und Metronom, VST3-Instrumente und
+-Effekte, Mischpult mit Bussen und Latenzausgleich, Automation von Lautstärke
+und Panorama, Rückgängig/Wiederholen, Projekte speichern und als WAV exportieren.
 
 Aufbau, Regeln und Fahrplan stehen in [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -16,8 +21,9 @@ Abschnitte 15 und 16 der Lizenz.
 
 Entstehung: Idee, Vorgaben und Tests am echten Gerät kommen von Feineflammen.
 Der Programmcode wurde vollständig von einer KI geschrieben (Claude von
-Anthropic), Programmsymbol und Titelbild von ChatGPT (OpenAI). MiniDAW ist ein kostenloses Hobbyprojekt ohne Gewähr; vor
-wichtigen Aufnahmen Sicherungskopien anlegen.
+Anthropic), Programmsymbol und Titelbild von ChatGPT (OpenAI). MiniDAW ist ein
+kostenloses Hobbyprojekt ohne Gewähr; vor wichtigen Aufnahmen
+Sicherungskopien anlegen.
 
 Enthaltene Teile anderer: das VST 3 SDK (nur die Schnittstellen, MIT-Lizenz)
 und das ASIO SDK (nur die Header, unter der GPLv3) von Steinberg. Einzelheiten
@@ -62,8 +68,6 @@ build\Release\minidaw.exe
 
 Tests ausführen: `ctest --test-dir build -C Release --output-on-failure`
 
-Aktueller Stand: Rückgängig/Wiederholen, Automation von Lautstärke und Panorama; ASIO und Aufnahme mehrerer Spuren gleichzeitig; Mischpult mit Effekten, Bussen und Latenzausgleich; Projekte speichern, laden und als WAV exportieren.
-
 ## Bedienung
 
 | Aktion | Wirkung |
@@ -79,7 +83,6 @@ Aktueller Stand: Rückgängig/Wiederholen, Automation von Lautstärke und Panora
 | R am Spurkopf | Spur für die Aufnahme scharfschalten; mehrere Spuren nehmen gleichzeitig auf |
 | Rec-Knopf oder Taste R | Aufnahme starten / beenden |
 | Mithören | Eingang über die scharfgeschalteten Spuren hören |
-
 | − / + neben "Latenz" | Aufnahme-Latenz in 5-ms-Schritten anpassen; Mausrad 1 ms, Doppelklick setzt zurück |
 | Tasten A S D F G H J K L | weiße Tasten ab C auf der scharfgeschalteten Spur |
 | Tasten W E T Z U O | schwarze Tasten |
@@ -97,7 +100,7 @@ Automation (Lautstärke und Panorama je Spur): Das Feld "Auto" unter R M S schal
 
 Menü "Bearbeiten" (Clip vorher anklicken): Am Abspielzeiger teilen (Strg+T), mit ← / → um 1 ms verschieben, mit Umschalt um 10 ms. Clips lassen sich an ihren Kanten kürzen; beim Ziehen mit gedrückter Umschalttaste rasten sie nicht ein.
 
-Menü "Extras" → "Latenz messen …": Mit einem Kabel von Ausgang 1 oder 2 der Soundkarte in einen Eingang misst die DAW die tatsächliche Verzögerung und stellt die Aufnahme-Latenz darauf ein.
+Menü "Audio" oder "Extras" → "Latenz messen …": Mit einem Kabel von Ausgang 1 oder 2 der Soundkarte in einen Eingang misst die DAW die tatsächliche Verzögerung und stellt die Aufnahme-Latenz darauf ein.
 
 Menü "Datei": Neu (Strg+N), Öffnen (Strg+O), Speichern (Strg+S), Speichern unter (Strg+Umschalt+S), Als WAV exportieren (Strg+E). Projekte haben die Endung `.mdaw` und sind lesbare Textdateien; die Audiodateien bleiben an ihrem Ort.
 
@@ -117,6 +120,8 @@ Mischpult: F3, Menü "Ansicht" oder der Knopf "Mixer" links über den Spuren. Je
 - Panorama, Fader mit Pegelanzeige (Ziehen, mit Umschalt fein; Mausrad 1 dB; Doppelklick 0 dB), M und S.
 
 Busse sind für Hall, Delay oder eine gemeinsame Gruppe gedacht: Effekt auf den Bus, Sends der Spuren aufdrehen. Die Verzögerung der Plugins gleicht die DAW automatisch aus; "Plugin-Latenz" oben zeigt, um wie viel.
+
+Menü "Hilfe" → "Über MiniDAW …": Version, Lizenz, Herkunft und Impressum.
 
 Unten rechts zeigt eine LED jede eingehende MIDI-Nachricht, daneben steht im Klartext, was ankam (Kanal, Note, Anschlag). Rot bedeutet einen Übertragungsfehler.
 

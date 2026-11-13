@@ -22,9 +22,12 @@ Tempoänderungen im Projekt, MP3/FLAC, eigene Effekte.
 
 | Thread | Aufgabe | Darf blockieren? |
 |---|---|---|
-| Audio | Engine rechnet einen Block und liefert ihn an WASAPI | nein, niemals |
-| UI | Fenster, Eingaben, Projektmodell, Undo | ja |
-| Disk | Audiodateien vorlesen, Aufnahmen schreiben, Peak-Dateien | ja |
+| Audio | Engine rechnet einen Block und liefert ihn an WASAPI oder ASIO | nein, niemals |
+| UI | Fenster, Eingaben, Projektmodell, Rückgängig | ja |
+| Disk | Audiodateien vorlesen, Aufnahmen schreiben | ja |
+| Eingang (nur WASAPI) | Aufnahmepakete des Geräts in einen Ringpuffer | ja |
+| MIDI-Ausgabe | Nachrichten zeitgenau an das MIDI-Gerät | ja |
+| Wellenformen | Übersichten der Audiodateien berechnen | ja |
 
 Kommunikation zwischen den Threads läuft ausschließlich über lock-freie
 Ringpuffer mit genau einem Schreiber und einem Leser (SPSC):
@@ -114,13 +117,14 @@ einer Position neu an und meldet, bis wohin der alte Pufferinhalt verfällt.
 Fehlen Daten, liefert die Spur Stille und holt danach samplegenau wieder auf.
 Falsches Material darf nie zu hören sein; das prüfen die Tests.
 
-Noch offen (spätere Schritte): Samplerate-Umrechnung beim Import, Fades an
-Clip-Grenzen, Überblendung bei Sprüngen während der Wiedergabe.
+Noch offen: Samplerate-Umrechnung beim Import, einstellbare Fades an
+Clip-Grenzen (an Schnittkanten gibt es kurze feste Blenden, siehe "Clips
+bearbeiten"), Überblendung bei Sprüngen während der Wiedergabe.
 
 ## Aufnahme
 
-- Das Audiogerät öffnet neben der Ausgabe das Standard-Aufnahmegerät. Ein
-  eigener Thread liest dessen Pakete in einen Ringpuffer; der Audio-Thread der
+- Mit WASAPI öffnet das Audiogerät neben der Ausgabe das gewählte
+  Aufnahmegerät. Ein eigener Thread liest dessen Pakete in einen Ringpuffer; der Audio-Thread der
   Ausgabe gibt den Takt vor und holt sich pro Block die passende Menge.
   Windows rechnet den Eingang auf die Samplerate der Ausgabe um.
 - Mit ASIO (`audio/AsioDevice`) gibt es keinen eigenen Eingangs-Thread: Der
@@ -169,7 +173,9 @@ Bekannte Grenzen: Ohne Messung ist die Latenz eine Schätzung aus den Angaben
 des Treibers. Wandler und USB-Übertragung fehlen darin. Haben Ein- und Ausgang
 getrennte Taktgeber (zum Beispiel USB-Mikrofon und Onboard-Ausgang), laufen
 sie langsam auseinander; der Ringpuffer gleicht das alle paar Minuten mit
-einem kurzen Sprung aus. Sauber löst das erst ASIO oder ein Gerät für beides.
+einem kurzen Sprung aus. Sauber ist es nur mit einem Gerät für beides, am
+besten über ASIO. Ein zweites Gerät (etwa ein USB-Mikrofon) neben einem
+ASIO-Treiber gibt es deshalb bewusst nicht.
 
 ## MIDI
 
@@ -180,9 +186,8 @@ einem kurzen Sprung aus. Sauber löst das erst ASIO oder ein Gerät für beides.
 - Die Nachrichten gehen an alle scharfgeschalteten MIDI-Spuren, deren Kanal
   passt, und wirken am Anfang des nächsten Blocks.
 - Jede Spur hat einen eingebauten Synthesizer (`engine/Synth`: Sägezahn,
-  Tiefpass, Hüllkurve, 16 Stimmen). Er ist die Klangquelle für MIDI, bis in
-  Schritt 7 VST-Instrumente dazukommen, und bleibt danach der Ersatz für
-  Spuren ohne Instrument.
+  Tiefpass, Hüllkurve, 16 Stimmen). Er ist die Klangquelle für MIDI-Spuren
+  ohne Instrument-Plugin.
 - Der Synthesizer läuft durch Fader, Panorama und Pegelanzeige der Spur und
   klingt auch bei stehendem Transport.
 
@@ -280,12 +285,14 @@ nächsten Laden eines Plugins berücksichtigt.
 ## Audiogeräte
 
 `WasapiDevice::endpoints()` listet die angeschlossenen Geräte, `open()` öffnet
-sie über ihre Windows-Kennung. Beim Wechsel im Menü "Audio" werden
+sie über ihre Windows-Kennung; `AsioDevice::drivers()` listet die
+ASIO-Treiber. Beide stecken hinter `audio/AudioDevice`. Beim Wechsel im Menü
+"Audio" werden
 Audiogerät und Disk-Thread angehalten, das Gerät neu geöffnet und bei
 anderer Samplerate oder größerem Puffer alle Plugins mit ihren Einstellungen
 neu geladen. Gewählte Geräte und der Latenz-Zusatz je Gerätekombination
-stehen in den Einstellungen. Fehlt das gespeicherte Gerät beim Start,
-werden die Windows-Standardgeräte benutzt.
+stehen in den Einstellungen. Fehlt das gespeicherte Gerät beim Start (oder ist
+der ASIO-Treiber belegt), werden die Windows-Standardgeräte benutzt.
 
 ## Modell und Engine
 
@@ -294,9 +301,9 @@ werden die Windows-Standardgeräte benutzt.
 - Die **Engine** hält eine eigene, für die Wiedergabe aufbereitete Kopie.
   Nach jeder Modelländerung baut der UI-Thread die betroffenen Teile neu und
   schickt sie per Kommando.
-- **Undo/Redo** arbeitet nur auf dem Modell. Jede Änderung ist ein
-  Kommando-Objekt mit `apply()` und `revert()`. Es gibt keinen anderen Weg,
-  das Modell zu ändern.
+- **Rückgängig/Wiederholen** arbeitet nur auf dem Modell, mit Schnappschüssen
+  (siehe "Rückgängig und Automation"). Jede Änderung läuft über den
+  `ProjectController`; es gibt keinen anderen Weg, das Modell zu ändern.
 
 ## Verzeichnisse
 
@@ -307,8 +314,9 @@ src/
   midi/     MIDI-Geräte, MIDI-Daten
   vst3/     Plugin-Scan, Hosting, Editor-Fenster
   model/    Projektmodell, Undo, Speichern und Laden
-  disk/     WAV lesen und schreiben, Streaming, Peak-Dateien
-  ui/       Fenster, Zeichnen, Widgets
+  disk/     WAV lesen und schreiben, Streaming, Wellenform-Übersichten
+  ui/       Fenster, Zeichnen, Mischpult, Ladebild
+  res/      Programmsymbol und Titelbild (in die exe eingebunden)
   util/     Ringpuffer, Hilfsfunktionen
 tests/      Offline-Tests der Engine
 ```
@@ -328,11 +336,12 @@ Windows-Code. Sie bilden die Bibliothek `dawcore`, die auch die Tests benutzen.
 | 6a | MIDI-Eingang, eingebauter Synthesizer, live spielen | fertig, mit Keyboard gespielt |
 | 6b | MIDI-Clips, MIDI-Aufnahme, Kanalwahl je Spur, MIDI-Ausgabegerät | Code und Offline-Tests fertig, vom Benutzer NICHT getestet (übersprungen) |
 | 6c | Piano Roll, Tempo, Taktraster, Metronom | Code fertig, per Screenshot geprüft, Bedientest offen |
-| 7 | VST3-Hosting: Laden, Verarbeiten, Editor-Fenster (ein Plugin je Spur) | fertig, mit echtem Plugin gespielt |
-| 8 | Mixer komplett: Inserts, Sends, Busse, Pegel, Latenzausgleich | Code und Offline-Tests fertig (Latenzausgleich samplegenau geprüft), per Screenshot geprüft, Bedientest offen |
-| 9 | Projekt speichern und laden, WAV-Export | Code und Offline-Tests fertig, Bedientest offen; Undo/Redo offen |
+| 7 | VST3-Hosting: Laden, Verarbeiten, Editor-Fenster | fertig, mit echtem Plugin gespielt |
+| 8 | Mixer komplett: Inserts, Sends, Busse, Pegel, Latenzausgleich | fertig, vom Benutzer bedient |
+| 9 | Projekt speichern und laden, WAV-Export | Code und Offline-Tests fertig, Bedientest offen |
 | 10 | Automation (Lautstärke, Panorama je Spur), Rückgängig/Wiederholen | Code und Offline-Tests fertig, per Screenshot geprüft, Bedientest offen |
-| 11 | ASIO, Aufnahme mehrerer Spuren mit eigenem Eingang | Code und Offline-Tests fertig, per Screenshot geprüft, mit ASIO-Treiber NICHT getestet |
+| 11 | ASIO, Aufnahme mehrerer Spuren mit eigenem Eingang | fertig, mit ASIO-Treiber (UMC404HD) getestet |
+| 12 | Lizenz (GPLv3), ASIO SDK, Programmsymbol, Ladebild, Über-Fenster | fertig, per Screenshot geprüft |
 
 Jeder Schritt gilt erst als fertig, wenn er auf echter Hardware läuft und
 ohne Knackser klingt.
@@ -350,6 +359,20 @@ ohne Knackser klingt.
   steht in `engine/FaderCurve.h`, weil die Automation sie auch braucht.
 - Jede Mausgeste (Drücken bis Loslassen) ist ein Rückgängig-Schritt:
   `MainView` ruft dafür `beginEdit()` und `endEdit()` am Controller.
+- `ui/MainWindow` ist das Win32-Fenster: Nachrichten, Zeitgeber (etwa 30
+  Bilder pro Sekunde), Drag & Drop, Bildschirmskalierung, Menüs.
+- `ui/SplashWindow` zeigt beim Start das Ladebild und im Menü "Hilfe" das
+  Fenster "Über MiniDAW" (Win32/GDI, Bild aus den Ressourcen der exe).
+- Die Oberfläche ändert das Projekt nur über den `ProjectController` und liest
+  Position und Pegel aus der Engine.
+- `minidaw --screenshot bild.png` zeichnet die Oberfläche mit Beispieldaten in
+  eine Datei, ohne Fenster und Audiogerät. Ein drittes Argument wählt eine
+  andere Ansicht: `mixer`, `eingang` (Eingangsliste), `ladebild` oder `ueber`.
+  Der Build auf GitHub erzeugt diese Bilder bei jedem Push, damit sich
+  Änderungen an der Oberfläche prüfen lassen.
+
+Wellenformen kommen aus `disk/PeakData`: kleinster und größter Wert je 256
+Frames, berechnet von einem Hintergrund-Thread und nur im Speicher gehalten.
 
 ## Rückgängig und Automation
 
@@ -369,17 +392,6 @@ ohne Knackser klingt.
 - Schreiben: Zeigt die Spur die Kurve und läuft die Wiedergabe, ersetzt eine
   Regler-Bewegung die Punkte im überstrichenen Bereich. Vor dem ersten
   geschriebenen Punkt bleibt der bisherige feste Wert erhalten.
-- `ui/MainWindow` ist das Win32-Fenster: Nachrichten, Zeitgeber (etwa 30
-  Bilder pro Sekunde), Drag & Drop, Bildschirmskalierung.
-- Die Oberfläche ändert das Projekt nur über den `ProjectController` und liest
-  Position und Pegel aus der Engine.
-- `minidaw --screenshot bild.png` zeichnet die Oberfläche mit Beispieldaten in
-  eine Datei, ohne Fenster und Audiogerät; mit `mixer` als drittem Argument
-  das Mischpult, mit `eingang` die Eingangsliste. Der Build auf GitHub erzeugt das
-  Bild bei jedem Push, damit sich Änderungen an der Oberfläche prüfen lassen.
-
-Wellenformen kommen aus `disk/PeakData`: kleinster und größter Wert je 256
-Frames, berechnet von einem Hintergrund-Thread.
 
 ## Tests
 
@@ -402,9 +414,9 @@ zwei Samples.
   Hex-Text), Audio-Clips (Pfad, Position, Ausschnitt) und MIDI-Clips mit Noten;
   dazu je Bus Regler und Plugins und die Plugins des Masters, je Spur die
   Automation (`automation lautstaerke Frame:Wert ...`). Dateiversion 2;
-  Dateien der Version 1 (ein Plugin je Spur) werden weiter gelesen. Audiodateien bleiben, wo sie sind:
-  Pfade unterhalb des Projektordners stehen relativ in der Datei, andere
-  vollständig.
+  Dateien der Version 1 (ein Plugin je Spur) werden weiter gelesen.
+- Audiodateien bleiben, wo sie sind: Pfade unterhalb des Projektordners
+  stehen relativ in der Datei, andere vollständig.
 - Geschrieben wird erst in eine Nachbardatei, dann umbenannt. Scheitert das
   Schreiben, bleibt die alte Datei unversehrt.
 - Geladen wird erst vollständig in den Speicher; nur wenn das gelingt, wird das
@@ -431,6 +443,6 @@ kann nicht im Export landen.
 ## Offline-Rendering
 
 Die Engine hängt nicht am Audiogerät. Sie bekommt nur „rechne N Samples“.
-Dadurch lässt sie sich ohne Hardware in eine WAV-Datei rendern. Das dient
-später dem Export und schon vorher automatischen Tests (Latenzausgleich,
-Automation, Clip-Grenzen).
+Dadurch lässt sie sich ohne Hardware in eine WAV-Datei rendern. Das nutzen
+der Export und die automatischen Tests (Latenzausgleich, Automation,
+Clip-Grenzen).

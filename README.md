@@ -13,10 +13,11 @@ Visual-C++-Laufzeit von Microsoft, die auf den meisten Rechnern schon vorhanden 
 
 - Gebaut von GitHub Actions aus genau diesem Quellcode. Drei unabhängige
   Builds ergaben Byte für Byte dieselbe Datei.
-- SHA-256: `58C75D0ED2E237069803D415E4F306F31A37C4FE71FCA574CDD7516EB0FC23C2`
+- SHA-256: `6C7A418EA5448FB84B57D1C6158FDAB21F9EBC953B1A9F51B5FB083CABD78DA3`
   (prüfen in PowerShell mit `Get-FileHash minidaw.exe`)
-- VirusTotal: keiner der Scanner meldet etwas. Browser und Windows warnen
-  trotzdem, weil die Datei nicht signiert und weitgehend unbekannt ist.
+- Browser und Windows warnen beim Herunterladen, weil die Datei nicht signiert
+  und weitgehend unbekannt ist. Eine frühere Fassung wurde bei VirusTotal
+  geprüft: keiner der Scanner meldete etwas.
 
 Ändert sich der Quellcode, ist diese Datei veraltet, bis sie ersetzt wird.
 Der Build auf GitHub warnt dann.

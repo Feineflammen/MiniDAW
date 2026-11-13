@@ -327,7 +327,7 @@ Windows-Code. Sie bilden die Bibliothek `dawcore`, die auch die Tests benutzen.
 | 7 | VST3-Hosting: Laden, Verarbeiten, Editor-Fenster (ein Plugin je Spur) | fertig, mit echtem Plugin gespielt |
 | 8 | Mixer komplett: Inserts, Sends, Busse, Pegel, Latenzausgleich | Code und Offline-Tests fertig (Latenzausgleich samplegenau geprüft), per Screenshot geprüft, Bedientest offen |
 | 9 | Projekt speichern und laden, WAV-Export | Code und Offline-Tests fertig, Bedientest offen; Undo/Redo offen |
-| 10 | Automation | offen |
+| 10 | Automation (Lautstärke, Panorama je Spur), Rückgängig/Wiederholen | Code und Offline-Tests fertig, per Screenshot geprüft, Bedientest offen |
 | 11 | ASIO, Aufnahme mehrerer Spuren mit eigenem Eingang | Code und Offline-Tests fertig, per Screenshot geprüft, mit ASIO-Treiber NICHT getestet |
 
 Jeder Schritt gilt erst als fertig, wenn er auf echter Hardware läuft und
@@ -342,14 +342,36 @@ ohne Knackser klingt.
 - `ui/MixerView` ist das Mischpult (F3 oder Knopf "Mixer" links über den
   Spuren). Es ersetzt dann Spurköpfe, Zeitachse und Noten-Editor. Plugin-Wünsche
   gibt es per Rückruf an `MainView`, die die Plugin-Auswahl öffnet.
-- `ui/Theme.h` enthält Farben und Fader-Kurve, die alle Ansichten teilen.
+- `ui/Theme.h` enthält Farben, die alle Ansichten teilen; die Fader-Kennlinie
+  steht in `engine/FaderCurve.h`, weil die Automation sie auch braucht.
+- Jede Mausgeste (Drücken bis Loslassen) ist ein Rückgängig-Schritt:
+  `MainView` ruft dafür `beginEdit()` und `endEdit()` am Controller.
+
+## Rückgängig und Automation
+
+- Rückgängig arbeitet mit Schnappschüssen: Vor jeder Änderung merkt sich der
+  `ProjectController` das ganze `Project` (Clips teilen sich die Audiodateien
+  über `shared_ptr`, das kostet kaum Speicher). Zurück heißt: Schnappschuss
+  übernehmen und nur das an die Engine schicken, was sich unterscheidet.
+  Plugins und ihre Einstellungen gehören nicht zum Schnappschuss.
+- Mausrad-Schritte am selben Regler innerhalb einer Sekunde werden ein Schritt.
+- Automation: Punkte je Spur und Parameter im Modell (Lautstärke als
+  Fader-Stellung, Panorama -1..1). Die Engine bekommt daraus eine fertige
+  `AutomationCurve` (wie die MIDI-Sequenzen: einmal gebaut, über die
+  Befehlsschlange übergeben, alte Fassung zurück an den UI-Thread).
+- Die Kurve wird je Block zu der Zeit gelesen, zu der das Signal den Fader
+  erreicht: Position + Bus- + Master-Latenz. Damit hört man jeden Punkt dort,
+  wo er auf der Zeitachse steht, auch mit verzögernden Plugins.
+- Schreiben: Zeigt die Spur die Kurve und läuft die Wiedergabe, ersetzt eine
+  Regler-Bewegung die Punkte im überstrichenen Bereich. Vor dem ersten
+  geschriebenen Punkt bleibt der bisherige feste Wert erhalten.
 - `ui/MainWindow` ist das Win32-Fenster: Nachrichten, Zeitgeber (etwa 30
   Bilder pro Sekunde), Drag & Drop, Bildschirmskalierung.
 - Die Oberfläche ändert das Projekt nur über den `ProjectController` und liest
   Position und Pegel aus der Engine.
 - `minidaw --screenshot bild.png` zeichnet die Oberfläche mit Beispieldaten in
   eine Datei, ohne Fenster und Audiogerät; mit `mixer` als drittem Argument
-  das Mischpult. Der Build auf GitHub erzeugt das
+  das Mischpult, mit `eingang` die Eingangsliste. Der Build auf GitHub erzeugt das
   Bild bei jedem Push, damit sich Änderungen an der Oberfläche prüfen lassen.
 
 Wellenformen kommen aus `disk/PeakData`: kleinster und größter Wert je 256
@@ -374,7 +396,8 @@ zwei Samples.
 - Gespeichert werden Tempo, Master, je Spur Name, Regler, Eingang, Ausgang,
   Sends, Ziel (Master oder Bus), Plugins je Platz (Pfad und Einstellungen als
   Hex-Text), Audio-Clips (Pfad, Position, Ausschnitt) und MIDI-Clips mit Noten;
-  dazu je Bus Regler und Plugins und die Plugins des Masters. Dateiversion 2;
+  dazu je Bus Regler und Plugins und die Plugins des Masters, je Spur die
+  Automation (`automation lautstaerke Frame:Wert ...`). Dateiversion 2;
   Dateien der Version 1 (ein Plugin je Spur) werden weiter gelesen. Audiodateien bleiben, wo sie sind:
   Pfade unterhalb des Projektordners stehen relativ in der Datei, andere
   vollständig.

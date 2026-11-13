@@ -795,7 +795,7 @@ void MainView::drawAutomation(Canvas& c, int track) {
     const int param = controller_.automationView(track);
     const float y0 = rowY(track);
     const Rect row{kHeaderW, y0, std::max(0.0f, width_ - kHeaderW), kRowH};
-    c.fill(row, rgb(0x101114, 0.55f));
+    c.fill(row, rgb(0x101114, 0.7f));
     const Color color = param == kAutoVolume ? rgb(0xF2C14E) : rgb(0x5BD1D7);
     const AutomationLane& lane = controller_.automation(track, param);
     const std::wstring name = param == kAutoVolume ? std::wstring(L"Lautstärke") : std::wstring(L"Panorama");
@@ -806,11 +806,11 @@ void MainView::drawAutomation(Canvas& c, int track) {
         const float y = autoToY(track, param, param == kAutoVolume ? gainToPosition(model.gain) : model.pan);
         c.line(kHeaderW, y + 0.5f, width_, y + 0.5f, rgb(param == kAutoVolume ? 0xF2C14E : 0x5BD1D7, 0.35f), 1.5f);
         c.text(name + L": klicken setzt einen Punkt, beim Abspielen schreibt der Regler",
-               {kHeaderW + 6.0f, y0 + 1.0f, 520.0f, 14.0f}, kTextDim, Font::Small);
+               {kHeaderW + 6.0f, y0 + kRowH - 15.0f, 520.0f, 14.0f}, kTextDim, Font::Small);
         return;
     }
 
-    c.text(name, {kHeaderW + 6.0f, y0 + 1.0f, 120.0f, 14.0f}, color, Font::Small);
+    c.text(name, {kHeaderW + 6.0f, y0 + kRowH - 15.0f, 120.0f, 14.0f}, color, Font::Small);
     float prevX = kHeaderW;
     float prevY = autoToY(track, param, lane.front().value);
     for (const AutomationPoint& point : lane) {

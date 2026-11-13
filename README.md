@@ -41,7 +41,7 @@ build\Release\minidaw.exe
 
 Tests ausführen: `ctest --test-dir build -C Release --output-on-failure`
 
-Aktueller Stand: ASIO und Aufnahme mehrerer Spuren gleichzeitig; Mischpult mit Effekten, Bussen und Latenzausgleich; Projekte speichern, laden und als WAV exportieren.
+Aktueller Stand: Rückgängig/Wiederholen, Automation von Lautstärke und Panorama; ASIO und Aufnahme mehrerer Spuren gleichzeitig; Mischpult mit Effekten, Bussen und Latenzausgleich; Projekte speichern, laden und als WAV exportieren.
 
 ## Bedienung
 
@@ -65,6 +65,14 @@ Aktueller Stand: ASIO und Aufnahme mehrerer Spuren gleichzeitig; Mischpult mit E
 | Y / X | Oktave tiefer / höher |
 
 Menü "Audio": Wiedergabe- und Aufnahmegerät (WASAPI) oder einen ASIO-Treiber direkt wählen, ohne Neustart. Die Wahl und die Aufnahme-Latenz werden je Gerät gespeichert. Mit ASIO laufen Ein- und Ausgang im selben Takt, die Latenz ist kleiner und alle Eingänge der Soundkarte sind da (beim UMC404HD vier). "ASIO-Einstellungen …" öffnet das Fenster des Treibers, dort stellt man die Puffergröße ein; die DAW startet den Treiber danach selbst neu. Ein ASIO-Treiber kann immer nur von einem Programm benutzt werden.
+
+Rückgängig: Strg+Z, Wiederholen: Strg+Y (oder Strg+Umschalt+Z); das Menü "Bearbeiten" nennt den Schritt. Jede Mausbewegung ist ein Schritt, eine ganze Fader-Fahrt also einer. Bis zu 200 Schritte; ein neues oder geladenes Projekt beginnt ohne Vorgeschichte. Plugins (welches Plugin wo steckt, seine Einstellungen) nimmt Rückgängig nicht zurück.
+
+Automation (Lautstärke und Panorama je Spur): Das Feld "Auto" unter R M S schaltet um zwischen aus, "Lautst." und "Pan". Dann zeigt die Spur ihre Kurve statt der Clips:
+
+- Klick setzt einen Punkt, Ziehen verschiebt ihn (rastet am Raster ein, mit Umschalt frei), Rechtsklick löscht ihn. Rechtsklick auf das Feld "Auto" löscht die ganze gezeigte Kurve.
+- Beim Abspielen schreibt der Regler: Zeigt die Spur "Lautst.", nimmt der Lautstärke-Regler (im Spurkopf oder im Mischpult) die Bewegung als Kurve auf. Dasselbe gilt für "Pan" und das Panorama.
+- Hat eine Spur Punkte, folgt der Regler der Kurve (im Mischpult mit gelbem Griff). Ein gelbes "Auto" im Spurkopf heißt: Hier wirkt eine Kurve, die gerade nicht angezeigt wird.
 
 Menü "Bearbeiten" (Clip vorher anklicken): Am Abspielzeiger teilen (Strg+T), mit ← / → um 1 ms verschieben, mit Umschalt um 10 ms. Clips lassen sich an ihren Kanten kürzen; beim Ziehen mit gedrückter Umschalttaste rasten sie nicht ein.
 

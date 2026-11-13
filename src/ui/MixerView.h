@@ -55,6 +55,7 @@ private:
 
     float stripX(int strip) const;
     float contentWidth() const;
+    float scrollWidth() const;
     Rect slotRect(int strip, int slot) const;
     Rect sendRect(int strip, int bus) const;
     Rect outputRect(int strip) const;

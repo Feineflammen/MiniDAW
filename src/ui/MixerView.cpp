@@ -12,7 +12,7 @@ using namespace theme;
 
 namespace {
 
-constexpr float kStripW = 64.0f;
+constexpr float kStripW = 58.0f;
 constexpr float kStripGap = 2.0f;
 constexpr float kGroupGap = 14.0f;  // Abstand vor den Bussen und vor dem Master
 constexpr float kMargin = 8.0f;
@@ -47,16 +47,21 @@ MixerView::MixerView(ProjectController& controller, Engine& engine) : controller
 
 // --- Geometrie ---------------------------------------------------------------
 
+// Der Master steht immer rechts am Rand; Spuren und Busse rollen links davon.
 float MixerView::stripX(int strip) const {
+    if (strip == kMasterStripIndex) return area_.right() - kMargin - kStripW;
     float x = area_.x + kMargin + static_cast<float>(strip) * (kStripW + kStripGap) - scroll_;
     if (strip >= kFirstBusStrip) x += kGroupGap;
-    if (strip >= kMasterStripIndex) x += kGroupGap;
     return x;
 }
 
+// Breite aller Spuren und Busse (ohne Master).
 float MixerView::contentWidth() const {
-    return 2.0f * kMargin + static_cast<float>(kProjectStrips) * (kStripW + kStripGap) + 2.0f * kGroupGap;
+    return 2.0f * kMargin + static_cast<float>(kMasterStripIndex) * (kStripW + kStripGap) + kGroupGap;
 }
+
+// Sichtbare Breite fuer Spuren und Busse.
+float MixerView::scrollWidth() const { return std::max(0.0f, area_.w - kStripW - kMargin - kGroupGap); }
 
 Rect MixerView::slotRect(int strip, int slot) const {
     return {stripX(strip) + 3.0f, area_.y + kSlotY + static_cast<float>(slot) * kSlotStep, kStripW - 6.0f, 16.0f};
@@ -72,25 +77,26 @@ Rect MixerView::panRect(int strip) const { return {stripX(strip) + 8.0f, area_.y
 
 Rect MixerView::faderRect(int strip) const {
     const float top = area_.y + kFaderY;
-    return {stripX(strip) + 14.0f, top, 22.0f, std::max(40.0f, area_.bottom() - kFaderBottomGap - top)};
+    return {stripX(strip) + 12.0f, top, 20.0f, std::max(40.0f, area_.bottom() - kFaderBottomGap - top)};
 }
 
 Rect MixerView::meterRect(int strip) const {
     const Rect f = faderRect(strip);
-    return {stripX(strip) + 44.0f, f.y, 8.0f, f.h};
+    return {stripX(strip) + 40.0f, f.y, 8.0f, f.h};
 }
 
 Rect MixerView::muteRect(int strip) const {
-    return {stripX(strip) + 4.0f, area_.bottom() - 24.0f, isTrack(strip) ? 27.0f : kStripW - 8.0f, 18.0f};
+    return {stripX(strip) + 4.0f, area_.bottom() - 24.0f, isTrack(strip) ? 24.0f : kStripW - 8.0f, 18.0f};
 }
 
-Rect MixerView::soloRect(int strip) const { return {stripX(strip) + 33.0f, area_.bottom() - 24.0f, 27.0f, 18.0f}; }
+Rect MixerView::soloRect(int strip) const { return {stripX(strip) + 30.0f, area_.bottom() - 24.0f, 24.0f, 18.0f}; }
 
 MixerView::Hit MixerView::hitTest(float x, float y) const {
     if (!area_.contains(x, y)) return {};
     for (int s = 0; s < kProjectStrips; ++s) {
         const float sx = stripX(s);
         if (x < sx || x >= sx + kStripW) continue;
+        if (!isMaster(s) && x >= area_.x + scrollWidth()) continue;
         for (int slot = isTrack(s) ? 0 : 1; slot < kSlotsPerStrip; ++slot)
             if (slotRect(s, slot).contains(x, y)) return {Part::Slot, s, slot};
         if (isTrack(s)) {
@@ -172,21 +178,25 @@ void MixerView::tick() {
 
 void MixerView::draw(Canvas& c, const Rect& area) {
     area_ = area;
-    scroll_ = std::clamp(scroll_, 0.0f, std::max(0.0f, contentWidth() - area.w));
+    const float visible = scrollWidth();
+    const float total = contentWidth();
+    scroll_ = std::clamp(scroll_, 0.0f, std::max(0.0f, total - visible));
     c.fill(area, kBg);
-    c.pushClip(area);
-    for (int s = 0; s < kProjectStrips; ++s) {
+    c.pushClip({area.x, area.y, visible, area.h});
+    for (int s = 0; s < kMasterStripIndex; ++s) {
         const float sx = stripX(s);
-        if (sx > area.right() || sx + kStripW < area.x) continue;
+        if (sx > area.x + visible || sx + kStripW < area.x) continue;
         drawStrip(c, s);
     }
     c.popClip();
+    c.pushClip(area);
+    drawStrip(c, kMasterStripIndex);
+    c.popClip();
 
     // Rollbalken, wenn nicht alle Kanalzuege hineinpassen.
-    const float total = contentWidth();
-    if (total > area.w + 0.5f) {
-        const float barW = std::max(40.0f, area.w * area.w / total);
-        const float barX = area.x + (area.w - barW) * scroll_ / (total - area.w);
+    if (total > visible + 0.5f && visible > 0.0f) {
+        const float barW = std::max(40.0f, visible * visible / total);
+        const float barX = area.x + (visible - barW) * scroll_ / (total - visible);
         c.fillRounded({barX, area.bottom() - 4.0f, barW, 3.0f}, 1.5f, kTextDim);
     }
 }
@@ -410,7 +420,7 @@ void MixerView::wheel(float x, float y, float notches) {
             return;
         default:
             // Sonst rollt das Mausrad die Kanalzuege seitwaerts.
-            scroll_ = std::clamp(scroll_ - notches * 120.0f, 0.0f, std::max(0.0f, contentWidth() - area_.w));
+            scroll_ = std::clamp(scroll_ - notches * 120.0f, 0.0f, std::max(0.0f, contentWidth() - scrollWidth()));
             return;
     }
 }

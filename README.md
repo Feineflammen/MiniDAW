@@ -7,7 +7,14 @@ Aufbau, Regeln und Fahrplan stehen in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Bauen
 
-Voraussetzung: Visual Studio 2022 mit "Desktopentwicklung mit C++".
+Voraussetzung: Visual Studio 2022 oder die kostenlosen "Build Tools für
+Visual Studio 2022", jeweils mit "Desktopentwicklung mit C++".
+
+Doppelklick auf `build.bat` (oder in einer Eingabeaufforderung aufrufen). Das
+Skript sucht Visual Studio, baut, führt die Tests aus und nennt am Ende Pfad
+und SHA-256-Prüfsumme von `build\Release\minidaw.exe`.
+
+Von Hand geht es in der "Developer PowerShell" mit:
 
 ```
 cmake -B build

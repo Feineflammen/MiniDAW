@@ -92,6 +92,81 @@ bool ProjectController::removeClip(int track, int index) {
     return true;
 }
 
+bool ProjectController::splitClip(int track, int index, std::int64_t at) {
+    if (!validTrack(track)) return false;
+    auto& clips = project_.tracks[static_cast<std::size_t>(track)].clips;
+    if (index < 0 || index >= static_cast<int>(clips.size())) return false;
+    ClipModel& first = clips[static_cast<std::size_t>(index)];
+    if (at <= first.start || at >= first.start + first.length) return false;
+
+    ClipModel second = first;
+    const std::int64_t cut = at - first.start;
+    first.length = cut;
+    second.start = at;
+    second.offset += cut;
+    second.length -= cut;
+    clips.push_back(std::move(second));
+    syncTrack(track);
+    return true;
+}
+
+bool ProjectController::splitMidiClip(int track, int index, std::int64_t at) {
+    if (!validTrack(track)) return false;
+    auto& clips = project_.tracks[static_cast<std::size_t>(track)].midiClips;
+    if (index < 0 || index >= static_cast<int>(clips.size())) return false;
+    MidiClipModel& first = clips[static_cast<std::size_t>(index)];
+    if (at <= first.start || at >= first.start + first.length) return false;
+
+    const std::int64_t cut = at - first.start;
+    MidiClipModel second;
+    second.name = first.name;
+    second.start = at;
+    second.length = first.length - cut;
+    std::vector<MidiNote> keep;
+    for (MidiNote note : first.notes) {
+        if (note.start >= cut) {
+            note.start -= cut;  // gehoert zum hinteren Teil
+            second.notes.push_back(note);
+        } else {
+            note.length = std::min(note.length, cut - note.start);  // endet am Schnitt
+            keep.push_back(note);
+        }
+    }
+    first.notes = std::move(keep);
+    first.length = cut;
+    clips.push_back(std::move(second));
+    syncMidi(track);
+    return true;
+}
+
+bool ProjectController::trimClip(int track, int index, std::int64_t newStart, std::int64_t newEnd) {
+    if (!validTrack(track)) return false;
+    auto& clips = project_.tracks[static_cast<std::size_t>(track)].clips;
+    if (index < 0 || index >= static_cast<int>(clips.size())) return false;
+    ClipModel& clip = clips[static_cast<std::size_t>(index)];
+
+    // Wo laege der Dateianfang auf der Zeitachse? Das Material bewegt sich nicht.
+    const std::int64_t fileStart = clip.start - clip.offset;
+    const std::int64_t fileEnd = fileStart + clip.file->wav->frames();
+    newStart = std::clamp(newStart, std::max<std::int64_t>(0, fileStart), fileEnd);
+    newEnd = std::clamp(newEnd, newStart, fileEnd);
+    if (newEnd - newStart < 1) return false;
+    clip.start = newStart;
+    clip.offset = newStart - fileStart;
+    clip.length = newEnd - newStart;
+    syncTrack(track);
+    return true;
+}
+
+bool ProjectController::resizeMidiClip(int track, int index, std::int64_t newLength) {
+    if (!validTrack(track) || newLength < 1) return false;
+    auto& clips = project_.tracks[static_cast<std::size_t>(track)].midiClips;
+    if (index < 0 || index >= static_cast<int>(clips.size())) return false;
+    clips[static_cast<std::size_t>(index)].length = newLength;
+    syncMidi(track);
+    return true;
+}
+
 void ProjectController::setTrackGain(int track, float gain) {
     if (!validTrack(track)) return;
     modified_ = true;
@@ -634,7 +709,12 @@ std::int64_t ProjectController::projectLength() const noexcept {
 void ProjectController::syncTrack(int track) {
     modified_ = true;
     Playlist playlist;
-    for (const auto& clip : project_.tracks[static_cast<std::size_t>(track)].clips)
-        playlist.push_back(Clip{clip.file->wav, clip.start, clip.offset, clip.length, 1.0f});
+    for (const auto& clip : project_.tracks[static_cast<std::size_t>(track)].clips) {
+        // Blenden nur dort, wo mitten im Material geschnitten ist, nicht an den Enden der Datei.
+        const std::int64_t fade = std::min(kCutFade, clip.length / 2);
+        const std::int64_t fadeIn = clip.offset > 0 ? fade : 0;
+        const std::int64_t fadeOut = clip.offset + clip.length < clip.file->wav->frames() ? fade : 0;
+        playlist.push_back(Clip{clip.file->wav, clip.start, clip.offset, clip.length, 1.0f, fadeIn, fadeOut});
+    }
     engine_.setTrackPlaylist(track, std::move(playlist));
 }

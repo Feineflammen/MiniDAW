@@ -16,7 +16,11 @@
 
 namespace ui {
 
-enum class Key { Space, Home, Delete, Record, Escape };
+enum class Key {
+    Space, Home, Delete, Record, Escape,
+    NudgeLeft, NudgeRight, NudgeLeftBig, NudgeRightBig,  // Clip um 1 bzw. 10 ms verschieben
+    Split,                                                // Clip am Abspielzeiger teilen
+};
 
 // Die gesamte Oberflaeche: Transportleiste, Spurkoepfe, Zeitachse.
 // Kennt kein Fenster. Koordinaten sind geraeteunabhaengige Pixel (96 pro Zoll).
@@ -46,8 +50,9 @@ public:
 
     void mouseDown(float x, float y, bool doubleClick);
     void rightMouseDown(float x, float y);
-    void mouseMove(float x, float y);
-    void mouseUp(float x, float y);
+    // free: Umschalttaste gedrueckt, Clips rasten nicht ein.
+    void mouseMove(float x, float y, bool free = false);
+    void mouseUp(float x, float y, bool free = false);
     void wheel(float x, float y, float notches, bool ctrl, bool shift = false);
     // Oeffnet den Noten-Editor fuer einen MIDI-Clip.
     void openPianoRoll(int track, int index) { pianoRoll_.open(track, index); }
@@ -59,7 +64,7 @@ public:
     void dropFiles(float x, float y, const std::vector<std::filesystem::path>& paths);
 
 private:
-    enum class Drag { None, MasterGain, TrackGain, TrackPan, Scrub, Clip };
+    enum class Drag { None, MasterGain, TrackGain, TrackPan, Scrub, Clip, TrimStart, TrimEnd };
 
     // Geometrie
     float frameToX(double frame) const;
@@ -96,6 +101,8 @@ private:
 
     // Bedienung
     void applyDrag(float x, float y);
+    void nudgeSelected(double ms);
+    void splitAtPlayhead();
     void locateTo(float x);
     void togglePlay();
     void toggleRecord();
@@ -129,6 +136,7 @@ private:
     int dragTrack_ = -1;
     float dragStartX_ = 0.0f, dragStartY_ = 0.0f;
     bool dragMoved_ = false;
+    bool dragFree_ = false;  // Umschalttaste: ohne Einrasten
     std::int64_t grabOffset_ = 0;
     std::int64_t ghostStart_ = 0;
     int ghostTrack_ = -1;

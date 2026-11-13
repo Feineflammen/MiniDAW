@@ -222,6 +222,26 @@ Offen: Plugins laufen im selben Prozess, ein abstürzendes Plugin reißt die DAW
 mit. Plugin-Zustand wird noch nicht gespeichert (kommt mit dem Projekt in
 Schritt 9). Latenz der Plugins wird noch nicht ausgeglichen (Schritt 8).
 
+## Clips bearbeiten
+
+- Teilen, Kürzen und Verschieben ändern nur Position, Ausschnitt (`offset`)
+  und Länge. Die Audiodatei bleibt unverändert; wer zu viel abschneidet, zieht
+  die Kante wieder zurück.
+- An Schnittkanten (mitten im Material, nicht am Anfang oder Ende der Datei)
+  blendet `TrackStream` über 128 Frames ein bzw. aus, damit es nicht knackt.
+- MIDI-Clips werden beim Teilen nach Notenanfang aufgeteilt; Noten über den
+  Schnitt hinaus enden am Schnitt.
+
+## Audiogeräte
+
+`WasapiDevice::endpoints()` listet die angeschlossenen Geräte, `open()` öffnet
+sie über ihre Windows-Kennung. Beim Wechsel im Menü "Audio" werden
+Audiogerät und Disk-Thread angehalten, das Gerät neu geöffnet und bei
+anderer Samplerate oder größerem Puffer alle Plugins mit ihren Einstellungen
+neu geladen. Gewählte Geräte und der Latenz-Zusatz je Gerätekombination
+stehen in den Einstellungen. Fehlt das gespeicherte Gerät beim Start,
+werden die Windows-Standardgeräte benutzt.
+
 ## Modell und Engine
 
 - Das **Projektmodell** (Spuren, Clips, Noten, Plugin-Zuordnung, Mixerwerte)

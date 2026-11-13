@@ -23,6 +23,11 @@ public:
         : controller_(controller), sampleRate_(sampleRate), maxFrames_(maxFrames) {}
     ~PluginManager() override { shutdown(); }
 
+    // Neue Samplerate oder Blocklaenge (anderes Audiogeraet): Alle geladenen
+    // Plugins werden mit ihren Einstellungen neu geladen. Nur rufen, solange
+    // der Audio-Thread steht. Liefert die Zahl der Plugins, die das nicht ueberstanden.
+    int setAudioFormat(double sampleRate, int maxFrames);
+
     // Hauptfenster, dem die Plugin-Fenster zugeordnet werden.
     void setOwner(HWND owner) { owner_ = owner; }
 

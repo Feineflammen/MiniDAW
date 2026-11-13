@@ -85,7 +85,23 @@ void TrackStream::renderChunk() {
         clip.source->readStereo(clip.sourceOffset + (a - clip.start), count, temp_.data());
 
         float* dst = chunk_.data() + 2 * static_cast<std::size_t>(a - blockStart);
-        for (int i = 0; i < 2 * count; ++i) dst[i] += clip.gain * temp_[static_cast<std::size_t>(i)];
+        const std::int64_t first = a - clip.start;  // Position im Clip
+        const bool fading = (clip.fadeIn > 0 && first < clip.fadeIn) ||
+                            (clip.fadeOut > 0 && b - clip.start > clip.length - clip.fadeOut);
+        if (!fading) {
+            for (int i = 0; i < 2 * count; ++i) dst[i] += clip.gain * temp_[static_cast<std::size_t>(i)];
+            continue;
+        }
+        // Kurze Blenden an Schnittkanten, damit es dort nicht knackt.
+        for (int i = 0; i < count; ++i) {
+            const std::int64_t p = first + i;
+            float g = clip.gain;
+            if (p < clip.fadeIn) g *= static_cast<float>(p) / static_cast<float>(clip.fadeIn);
+            const std::int64_t remaining = clip.length - p;
+            if (remaining <= clip.fadeOut) g *= static_cast<float>(remaining) / static_cast<float>(clip.fadeOut + 1);
+            dst[2 * i] += g * temp_[2 * static_cast<std::size_t>(i)];
+            dst[2 * i + 1] += g * temp_[2 * static_cast<std::size_t>(i) + 1];
+        }
     }
 }
 

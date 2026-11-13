@@ -82,10 +82,23 @@ bool MainWindow::create(HINSTANCE instance, int showCommand, std::string& error)
     AppendMenuW(file, MF_STRING, kFileExport, L"Als WAV &exportieren \u2026\tStrg+E");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, kFileQuit, L"&Beenden");
+    const HMENU edit = CreatePopupMenu();
+    AppendMenuW(edit, MF_STRING, kEditSplit, L"Clip am Abspielzeiger &teilen\tStrg+T");
+    AppendMenuW(edit, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(edit, MF_STRING, kEditNudgeLeft, L"Clip 1 ms fr\u00FCher\t\u2190");
+    AppendMenuW(edit, MF_STRING, kEditNudgeRight, L"Clip 1 ms sp\u00E4ter\t\u2192");
+    AppendMenuW(edit, MF_STRING, kEditNudgeLeftBig, L"Clip 10 ms fr\u00FCher\tUmschalt+\u2190");
+    AppendMenuW(edit, MF_STRING, kEditNudgeRightBig, L"Clip 10 ms sp\u00E4ter\tUmschalt+\u2192");
+    AppendMenuW(edit, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(edit, MF_STRING, kEditDelete, L"Clip &l\u00F6schen\tEntf");
+    audioMenu_ = CreatePopupMenu();
+    AppendMenuW(audioMenu_, MF_STRING | MF_GRAYED, 0, L"(wird beim \u00D6ffnen gef\u00FCllt)");
     const HMENU tools = CreatePopupMenu();
     AppendMenuW(tools, MF_STRING, kToolsMeasureLatency, L"&Latenz messen \u2026");
     const HMENU bar = CreateMenu();
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"&Datei");
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(edit), L"&Bearbeiten");
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(audioMenu_), L"&Audio");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(tools), L"E&xtras");
 
     hwnd_ = CreateWindowExW(0, kClassName, L"MiniDAW", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
@@ -141,7 +154,18 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
         case WM_ERASEBKGND:
             return 1;
 
+        case WM_INITMENUPOPUP:
+            if (reinterpret_cast<HMENU>(wParam) == audioMenu_ && onAudioMenu) onAudioMenu(audioMenu_);
+            return 0;
+
         case WM_COMMAND:
+            if (HIWORD(wParam) == 0 && LOWORD(wParam) >= kEditSplit && LOWORD(wParam) <= kEditDelete) {
+                static const Key kKeys[] = {Key::Split, Key::NudgeLeft, Key::NudgeRight, Key::NudgeLeftBig,
+                                            Key::NudgeRightBig, Key::Delete};
+                view_.key(kKeys[LOWORD(wParam) - kEditSplit]);
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return 0;
+            }
             if (HIWORD(wParam) == 0 && onCommand) {
                 if (LOWORD(wParam) == kFileQuit) SendMessageW(hwnd_, WM_CLOSE, 0, 0);
                 else onCommand(LOWORD(wParam));
@@ -197,12 +221,12 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_MOUSEMOVE:
-            view_.mouseMove(toDip(GET_X_LPARAM(lParam)), toDip(GET_Y_LPARAM(lParam)));
+            view_.mouseMove(toDip(GET_X_LPARAM(lParam)), toDip(GET_Y_LPARAM(lParam)), (wParam & MK_SHIFT) != 0);
             if (wParam & MK_LBUTTON) InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
 
         case WM_LBUTTONUP:
-            view_.mouseUp(toDip(GET_X_LPARAM(lParam)), toDip(GET_Y_LPARAM(lParam)));
+            view_.mouseUp(toDip(GET_X_LPARAM(lParam)), toDip(GET_Y_LPARAM(lParam)), (wParam & MK_SHIFT) != 0);
             ReleaseCapture();
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
@@ -230,6 +254,11 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
                                     : wParam == 'S' ? (shift ? kFileSaveAs : kFileSave)
                                     : wParam == 'E' ? kFileExport
                                                     : 0;
+                if (wParam == 'T' && !repeat) {
+                    view_.key(Key::Split);
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return 0;
+                }
                 if (command != 0 && !repeat && onCommand) {
                     view_.releaseAllNotes();
                     onCommand(command);
@@ -247,7 +276,14 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 return 0;
             }
-            if (repeat && wParam != VK_DELETE) return 0;
+            if (repeat && wParam != VK_DELETE && wParam != VK_LEFT && wParam != VK_RIGHT) return 0;
+            if (wParam == VK_LEFT || wParam == VK_RIGHT) {
+                const bool big = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                view_.key(wParam == VK_LEFT ? (big ? Key::NudgeLeftBig : Key::NudgeLeft)
+                                            : (big ? Key::NudgeRightBig : Key::NudgeRight));
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return 0;
+            }
             if (wParam == VK_SPACE) view_.key(Key::Space);
             else if (wParam == VK_HOME) view_.key(Key::Home);
             else if (wParam == VK_DELETE) view_.key(Key::Delete);

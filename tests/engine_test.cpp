@@ -1728,6 +1728,83 @@ void testLatencyProbe() {
     }
 }
 
+// --- Clips teilen, kuerzen, Blenden -------------------------------------------
+
+void testClipEditing() {
+    makeSource();
+    const auto path = tempFile("minidaw_test_source.wav");
+    std::string message;
+
+    Rig rig;
+    ProjectController controller(*rig.engine);
+    controller.setSampleRate(kRate);
+    CHECK(controller.addClip(0, path, 1000, message));
+    const auto& clips = controller.project().tracks[0].clips;
+
+    // Teilen: zwei Clips, die zusammen genau das Original ergeben.
+    CHECK(!controller.splitClip(0, 0, 1000));  // am Rand: nichts zu teilen
+    CHECK(!controller.splitClip(0, 0, 999999999));
+    CHECK(controller.splitClip(0, 0, 5000));
+    CHECK(clips.size() == 2);
+    if (clips.size() == 2) {
+        CHECK(clips[0].start == 1000 && clips[0].offset == 0 && clips[0].length == 4000);
+        CHECK(clips[1].start == 5000 && clips[1].offset == 4000 && clips[1].length == kSourceFrames - 4000);
+    }
+
+    // Klang: Bis auf die kurzen Blenden um den Schnitt ist alles unveraendert,
+    // und die Blenden laufen sauber auf null und wieder hoch.
+    const Expected expected = [](std::int64_t p) -> std::int64_t {
+        return (p >= 1000 && p < 1000 + kSourceFrames) ? p - 1000 : -1;
+    };
+    rig.service();
+    rig.render();
+    rig.engine->play();
+    rig.render();
+    std::vector<float> all;
+    for (int b = 0; b < 30; ++b) {
+        rig.service();
+        rig.render();
+        all.insert(all.end(), rig.l.begin(), rig.l.end());
+    }
+    const float g = std::cos(0.7853981633974483f);
+    bool outsideExact = true, fadesBounded = true;
+    for (std::size_t i = 0; i < all.size(); ++i) {
+        const std::int64_t pos = static_cast<std::int64_t>(i) + kBlock;
+        const std::int64_t src = expected(pos);
+        const float want = src >= 0 ? sourceL(src) * g : 0.0f;
+        const bool nearCut = std::llabs(pos - 5000) <= ProjectController::kCutFade;
+        if (!nearCut && std::fabs(all[i] - want) > 1e-5f) outsideExact = false;
+        if (nearCut && std::fabs(all[i]) > std::fabs(want) + 1e-5f) fadesBounded = false;
+    }
+    CHECK(outsideExact);
+    CHECK(fadesBounded);
+    CHECK(std::fabs(all[static_cast<std::size_t>(5000 - kBlock)]) < 1e-6f);  // genau am Schnitt: Stille
+
+    // Kuerzen: Das Material bleibt an seinem Platz, nur der Ausschnitt aendert sich.
+    CHECK(controller.trimClip(0, 1, 6000, 20000));
+    CHECK(clips[1].start == 6000 && clips[1].offset == 5000 && clips[1].length == 14000);
+    CHECK(controller.trimClip(0, 1, 0, 999999999));  // ueber die Datei hinaus: begrenzt
+    CHECK(clips[1].start == 1000 && clips[1].offset == 0 && clips[1].length == kSourceFrames);
+    CHECK(!controller.trimClip(0, 1, 7000, 7000));
+
+    // MIDI teilen: Noten nach dem Schnitt wandern, eine ueberlappende endet am Schnitt.
+    MidiClipModel midi;
+    midi.start = 0;
+    midi.length = 10000;
+    midi.notes = {{0, 3000, 60, 100}, {2000, 5000, 62, 100}, {6000, 1000, 64, 100}};
+    CHECK(controller.addMidiClip(1, midi) == 0);
+    CHECK(controller.splitMidiClip(1, 0, 4000));
+    const auto& mc = controller.project().tracks[1].midiClips;
+    CHECK(mc.size() == 2);
+    if (mc.size() == 2) {
+        CHECK(mc[0].length == 4000 && mc[0].notes.size() == 2 && mc[0].notes[1].length == 2000);
+        CHECK(mc[1].start == 4000 && mc[1].length == 6000 && mc[1].notes.size() == 1 && mc[1].notes[0].start == 2000);
+    }
+    CHECK(controller.resizeMidiClip(1, 1, 500));
+    CHECK(mc[1].length == 500);
+    while (!controller.peaksIdle()) std::this_thread::yield();
+}
+
 }  // namespace
 
 int main() {
@@ -1763,6 +1840,7 @@ int main() {
     testProjectFile();
     testOfflineRender();
     testLatencyProbe();
+    testClipEditing();
     {
         std::error_code ec;
         std::filesystem::remove_all(tempFile("minidaw_test_aufnahmen"), ec);

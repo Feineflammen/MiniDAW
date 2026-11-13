@@ -12,6 +12,7 @@
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <avrt.h>
+#include <propsys.h>
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -42,6 +43,37 @@ bool isFloat32(const WAVEFORMATEX* f) {
         return ext->SubFormat.Data1 == WAVE_FORMAT_IEEE_FLOAT;
     }
     return false;
+}
+
+// PKEY_Device_FriendlyName, hier selbst angelegt statt aus functiondiscoverykeys_devpkey.h.
+const PROPERTYKEY kFriendlyName = {{0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}}, 14};
+
+std::wstring deviceId(IMMDevice* device) {
+    std::wstring id;
+    LPWSTR raw = nullptr;
+    if (SUCCEEDED(device->GetId(&raw)) && raw) id = raw;
+    if (raw) CoTaskMemFree(raw);
+    return id;
+}
+
+std::wstring deviceName(IMMDevice* device) {
+    std::wstring name;
+    ComPtr<IPropertyStore> store;
+    if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &store))) {
+        PROPVARIANT value;
+        PropVariantInit(&value);
+        if (SUCCEEDED(store->GetValue(kFriendlyName, &value)) && value.vt == VT_LPWSTR && value.pwszVal)
+            name = value.pwszVal;
+        PropVariantClear(&value);
+    }
+    return name.empty() ? std::wstring(L"Unbenanntes Ger\u00E4t") : name;
+}
+
+// Holt das Geraet mit dieser Kennung oder, bei leerer Kennung, das Standardgeraet.
+HRESULT findDevice(IMMDeviceEnumerator* enumerator, EDataFlow flow, const std::wstring& id, ComPtr<IMMDevice>& device) {
+    device.Reset();
+    if (id.empty()) return enumerator->GetDefaultAudioEndpoint(flow, eConsole, &device);
+    return enumerator->GetDevice(id.c_str(), &device);
 }
 
 HRESULT activateClient(IMMDevice* device, ComPtr<IAudioClient>& client) {
@@ -112,7 +144,9 @@ struct WasapiDevice::Impl {
     std::vector<std::vector<float>> inPlanar;
     std::vector<const float*> inPtrs;
 
-    void openInput(IMMDeviceEnumerator* enumerator);
+    void openInput(IMMDeviceEnumerator* enumerator, const std::wstring& id);
+
+    std::wstring outId, outName, inId, inName;
     void closeInput();
     void renderThread();
     void captureThread();
@@ -125,7 +159,30 @@ WasapiDevice::WasapiDevice() : d(std::make_unique<Impl>()) {}
 
 WasapiDevice::~WasapiDevice() { close(); }
 
-bool WasapiDevice::open(std::string& error) {
+std::vector<AudioEndpoint> WasapiDevice::endpoints(bool capture) {
+    std::vector<AudioEndpoint> list;
+    ComPtr<IMMDeviceEnumerator> enumerator;
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&enumerator))))
+        return list;
+    ComPtr<IMMDeviceCollection> collection;
+    if (FAILED(enumerator->EnumAudioEndpoints(capture ? eCapture : eRender, DEVICE_STATE_ACTIVE, &collection)))
+        return list;
+    UINT count = 0;
+    collection->GetCount(&count);
+    for (UINT i = 0; i < count; ++i) {
+        ComPtr<IMMDevice> device;
+        if (SUCCEEDED(collection->Item(i, &device))) list.push_back({deviceId(device.Get()), deviceName(device.Get())});
+    }
+    return list;
+}
+
+const std::wstring& WasapiDevice::outputId() const { return d->outId; }
+const std::wstring& WasapiDevice::outputName() const { return d->outName; }
+const std::wstring& WasapiDevice::inputId() const { return d->inId; }
+const std::wstring& WasapiDevice::inputName() const { return d->inName; }
+
+bool WasapiDevice::open(const std::wstring& outputId, const std::wstring& inputId, bool noInput,
+                        std::string& error) {
     close();
 
     ComPtr<IMMDeviceEnumerator> enumerator;
@@ -134,8 +191,14 @@ bool WasapiDevice::open(std::string& error) {
     if (FAILED(hr)) { error = hrText("Geraeteliste nicht verfuegbar", hr); return false; }
 
     ComPtr<IMMDevice> device;
-    hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
-    if (FAILED(hr)) { error = hrText("Kein Standard-Wiedergabegeraet", hr); return false; }
+    hr = findDevice(enumerator.Get(), eRender, outputId, device);
+    if (FAILED(hr)) {
+        error = outputId.empty() ? hrText("Kein Standard-Wiedergabegeraet", hr)
+                                 : hrText("Wiedergabegeraet nicht gefunden (abgesteckt?)", hr);
+        return false;
+    }
+    d->outId = deviceId(device.Get());
+    d->outName = deviceName(device.Get());
 
     hr = activateClient(device.Get(), d->client);
     if (FAILED(hr)) { error = hrText("Audio-Client nicht aktivierbar", hr); return false; }
@@ -216,16 +279,22 @@ bool WasapiDevice::open(std::string& error) {
     for (auto& ch : d->planar) d->planarPtrs.push_back(ch.data());
 
     // Der Eingang ist optional: Ohne ihn laeuft alles ausser der Aufnahme.
-    d->openInput(enumerator.Get());
+    if (noInput) {
+        d->inError = "Kein Eingang gewaehlt";
+    } else {
+        d->openInput(enumerator.Get(), inputId);
+    }
     return true;
 }
 
-void WasapiDevice::Impl::openInput(IMMDeviceEnumerator* enumerator) {
+void WasapiDevice::Impl::openInput(IMMDeviceEnumerator* enumerator, const std::wstring& id) {
     inError.clear();
 
     ComPtr<IMMDevice> device;
-    HRESULT hr = enumerator->GetDefaultAudioEndpoint(eCapture, eConsole, &device);
-    if (FAILED(hr)) { inError = "Kein Aufnahmegeraet gefunden"; return; }
+    HRESULT hr = findDevice(enumerator, eCapture, id, device);
+    if (FAILED(hr)) { inError = id.empty() ? "Kein Aufnahmegeraet gefunden" : "Aufnahmegeraet nicht gefunden (abgesteckt?)"; return; }
+    inId = deviceId(device.Get());
+    inName = deviceName(device.Get());
 
     hr = activateClient(device.Get(), inClient);
     if (FAILED(hr)) { inError = hrText("Aufnahmegeraet nicht aktivierbar", hr); closeInput(); return; }
@@ -304,6 +373,8 @@ void WasapiDevice::Impl::closeInput() {
     inChannels = 0;
     inPlanar.clear();
     inPtrs.clear();
+    inId.clear();
+    inName.clear();
 }
 
 bool WasapiDevice::start(AudioCallback& callback, std::string& error) {
@@ -340,6 +411,8 @@ void WasapiDevice::close() {
     d->periodFrames = 0;
     d->channels = 0;
     d->sampleRate = 0.0;
+    d->outId.clear();
+    d->outName.clear();
 }
 
 double WasapiDevice::sampleRate() const { return d->sampleRate; }

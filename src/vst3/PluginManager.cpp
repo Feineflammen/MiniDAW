@@ -1,5 +1,7 @@
 #include "vst3/PluginManager.h"
 
+#include <algorithm>
+
 namespace vst3 {
 
 namespace {
@@ -10,6 +12,24 @@ std::wstring widen(const std::string& text) { return std::wstring(text.begin(), 
 bool validTrack(int track) { return track >= 0 && track < kProjectTracks; }
 
 }  // namespace
+
+int PluginManager::setAudioFormat(double sampleRate, int maxFrames) {
+    if (sampleRate == sampleRate_ && maxFrames <= maxFrames_) return 0;
+    sampleRate_ = sampleRate;
+    maxFrames_ = std::max(maxFrames, maxFrames_);
+    int failed = 0;
+    for (int t = 0; t < kProjectTracks; ++t) {
+        std::filesystem::path file;
+        std::vector<char> state;
+        if (!capture(t, file, state)) continue;
+        std::string error;
+        if (!restore(t, file, state, error)) {
+            unload(t);
+            ++failed;
+        }
+    }
+    return failed;
+}
 
 void PluginManager::idle() {
     for (auto& slot : slots_)

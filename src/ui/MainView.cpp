@@ -977,6 +977,11 @@ void MainView::mouseDown(float x, float y, bool doubleClick) {
                 pianoRoll_.open(track, i);
                 return;
             }
+            const float x1 = frameToX(static_cast<double>(clip.start + clip.length));
+            if (x1 - frameToX(static_cast<double>(clip.start)) > 24.0f && x1 - x < 6.0f) {
+                drag_ = Drag::TrimEnd;  // rechte Kante: Laenge aendern
+                return;
+            }
             drag_ = Drag::Clip;
             grabOffset_ = frame - clip.start;
             ghostStart_ = clip.start;
@@ -991,6 +996,11 @@ void MainView::mouseDown(float x, float y, bool doubleClick) {
             selTrack_ = track;
             selIndex_ = i;
             selMidi_ = false;
+            // Nahe an einer Kante: die Kante ziehen (Clip kuerzen oder verlaengern).
+            const float x0 = frameToX(static_cast<double>(clip.start));
+            const float x1 = frameToX(static_cast<double>(clip.start + clip.length));
+            if (x1 - x0 > 24.0f && x - x0 < 6.0f) { drag_ = Drag::TrimStart; return; }
+            if (x1 - x0 > 24.0f && x1 - x < 6.0f) { drag_ = Drag::TrimEnd; return; }
             drag_ = Drag::Clip;
             grabOffset_ = frame - clip.start;
             ghostStart_ = clip.start;
@@ -1046,9 +1056,24 @@ void MainView::applyDrag(float x, float y) {
             std::int64_t clipStart = 0, length = 0;
             if (!selectedClip(clipStart, length)) break;
             const auto wanted = std::max<std::int64_t>(0, static_cast<std::int64_t>(xToFrame(x)) - grabOffset_);
-            ghostStart_ = snap(wanted, length, selTrack_, selIndex_);
+            ghostStart_ = dragFree_ ? wanted : snap(wanted, length, selTrack_, selIndex_);
             const int row = static_cast<int>(std::floor((y - kTopH - kRulerH) / kRowH));
             ghostTrack_ = std::clamp(row, 0, kProjectTracks - 1);
+            break;
+        }
+        case Drag::TrimStart:
+        case Drag::TrimEnd: {
+            std::int64_t clipStart = 0, length = 0;
+            if (!selectedClip(clipStart, length)) break;
+            auto edge = std::max<std::int64_t>(0, static_cast<std::int64_t>(xToFrame(x)));
+            if (!dragFree_) edge = snap(edge, 0, selTrack_, selIndex_);
+            if (selMidi_) {
+                controller_.resizeMidiClip(selTrack_, selIndex_, std::max<std::int64_t>(1, edge - clipStart));
+            } else if (drag_ == Drag::TrimStart) {
+                controller_.trimClip(selTrack_, selIndex_, std::min(edge, clipStart + length - 1), clipStart + length);
+            } else {
+                controller_.trimClip(selTrack_, selIndex_, clipStart, std::max(edge, clipStart + 1));
+            }
             break;
         }
         case Drag::None:
@@ -1056,12 +1081,46 @@ void MainView::applyDrag(float x, float y) {
     }
 }
 
-void MainView::mouseMove(float x, float y) {
+// Verschiebt den ausgewaehlten Clip um wenige Millisekunden (Pfeiltasten).
+void MainView::nudgeSelected(double ms) {
+    std::int64_t start = 0, length = 0;
+    if (!selectedClip(start, length)) {
+        setStatus(L"Erst einen Clip anklicken, dann mit den Pfeiltasten verschieben.");
+        return;
+    }
+    const auto delta = static_cast<std::int64_t>(std::llround(ms * controller_.sampleRate() / 1000.0));
+    const std::int64_t target = std::max<std::int64_t>(0, start + delta);
+    const int index = selMidi_ ? controller_.moveMidiClip(selTrack_, selIndex_, selTrack_, target)
+                               : controller_.moveClip(selTrack_, selIndex_, selTrack_, target);
+    if (index >= 0) selIndex_ = index;
+    wchar_t text[64];
+    std::swprintf(text, 64, L"Clip verschoben: %+.0f ms", ms);
+    setStatus(text);
+}
+
+// Teilt den ausgewaehlten Clip am Abspielzeiger; ausgewaehlt bleibt der hintere Teil.
+void MainView::splitAtPlayhead() {
+    std::int64_t start = 0, length = 0;
+    const std::int64_t at = engine_.position();
+    if (!selectedClip(start, length) || at <= start || at >= start + length) {
+        setStatus(L"Zum Teilen einen Clip anklicken und den Abspielzeiger in ihn setzen.");
+        return;
+    }
+    const bool ok = selMidi_ ? controller_.splitMidiClip(selTrack_, selIndex_, at)
+                             : controller_.splitClip(selTrack_, selIndex_, at);
+    if (!ok) return;
+    const TrackModel& model = controller_.project().tracks[static_cast<std::size_t>(selTrack_)];
+    selIndex_ = static_cast<int>(selMidi_ ? model.midiClips.size() : model.clips.size()) - 1;
+}
+
+void MainView::mouseMove(float x, float y, bool free) {
+    dragFree_ = free;
     if (editorDrag_) { pianoRoll_.mouseMove(x, y); return; }
     if (drag_ != Drag::None) applyDrag(x, y);
 }
 
-void MainView::mouseUp(float x, float y) {
+void MainView::mouseUp(float x, float y, bool free) {
+    dragFree_ = free;
     if (editorDrag_) {
         editorDrag_ = false;
         pianoRoll_.mouseUp(x, y);
@@ -1140,6 +1199,11 @@ void MainView::key(Key k) {
             engine_.locate(0);
             viewStart_ = 0.0;
             break;
+        case Key::NudgeLeft: nudgeSelected(-1.0); break;
+        case Key::NudgeRight: nudgeSelected(1.0); break;
+        case Key::NudgeLeftBig: nudgeSelected(-10.0); break;
+        case Key::NudgeRightBig: nudgeSelected(10.0); break;
+        case Key::Split: splitAtPlayhead(); break;
         case Key::Escape:
             if (pickerTrack_ >= 0) pickerTrack_ = -1;
             else pianoRoll_.close();

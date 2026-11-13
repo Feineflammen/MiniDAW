@@ -69,6 +69,20 @@ public:
 
     bool removeClip(int track, int index);
 
+    // Teilt einen Clip an der Zeitachsen-Position at in zwei. Liefert false,
+    // wenn at nicht im Clip liegt. Der hintere Teil kommt ans Ende der Liste.
+    bool splitClip(int track, int index, std::int64_t at);
+    bool splitMidiClip(int track, int index, std::int64_t at);
+    // Setzt Anfang und Ende eines Audio-Clips auf der Zeitachse neu (Kanten
+    // ziehen). Das Material bleibt an seinem Platz, nur der sichtbare Ausschnitt
+    // aendert sich; begrenzt auf die Datei.
+    bool trimClip(int track, int index, std::int64_t newStart, std::int64_t newEnd);
+    // Neue Laenge eines MIDI-Clips (Noten dahinter bleiben gespeichert, klingen aber nicht).
+    bool resizeMidiClip(int track, int index, std::int64_t newLength);
+
+    // Laenge der Blenden an Schnittkanten von Audio-Clips, in Frames.
+    static constexpr std::int64_t kCutFade = 128;
+
     void setTrackGain(int track, float gain);
     void setTrackPan(int track, float pan);
     void setTrackMute(int track, bool mute);

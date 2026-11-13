@@ -16,6 +16,11 @@ namespace ui {
 enum MenuCommand { kFileNew = 1001, kFileOpen, kFileSave, kFileSaveAs, kFileExport, kFileQuit };
 // Befehle des Menues "Extras".
 enum ToolsCommand { kToolsMeasureLatency = 1101 };
+// Befehle des Menues "Bearbeiten"; das Fenster reicht sie selbst an die Ansicht weiter.
+enum EditCommand { kEditSplit = 1201, kEditNudgeLeft, kEditNudgeRight, kEditNudgeLeftBig, kEditNudgeRightBig, kEditDelete };
+// Eintraege im Menue "Audio": Ausgabegeraet i = kAudioOutputBase + i, Eingabegeraet
+// i = kAudioInputBase + i, kein Eingang = kAudioNoInput.
+enum AudioCommand { kAudioOutputBase = 2000, kAudioInputBase = 2200, kAudioNoInput = 2399 };
 
 // Das Win32-Fenster. Reicht Eingaben an die MainView weiter und zeichnet sie
 // mit Direct2D, etwa 30-mal pro Sekunde.
@@ -31,6 +36,8 @@ public:
 
     // Wird fuer Menuebefehle und ihre Tastenkuerzel gerufen (MenuCommand).
     std::function<void(int)> onCommand;
+    // Wird gerufen, bevor das Menue "Audio" aufklappt; dort werden die Eintraege neu angelegt.
+    std::function<void(HMENU)> onAudioMenu;
     // Wird gefragt, bevor das Fenster schliesst. false bricht das Schliessen ab.
     std::function<bool()> onCloseRequest;
 
@@ -48,6 +55,7 @@ private:
     MainView& view_;
     HWND hwnd_ = nullptr;
     float dpi_ = 96.0f;
+    HMENU audioMenu_ = nullptr;
     int frameCount_ = 0;
     Microsoft::WRL::ComPtr<ID2D1Factory> d2d_;
     Microsoft::WRL::ComPtr<IDWriteFactory> dwrite_;

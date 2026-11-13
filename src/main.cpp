@@ -28,6 +28,7 @@
 #include <cwchar>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -156,9 +157,17 @@ std::filesystem::path settingsPath() {
 }
 
 struct Settings {
-    int recordOffsetMs = 0;
+    int recordOffsetMs = 0;   // alter Wert ohne Geraetebezug, gilt fuer noch unbekannte Geraete
     std::wstring midiOutput;  // Name des MIDI-Ausgabegeraets, leer = keins
+    std::wstring audioOutput; // Kennung des Wiedergabegeraets, leer = Windows-Standard
+    std::wstring audioInput;  // Kennung des Aufnahmegeraets, leer = Windows-Standard
+    bool noInput = false;
+    // Aufnahme-Latenz (Zusatz in ms) je Kombination aus Wiedergabe- und Aufnahmegeraet.
+    std::map<std::wstring, int> latencyByDevice;
 };
+
+// Schluessel fuer die Latenz einer Geraetekombination.
+std::wstring deviceKey(const WasapiDevice& device) { return device.outputId() + L"|" + device.inputId(); }
 
 Settings loadSettings() {
     Settings settings;
@@ -174,6 +183,15 @@ Settings loadSettings() {
         const std::string value = line.substr(eq + 1);
         if (key == "aufnahme_versatz_ms") settings.recordOffsetMs = std::atoi(value.c_str());
         else if (key == "midi_ausgang") settings.midiOutput = fromUtf8(value);
+        else if (key == "audio_ausgang") settings.audioOutput = fromUtf8(value);
+        else if (key == "audio_eingang") settings.audioInput = fromUtf8(value);
+        else if (key == "kein_eingang") settings.noInput = value == "1";
+        else if (key == "latenz") {
+            // latenz=<ms> <Geraeteschluessel>
+            const auto space = value.find(' ');
+            if (space != std::string::npos)
+                settings.latencyByDevice[fromUtf8(value.substr(space + 1))] = std::atoi(value.substr(0, space).c_str());
+        }
     }
     return settings;
 }
@@ -185,7 +203,11 @@ void saveSettings(const Settings& settings) {
     std::filesystem::create_directories(path.parent_path(), ec);
     std::ofstream out(path, std::ios::trunc);
     out << "aufnahme_versatz_ms=" << settings.recordOffsetMs << "\n"
-        << "midi_ausgang=" << toUtf8(settings.midiOutput) << "\n";
+        << "midi_ausgang=" << toUtf8(settings.midiOutput) << "\n"
+        << "audio_ausgang=" << toUtf8(settings.audioOutput) << "\n"
+        << "audio_eingang=" << toUtf8(settings.audioInput) << "\n"
+        << "kein_eingang=" << (settings.noInput ? 1 : 0) << "\n";
+    for (const auto& [key, ms] : settings.latencyByDevice) out << "latenz=" << ms << ' ' << toUtf8(key) << "\n";
 }
 
 
@@ -208,10 +230,16 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
     WasapiDevice device;
     DiskThread disk;
     std::string error;
+    Settings settings = loadSettings();
 
-    if (!device.open(error)) {
-        showError("Audiogeraet nicht verfuegbar: " + error);
-        return 1;
+    // Zuletzt gewaehlte Geraete oeffnen; fehlt eins (abgesteckt), die Windows-Standardgeraete.
+    std::wstring startupNotice;
+    if (!device.open(settings.audioOutput, settings.audioInput, settings.noInput, error)) {
+        if (settings.audioOutput.empty() || !device.open(error)) {
+            showError("Audiogeraet nicht verfuegbar: " + error);
+            return 1;
+        }
+        startupNotice = L"Das zuletzt gew\u00E4hlte Audioger\u00E4t fehlt, es l\u00E4uft das Windows-Standardger\u00E4t.";
     }
 
     ProjectController controller(*engine);
@@ -221,8 +249,12 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
         return static_cast<std::int64_t>(device.inputLatencyFrames() + device.outputLatencyFrames());
     });
 
-    Settings settings = loadSettings();
-    controller.setRecordOffsetMs(settings.recordOffsetMs);
+    // Latenz-Zusatz der aktuellen Geraetekombination, sonst der alte allgemeine Wert.
+    const auto latencyFor = [&settings](const WasapiDevice& d) {
+        const auto it = settings.latencyByDevice.find(deviceKey(d));
+        return it != settings.latencyByDevice.end() ? it->second : settings.recordOffsetMs;
+    };
+    controller.setRecordOffsetMs(latencyFor(device));
     engine->setOutputLatencyFrames(device.outputLatencyFrames());
 
     // Aufnahmen landen unter Dokumente\MiniDAW\Aufnahmen.
@@ -248,18 +280,22 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
     controller.setPluginPersistence(&plugins);
 
     ui::MainView view(controller, *engine);
-    wchar_t info[160];
-    std::swprintf(info, 160, L"%.0f Hz, Puffer %d Frames (%.1f ms), %ls", device.sampleRate(),
-                  device.periodFrames(), 1000.0 * device.periodFrames() / device.sampleRate(),
-                  device.inputChannels() == 0   ? L"kein Eingang"
-                  : device.inputChannels() == 1 ? L"Eingang mono"
-                                                : L"Eingang stereo");
-    std::wstring deviceInfo = info;
-    if (device.inputChannels() == 0 && !device.inputError().empty()) {
-        const std::string& reason = device.inputError();  // reines ASCII
-        deviceInfo += L" (" + std::wstring(reason.begin(), reason.end()) + L")";
-    }
-    view.setDeviceInfo(deviceInfo);
+    // Zeile fuer die Statusleiste: Geraete, Samplerate, Puffer.
+    const auto describeDevice = [&device] {
+        if (device.sampleRate() <= 0.0) return std::wstring(L"Kein Audioger\u00E4t ge\u00F6ffnet (Men\u00FC Audio)");
+        wchar_t info[256];
+        std::swprintf(info, 256, L"%ls, %.0f Hz, Puffer %.1f ms  \u2022  Eingang: %ls", device.outputName().c_str(),
+                      device.sampleRate(), 1000.0 * device.periodFrames() / device.sampleRate(),
+                      device.inputChannels() == 0 ? L"keiner" : device.inputName().c_str());
+        std::wstring text = info;
+        if (device.inputChannels() == 0 && !device.inputError().empty()) {
+            const std::string& reason = device.inputError();  // reines ASCII
+            text += L" (" + std::wstring(reason.begin(), reason.end()) + L")";
+        }
+        return text;
+    };
+    view.setDeviceInfo(describeDevice());
+    if (!startupNotice.empty()) view.showMessage(startupNotice);
     view.setMidiInfo(midi.summary());
     view.setMidiOutInfo(midiOut.current());
     view.setPluginHost(&plugins);
@@ -402,6 +438,81 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
         }
     };
 
+    // --- Audiogeraete waehlen ---
+    std::vector<AudioEndpoint> menuOutputs, menuInputs;
+    window.onAudioMenu = [&](HMENU menu) {
+        while (GetMenuItemCount(menu) > 0) DeleteMenu(menu, 0, MF_BYPOSITION);
+        menuOutputs = WasapiDevice::endpoints(false);
+        menuInputs = WasapiDevice::endpoints(true);
+        if (menuOutputs.size() > 199) menuOutputs.resize(199);
+        if (menuInputs.size() > 198) menuInputs.resize(198);
+
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"Wiedergabe");
+        for (std::size_t i = 0; i < menuOutputs.size(); ++i)
+            AppendMenuW(menu, MF_STRING | (menuOutputs[i].id == device.outputId() ? MF_CHECKED : 0),
+                        ui::kAudioOutputBase + i, menuOutputs[i].name.c_str());
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"Aufnahme");
+        for (std::size_t i = 0; i < menuInputs.size(); ++i)
+            AppendMenuW(menu, MF_STRING | (device.inputChannels() > 0 && menuInputs[i].id == device.inputId() ? MF_CHECKED : 0),
+                        ui::kAudioInputBase + i, menuInputs[i].name.c_str());
+        AppendMenuW(menu, MF_STRING | (device.inputChannels() == 0 ? MF_CHECKED : 0), ui::kAudioNoInput, L"Kein Eingang");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, ui::kToolsMeasureLatency, L"Latenz messen \u2026");
+    };
+
+    // Wechselt die Geraete im laufenden Betrieb: anhalten, neu oeffnen, Plugins
+    // bei Bedarf neu laden, weiterlaufen. Schlaegt das Oeffnen fehl, bleibt es beim alten.
+    const auto switchAudio = [&](const std::wstring& outputId, const std::wstring& inputId, bool noInput) {
+        if (controller.isRecording()) {
+            view.showMessage(L"W\u00E4hrend einer Aufnahme l\u00E4sst sich das Ger\u00E4t nicht wechseln.");
+            return;
+        }
+        if (probe) {
+            view.showMessage(L"Erst die Latenzmessung abwarten.");
+            return;
+        }
+        const double oldRate = device.sampleRate();
+        const std::wstring oldOutput = device.outputId(), oldInput = device.inputId();
+        const bool oldNoInput = device.inputChannels() == 0;
+        if (oldRate > 0.0) settings.latencyByDevice[deviceKey(device)] = controller.recordOffsetMs();
+
+        engine->stop();
+        device.stop();
+        disk.stop();
+
+        std::string openError;
+        if (device.open(outputId, inputId, noInput, openError)) {
+            settings.audioOutput = outputId;
+            settings.audioInput = inputId;
+            settings.noInput = noInput;
+        } else {
+            std::string ignored;
+            if (!device.open(oldOutput, oldInput, oldNoInput, ignored)) device.open(ignored);
+            MessageBoxW(window.hwnd(),
+                        (L"Das Ger\u00E4t lie\u00DF sich nicht \u00F6ffnen. Es bleibt beim bisherigen.\n\n" +
+                         std::wstring(openError.begin(), openError.end())).c_str(),
+                        L"MiniDAW", MB_OK | MB_ICONWARNING);
+        }
+
+        if (device.sampleRate() > 0.0) {
+            controller.setSampleRate(device.sampleRate());
+            controller.setInputChannels(device.inputChannels());
+            controller.setRecordOffsetMs(latencyFor(device));
+            engine->setOutputLatencyFrames(device.outputLatencyFrames());
+            const int lostPlugins = plugins.setAudioFormat(device.sampleRate(), device.bufferFrames());
+            disk.start(*engine);
+            std::string startError;
+            if (!device.start(*engine, startError)) showError("Audio-Start fehlgeschlagen: " + startError);
+            if (lostPlugins > 0)
+                view.showMessage(std::to_wstring(lostPlugins) + L" Plugin(s) lie\u00DFen sich mit dem neuen Ger\u00E4t nicht laden.");
+            else if (oldRate > 0.0 && std::fabs(device.sampleRate() - oldRate) > 0.5)
+                view.showMessage(L"Achtung: Samplerate jetzt " + std::to_wstring(static_cast<int>(device.sampleRate())) +
+                                 L" Hz. Vorhandene Clips stimmen zeitlich nicht mehr.");
+        }
+        view.setDeviceInfo(describeDevice());
+    };
+
     const auto exportWav = [&] {
         if (probe) {
             view.showMessage(L"Erst die Latenzmessung abwarten.");
@@ -460,6 +571,20 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
                          MB_OK | MB_ICONERROR);
     };
     window.onCommand = [&](int command) {
+        if (command >= ui::kAudioOutputBase && command < ui::kAudioOutputBase + static_cast<int>(menuOutputs.size())) {
+            switchAudio(menuOutputs[static_cast<std::size_t>(command - ui::kAudioOutputBase)].id,
+                        device.inputChannels() > 0 ? device.inputId() : settings.audioInput,
+                        device.inputChannels() == 0 && settings.noInput);
+            return;
+        }
+        if (command >= ui::kAudioInputBase && command < ui::kAudioInputBase + static_cast<int>(menuInputs.size())) {
+            switchAudio(device.outputId(), menuInputs[static_cast<std::size_t>(command - ui::kAudioInputBase)].id, false);
+            return;
+        }
+        if (command == ui::kAudioNoInput) {
+            switchAudio(device.outputId(), L"", true);
+            return;
+        }
         switch (command) {
             case ui::kFileNew:
                 if (confirmDiscard()) {
@@ -503,7 +628,7 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
         updateTitle();
     }
     const int result = window.run();
-    settings.recordOffsetMs = controller.recordOffsetMs();
+    settings.latencyByDevice[deviceKey(device)] = controller.recordOffsetMs();
     settings.midiOutput = midiOut.current();
     saveSettings(settings);
     midi.close();

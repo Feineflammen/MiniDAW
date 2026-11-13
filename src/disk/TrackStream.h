@@ -16,6 +16,8 @@ struct Clip {
     std::int64_t sourceOffset = 0;  // erster benutzter Frame in der Datei
     std::int64_t length = 0;
     float gain = 1.0f;
+    std::int64_t fadeIn = 0;   // Einblendung am Anfang, in Frames (0 = keine)
+    std::int64_t fadeOut = 0;  // Ausblendung am Ende
 };
 
 using Playlist = std::vector<Clip>;

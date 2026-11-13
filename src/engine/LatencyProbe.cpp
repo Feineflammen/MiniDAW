@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <string>
 
 namespace {
 constexpr double kPi = 3.14159265358979323846;
@@ -124,19 +125,38 @@ LatencyProbe::Result LatencyProbe::analyze() const {
 
     std::sort(lags.begin(), lags.end());
     result.spread = lags.back() - lags.front();
-    if (result.spread > 3) {
-        char text[300];
+    const double spreadMs = 1000.0 * result.spread / sampleRate_;
+
+    // Bis 3 ms Streuung gibt es ein Ergebnis. Ueber Kabel und mit einem Geraet
+    // fuer Ein- und Ausgang sind es 0 bis 3 Samples; durch die Luft oder mit zwei
+    // Geraeten (zwei Uhren) streut es etwas mehr.
+    if (spreadMs > 3.0) {
+        char text[400];
         std::snprintf(text, sizeof text,
-                      "Die Einzelmessungen weichen um %d Samples (%.1f ms) voneinander ab. Ein- und Ausgang laufen "
-                      "vermutlich nicht im selben Takt, zum Beispiel weil es zwei verschiedene Geräte sind.",
-                      result.spread, 1000.0 * result.spread / sampleRate_);
+                      "Die Einzelmessungen weichen um %d Samples (%.1f ms) voneinander ab. Das ist zu viel für "
+                      "ein verlässliches Ergebnis. Geräusche im Raum, ein zu leises Signal oder zwei Geräte "
+                      "mit eigener Uhr können die Ursache sein.",
+                      result.spread, spreadMs);
         result.message = text;
         return result;
     }
 
     result.frames = lags[lags.size() / 2];  // Median
     result.ok = true;
-    if (result.inputPeak > 0.98f)
-        result.message = "Hinweis: Der Eingang war übersteuert. Das Ergebnis ist trotzdem verwertbar.";
+    std::string notes;
+    if (result.spread > 3) {
+        char text[400];
+        std::snprintf(text, sizeof text,
+                      "Hinweis: Die Einzelmessungen streuen um %.1f ms. Das ist typisch, wenn über Lautsprecher und "
+                      "Mikrofon oder mit zwei verschiedenen Geräten gemessen wird. Laufen Ein- und Ausgang über "
+                      "verschiedene Geräte, kann sich die Latenz mit der Zeit leicht verschieben.",
+                      spreadMs);
+        notes = text;
+    }
+    if (result.inputPeak > 0.98f) {
+        if (!notes.empty()) notes += "\n";
+        notes += "Hinweis: Der Eingang war übersteuert. Das Ergebnis ist trotzdem verwertbar.";
+    }
+    result.message = notes;
     return result;
 }

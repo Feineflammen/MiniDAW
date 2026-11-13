@@ -1714,6 +1714,18 @@ void testLatencyProbe() {
         CHECK(!result.ok && result.spread >= 300);
     }
 
+    // Leichte Streuung (wie bei zwei Geraeten oder durch die Luft): Ergebnis mit Hinweis.
+    {
+        Rig rig;
+        Loopback loop;
+        loop.delay = 3000;
+        loop.switchAt = static_cast<std::int64_t>(2.0 * kRate);
+        loop.delayAfter = 3044;  // knapp 1 ms Unterschied
+        const auto result = measure(loop, rig);
+        CHECK(result.ok && result.spread == 44 && !result.message.empty());
+        CHECK(result.frames == 3000 || result.frames == 3044);
+    }
+
     // Uebernahme in den Controller: Zusatz so, dass die angewandte Latenz der Messung entspricht.
     {
         Rig rig;

@@ -233,7 +233,7 @@ void MixerView::drawStrip(Canvas& c, int s) {
         c.fillRounded(r, 3.0f, background);
         std::wstring label;
         if (used) label = model->name;
-        else if (slot == 0) label = L"Instrument";
+        else if (slot == 0) label = L"Instr.";
         else label = L"FX " + std::to_wstring(slot);
         c.text(label, {r.x + 3.0f, r.y, r.w - 6.0f, r.h}, active ? kDark : used ? kText : rgb(0x5D6068), Font::Small,
                used ? Align::Left : Align::Center);

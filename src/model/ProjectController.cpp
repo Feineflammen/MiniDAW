@@ -767,6 +767,96 @@ void ProjectController::syncMidi(int track) {
     engine_.setTrackMidiSequence(track, std::move(sequence));
 }
 
+// --- MIDI-Dateien ------------------------------------------------------------
+
+ProjectController::MidiImport ProjectController::importMidi(int track, std::int64_t start, const MidiFileData& data,
+                                                            const std::wstring& fileName) {
+    MidiImport result;
+    if (!validTrack(track) || isRecording() || data.parts.empty()) return result;
+    start = std::max<std::int64_t>(0, start);
+
+    beginEdit();
+    noteChange(L"MIDI-Datei laden");
+    // In ein leeres Projekt passt das Tempo der Datei, damit Raster und Takte stimmen.
+    if (data.firstBpm > 0.0 && contentLength() <= 0) {
+        setBpm(std::round(data.firstBpm * 100.0) / 100.0);
+        result.tempoTaken = true;
+    }
+    const double bar = 4.0 * framesPerBeat();
+    const auto frames = [&](double seconds) { return static_cast<std::int64_t>(std::llround(seconds * sampleRate_)); };
+    // Alle Clips gleich lang (ganze Takte bis zur letzten Note), damit sie untereinander passen.
+    const std::int64_t length =
+        std::max<std::int64_t>(static_cast<std::int64_t>(std::llround(bar)),
+                               static_cast<std::int64_t>(std::llround(std::ceil(static_cast<double>(frames(data.end)) / bar - 1e-9) * bar)));
+
+    int unnamed = 0;
+    for (const MidiFilePart& part : data.parts) {
+        const int target = track + result.tracksUsed;
+        if (!validTrack(target)) {
+            ++result.skipped;
+            continue;
+        }
+        MidiClipModel clip;
+        clip.name = part.name;
+        if (clip.name.empty()) {
+            clip.name = fileName;
+            if (data.parts.size() > 1 && !part.splitFromTrack) clip.name += L" " + std::to_wstring(++unnamed);
+        }
+        if (part.splitFromTrack) clip.name += L" (Kanal " + std::to_wstring(part.channel + 1) + L")";
+        clip.start = start;
+        clip.length = length;
+        clip.notes.reserve(part.notes.size());
+        for (const MidiFileNote& n : part.notes) {
+            MidiNote note;
+            note.start = frames(n.start);
+            note.length = std::max<std::int64_t>(1, frames(n.start + n.length) - note.start);
+            note.pitch = n.pitch;
+            note.velocity = n.velocity;
+            clip.notes.push_back(note);
+        }
+        const int index = addMidiClip(target, std::move(clip));
+        if (index >= 0 && result.tracksUsed == 0) result.firstIndex = index;
+        ++result.tracksUsed;
+    }
+    endEdit();
+    return result;
+}
+
+std::vector<MidiExportTrack> ProjectController::midiExportTracks() const {
+    std::vector<MidiExportTrack> out;
+    const double ticksPerFrame = kMidiExportPpq / framesPerBeat();
+    const auto ticks = [&](std::int64_t frame) {
+        return static_cast<std::int64_t>(std::llround(static_cast<double>(frame) * ticksPerFrame));
+    };
+    for (int t = 0; t < kProjectTracks; ++t) {
+        const TrackModel& model = project_.tracks[static_cast<std::size_t>(t)];
+        MidiExportTrack track;
+        track.name = model.name;
+        // Kanal: der MIDI-Ausgang der Spur, sonst einer je Spur (Kanal 10 bleibt
+        // frei, er ist bei General MIDI das Schlagzeug).
+        track.channel = model.midiOutput >= 0 ? model.midiOutput : std::min(15, t < 9 ? t : t + 1);
+        for (const MidiClipModel& clip : model.midiClips) {
+            for (const MidiNote& note : clip.notes) {
+                if (note.start < 0 || note.start >= clip.length || note.length <= 0) continue;
+                // Wie beim Abspielen: Noten enden spaetestens am Clip-Ende.
+                const std::int64_t on = clip.start + note.start;
+                const std::int64_t off = clip.start + std::min(note.start + note.length, clip.length);
+                MidiExportNote n;
+                n.tick = ticks(on);
+                n.length = std::max<std::int64_t>(1, ticks(off) - n.tick);
+                n.pitch = note.pitch;
+                n.velocity = note.velocity;
+                track.notes.push_back(n);
+            }
+        }
+        if (track.notes.empty()) continue;
+        std::stable_sort(track.notes.begin(), track.notes.end(),
+                         [](const MidiExportNote& a, const MidiExportNote& b) { return a.tick < b.tick; });
+        out.push_back(std::move(track));
+    }
+    return out;
+}
+
 // --- Automation --------------------------------------------------------------
 
 namespace {

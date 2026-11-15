@@ -89,6 +89,9 @@ bool MainWindow::create(HINSTANCE instance, int showCommand, std::string& error)
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, kFileExport, L"Als WAV &exportieren \u2026\tStrg+E");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(file, MF_STRING, kFileImportMidi, L"MIDI-Datei &importieren \u2026\tStrg+I");
+    AppendMenuW(file, MF_STRING, kFileExportMidi, L"Als &MIDI-Datei exportieren \u2026");
+    AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, kFileQuit, L"&Beenden");
     const HMENU edit = CreatePopupMenu();
     editMenu_ = edit;
@@ -295,6 +298,7 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
                                     : wParam == 'O' ? kFileOpen
                                     : wParam == 'S' ? (shift ? kFileSaveAs : kFileSave)
                                     : wParam == 'E' ? kFileExport
+                                    : wParam == 'I' ? kFileImportMidi
                                                     : 0;
                 // Strg+Z zurueck, Strg+Y oder Strg+Umschalt+Z wieder vor; gehalten wiederholt es sich.
                 if (wParam == 'Z' || wParam == 'Y') {

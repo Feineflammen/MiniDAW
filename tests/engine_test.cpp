@@ -6,6 +6,7 @@
 #include "disk/WavFile.h"
 #include "engine/Engine.h"
 #include "engine/OfflineRender.h"
+#include "model/MidiFile.h"
 #include "model/ProjectController.h"
 #include "util/SpscQueue.h"
 
@@ -2519,6 +2520,136 @@ void testAutomation() {
     rig.render();
 }
 
+// MIDI-Dateien: lesen (Running Status, Tempowechsel, Kanaele), ins Projekt
+// laden, exportieren und wieder einlesen.
+void testMidiFiles() {
+    // Typ 0, 96 Ticks pro Viertel, Spurname "Bär" in Latin-1.
+    const std::vector<std::uint8_t> track{
+        0x00, 0xFF, 0x03, 0x03, 'B', 0xE4, 'r',
+        0x00, 0xFF, 0x51, 0x03, 0x09, 0x27, 0xC0,  // 100 BPM
+        0x00, 0x90, 0x3C, 0x64,                    // C4 an
+        0x00, 0x3E, 0x50,                          // D4 an (Running Status)
+        0x60, 0x3C, 0x00,                          // Tick 96: C4 aus (Anschlag 0)
+        0x00, 0xFF, 0x51, 0x03, 0x0F, 0x42, 0x40,  // Tick 96: 60 BPM
+        0x60, 0x3E, 0x00,                          // Tick 192: D4 aus
+        0x00, 0x99, 0x24, 0x7F,                    // Kanal 10: Bassdrum an ...
+        0x00, 0x89, 0x24, 0x40,                    // ... und sofort aus
+        0x00, 0x91, 0x40, 0x64,                    // Kanal 2: E4 an, ohne Ende
+        0x30, 0xFF, 0x2F, 0x00};                   // Tick 240: Spurende
+    std::vector<std::uint8_t> file{'M', 'T', 'h', 'd', 0, 0, 0, 6, 0, 0, 0, 1, 0, 96, 'M', 'T', 'r', 'k', 0, 0, 0,
+                                   static_cast<std::uint8_t>(track.size())};
+    file.insert(file.end(), track.begin(), track.end());
+
+    MidiFileData data;
+    std::string error;
+    CHECK(parseMidiFile(file, data, error));
+    CHECK(data.format == 0 && std::fabs(data.firstBpm - 100.0) < 1e-9);
+    CHECK(data.parts.size() == 3);
+    if (data.parts.size() == 3) {
+        const auto& a = data.parts[0];
+        CHECK(a.channel == 0 && a.splitFromTrack && a.name == L"Bär" && a.notes.size() == 2);
+        if (a.notes.size() == 2) {
+            CHECK(a.notes[0].pitch == 0x3C && std::fabs(a.notes[0].length - 0.6) < 1e-9 && a.notes[0].velocity == 100);
+            CHECK(a.notes[1].pitch == 0x3E && std::fabs(a.notes[1].length - 1.6) < 1e-9 && a.notes[1].velocity == 80);
+        }
+        const auto& drum = data.parts[1];
+        CHECK(drum.channel == 9 && drum.notes.size() == 1);
+        if (!drum.notes.empty())  // Note-An und -Aus auf einem Tick: ein 64tel (6 Ticks bei 60 BPM)
+            CHECK(std::fabs(drum.notes[0].start - 1.6) < 1e-9 && std::fabs(drum.notes[0].length - 0.0625) < 1e-9);
+        const auto& e = data.parts[2];
+        CHECK(e.channel == 1 && e.notes.size() == 1);
+        if (!e.notes.empty()) CHECK(std::fabs(e.notes[0].length - 0.5) < 1e-9);
+    }
+    CHECK(std::fabs(data.end - 2.1) < 1e-9);
+
+    // Kaputte Dateien: Meldung statt Absturz, auch bei zufaellig veraenderten Bytes.
+    CHECK(!parseMidiFile({'a', 'b', 'c'}, data, error) && !error.empty());
+    CHECK(!parseMidiFile(std::vector<std::uint8_t>(file.begin(), file.begin() + 14), data, error));
+    std::uint32_t seed = 12345;
+    for (int i = 0; i < 3000; ++i) {
+        auto broken = file;
+        for (int k = 0; k < 3; ++k) {
+            seed = seed * 1664525u + 1013904223u;
+            broken[(seed >> 8) % broken.size()] = static_cast<std::uint8_t>(seed >> 24);
+        }
+        seed = seed * 1664525u + 1013904223u;
+        if (seed % 4 == 0) broken.resize((seed >> 8) % broken.size());
+        MidiFileData ignored;
+        std::string ignoredError;
+        parseMidiFile(broken, ignored, ignoredError);
+    }
+
+    // Ins leere Projekt laden: Tempo wird uebernommen, drei Spuren, ein Takt lang.
+    CHECK(parseMidiFile(file, data, error));
+    Rig rig;
+    ProjectController c(*rig.engine);
+    c.setSampleRate(kRate);
+    const auto& tracks = c.project().tracks;
+    const double oldBpm = c.bpm();
+    const auto result = c.importMidi(14, 0, data, L"lied");
+    CHECK(result.tracksUsed == 2 && result.skipped == 1 && result.tempoTaken && result.firstIndex == 0);
+    CHECK(c.undoLabel() == L"MIDI-Datei laden");
+    CHECK(c.undo());
+    CHECK(tracks[14].midiClips.empty() && tracks[15].midiClips.empty() && c.bpm() == oldBpm && !c.canUndo());
+
+    const auto placed = c.importMidi(2, 4800, data, L"lied");
+    CHECK(placed.tracksUsed == 3 && placed.skipped == 0 && c.bpm() == 100.0);
+    const std::int64_t bar = static_cast<std::int64_t>(std::llround(4 * 0.6 * kRate));
+    for (int t = 2; t < 5; ++t) {
+        CHECK(tracks[static_cast<std::size_t>(t)].midiClips.size() == 1);
+        if (tracks[static_cast<std::size_t>(t)].midiClips.size() != 1) continue;
+        const auto& clip = tracks[static_cast<std::size_t>(t)].midiClips[0];
+        CHECK(clip.start == 4800 && clip.length == bar);
+    }
+    if (!tracks[2].midiClips.empty()) {
+        const auto& clip = tracks[2].midiClips[0];
+        CHECK(clip.name == L"Bär (Kanal 1)" && clip.notes.size() == 2);
+        if (clip.notes.size() == 2) CHECK(clip.notes[1].start == 0 && clip.notes[1].length == static_cast<std::int64_t>(1.6 * kRate));
+    }
+    // In ein Projekt mit Inhalt: Das Tempo bleibt.
+    data.firstBpm = 150.0;
+    CHECK(!c.importMidi(8, 0, data, L"lied").tempoTaken && c.bpm() == 100.0);
+    CHECK(c.undo());
+
+    // Exportieren und wieder lesen: dieselben Noten, Kanaele je Spur, Clip-Ende kuerzt.
+    MidiClipModel shortClip;
+    shortClip.start = bar;
+    shortClip.length = static_cast<std::int64_t>(0.3 * kRate);
+    shortClip.notes.push_back({0, static_cast<std::int64_t>(kRate), 72, 90});   // laenger als der Clip
+    shortClip.notes.push_back({shortClip.length, 100, 74, 90});                 // hinter dem Clip-Ende
+    CHECK(c.addMidiClip(4, shortClip) == 1);
+    const auto exported = c.midiExportTracks();
+    CHECK(exported.size() == 3 && exported[0].channel == 2 && exported[2].channel == 4 && exported[0].name == L"Spur 3");
+    const auto bytes = buildMidiFile(exported, c.bpm());
+    const auto path = tempFile("minidaw_test.mid");
+    CHECK(saveMidiFile(path, bytes, error));
+    MidiFileData back;
+    CHECK(loadMidiFile(path, back, error));
+    CHECK(back.format == 1 && std::fabs(back.firstBpm - 100.0) < 1e-6 && back.parts.size() == 3);
+    if (back.parts.size() == 3) {
+        const double offset = 4800.0 / kRate;
+        CHECK(back.parts[0].name == L"Spur 3" && back.parts[0].channel == 2 && back.parts[0].notes.size() == 2);
+        if (back.parts[0].notes.size() == 2) {
+            CHECK(std::fabs(back.parts[0].notes[0].start - offset) < 0.002);
+            CHECK(std::fabs(back.parts[0].notes[1].length - 1.6) < 0.002 && back.parts[0].notes[1].velocity == 80);
+        }
+        CHECK(back.parts[1].channel == 3 && back.parts[1].notes.size() == 1);
+        CHECK(back.parts[2].notes.size() == 2);  // E4 und die gekuerzte Note, die hinter dem Ende fehlt
+        if (back.parts[2].notes.size() == 2) {
+            const auto& cut = back.parts[2].notes[1];
+            CHECK(cut.pitch == 72 && std::fabs(cut.start - 2.4) < 0.002 && std::fabs(cut.length - 0.3) < 0.002);
+        }
+    }
+    std::filesystem::remove(path);
+
+    // Namen ausserhalb von Latin-1 gehen als UTF-8 hinaus und kommen gleich zurueck.
+    MidiExportTrack named;
+    named.name = L"Geräusch ♫";
+    named.notes.push_back({0, 10, 60, 100});
+    CHECK(parseMidiFile(buildMidiFile({named}, 120.0), back, error) && back.parts.size() == 1 &&
+          back.parts[0].name == named.name);
+}
+
 int main() {
     testStoppedIsSilent();
     testPlayAdvancesPosition();
@@ -2560,6 +2691,7 @@ int main() {
     testLatencyCompensation();
     testUndoRedo();
     testAutomation();
+    testMidiFiles();
     {
         std::error_code ec;
         std::filesystem::remove_all(tempFile("minidaw_test_aufnahmen"), ec);

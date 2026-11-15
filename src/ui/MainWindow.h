@@ -14,6 +14,7 @@ namespace ui {
 
 // Befehle des Menues "Datei".
 enum MenuCommand { kFileNew = 1001, kFileOpen, kFileSave, kFileSaveAs, kFileExport, kFileQuit };
+enum MidiFileCommand { kFileImportMidi = 1011, kFileExportMidi = 1012 };
 // Befehle des Menues "Extras".
 enum ToolsCommand { kToolsMeasureLatency = 1101 };
 // Befehle des Menues "Bearbeiten"; das Fenster reicht sie selbst an die Ansicht weiter.

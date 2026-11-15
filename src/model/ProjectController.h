@@ -2,6 +2,7 @@
 
 #include "disk/PeakData.h"
 #include "engine/Engine.h"
+#include "model/MidiFile.h"
 #include "model/Project.h"
 #include "model/ProjectFile.h"
 
@@ -145,6 +146,21 @@ public:
     int addMidiClip(int track, MidiClipModel clip);  // liefert den Index oder -1
     int moveMidiClip(int track, int index, int newTrack, std::int64_t newStart);
     bool removeMidiClip(int track, int index);
+
+    // --- MIDI-Dateien ---
+    struct MidiImport {
+        int tracksUsed = 0;    // Spuren ab der Zielspur, die einen Clip bekommen haben
+        int firstIndex = -1;   // Index des Clips auf der Zielspur
+        int skipped = 0;       // Teile, fuer die keine Spur mehr frei war
+        bool tempoTaken = false;
+    };
+    // Legt jeden Teil der Datei (Spur bzw. Kanal) als MIDI-Clip an, ab Spur
+    // track untereinander, alle ab start. Ist das Projekt noch leer, uebernimmt
+    // es das Tempo der Datei. Alles zusammen ist ein Schritt fuer Rueckgaengig.
+    MidiImport importMidi(int track, std::int64_t start, const MidiFileData& data, const std::wstring& fileName);
+    // Alle MIDI-Clips des Projekts, eine Spur der Datei je Projektspur. Ticks
+    // nach kMidiExportPpq beim Tempo des Projekts. Leer, wenn es keine Noten gibt.
+    std::vector<MidiExportTrack> midiExportTracks() const;
 
     // --- Aufnahme ---
     // Anzahl der Eingangskanaele des Audiogeraets, 0 = kein Eingang.

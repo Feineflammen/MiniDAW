@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cwchar>
+#include <cwctype>
 #include <iterator>
 #include <utility>
 
@@ -1637,6 +1638,64 @@ void MainView::shiftOctave(int delta) {
 
 void MainView::releaseAllNotes() { engine_.postMidi(MidiMessage::allNotesOff(), true); }
 
+namespace {
+bool isMidiFile(const std::filesystem::path& path) {
+    std::wstring ext = path.extension().wstring();
+    for (auto& c : ext) c = static_cast<wchar_t>(std::towlower(c));
+    return ext == L".mid" || ext == L".midi" || ext == L".kar" || ext == L".rmi";
+}
+}  // namespace
+
+int MainView::loadMidi(int track, std::int64_t start, const std::filesystem::path& path) {
+    const std::wstring file = path.filename().wstring();
+    if (controller_.isRecording()) {
+        setStatus(L"W\u00E4hrend einer Aufnahme l\u00E4sst sich keine MIDI-Datei laden.");
+        return 0;
+    }
+    MidiFileData data;
+    std::string error;
+    if (!loadMidiFile(path, data, error)) {
+        setStatus(file + L": " + widen(error));
+        return 0;
+    }
+    const auto result = controller_.importMidi(track, start, data, path.stem().wstring());
+    if (result.tracksUsed == 0) {
+        setStatus(file + L": keine Spur mehr frei.");
+        return 0;
+    }
+    selTrack_ = track;
+    selIndex_ = result.firstIndex;
+    selMidi_ = true;
+    std::wstring text = file + L": " +
+                        (result.tracksUsed == 1 ? std::wstring(L"1 Spur") : std::to_wstring(result.tracksUsed) + L" Spuren") +
+                        L" geladen";
+    if (result.tempoTaken) {
+        wchar_t bpm[32];
+        std::swprintf(bpm, 32, L"%g", controller_.bpm());
+        text += L", Tempo " + std::wstring(bpm) + L" BPM \u00FCbernommen";
+    }
+    if (result.skipped > 0)
+        text += L". " + std::to_wstring(result.skipped) + L" weitere Spur(en) passten nicht mehr ins Projekt";
+    setStatus(text + L".");
+    return result.tracksUsed;
+}
+
+void MainView::importMidiFile(const std::filesystem::path& path) {
+    if (mixerMode_) setMixerMode(false);
+    // Die erste leere Spur ab der gewaehlten (sonst ab Spur 1); ist keine leer, die gewaehlte.
+    const int from = selTrack_ >= 0 && selTrack_ < kProjectTracks ? selTrack_ : 0;
+    int track = from;
+    const Project& project = controller_.project();
+    for (int t = from; t < kProjectTracks; ++t) {
+        const TrackModel& model = project.tracks[static_cast<std::size_t>(t)];
+        if (model.clips.empty() && model.midiClips.empty()) {
+            track = t;
+            break;
+        }
+    }
+    loadMidi(track, 0, path);
+}
+
 void MainView::dropFiles(float x, float y, const std::vector<std::filesystem::path>& paths) {
     // Im Mischpult abgelegt: zurueck zu den Spuren, Dateien an den Anfang von Spur 1.
     if (mixerMode_) {
@@ -1657,6 +1716,19 @@ void MainView::dropFiles(float x, float y, const std::vector<std::filesystem::pa
         if (track >= kProjectTracks) {
             setStatus(L"Nicht genug Spuren f\u00FCr alle Dateien.");
             break;
+        }
+        if (isMidiFile(path)) {
+            // MIDI rastet auf ganze Takte ein; jede Spur der Datei bekommt eine eigene Spur.
+            if (atMouse && first) {
+                const double bar = 4.0 * controller_.framesPerBeat();
+                start = static_cast<std::int64_t>(std::llround(std::round(static_cast<double>(start) / bar) * bar));
+            }
+            const int used = loadMidi(track, start, path);
+            if (used > 0) {
+                first = false;
+                track += used;
+            }
+            continue;
         }
         std::string message;
         if (controller_.addClip(track, path, start, message)) {

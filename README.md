@@ -6,7 +6,8 @@ C++20 ohne Fremdbibliotheken. Freie Software unter der GPLv3, kostenlos für all
 Was es kann: Aufnahme mehrerer Spuren gleichzeitig (WASAPI oder ASIO) mit
 gemessener Latenz, MIDI mit Noten-Editor und Metronom, VST3-Instrumente und
 -Effekte, Mischpult mit Bussen und Latenzausgleich, Automation von Lautstärke
-und Panorama, Rückgängig/Wiederholen, Projekte speichern und als WAV exportieren.
+und Panorama, Rückgängig/Wiederholen, Projekte speichern und als WAV exportieren,
+MIDI-Dateien importieren und exportieren.
 
 Aufbau, Regeln und Fahrplan stehen in [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -73,6 +74,7 @@ Tests ausführen: `ctest --test-dir build -C Release --output-on-failure`
 | Aktion | Wirkung |
 |---|---|
 | WAV-Datei auf eine Spur ziehen | Clip anlegen; auf dem Spurkopf abgelegt beginnt er bei 0 |
+| MIDI-Datei (.mid) auf eine Spur ziehen | MIDI-Clips anlegen, rastet auf ganze Takte ein; jede Spur der Datei bekommt eine eigene Spur |
 | Leertaste | Play / Stop |
 | Pos1 | zurück zum Anfang |
 | Klick in Lineal oder leere Zeitachse | Abspielzeiger setzen |
@@ -102,7 +104,9 @@ Menü "Bearbeiten" (Clip vorher anklicken): Am Abspielzeiger teilen (Strg+T), mi
 
 Menü "Audio" oder "Extras" → "Latenz messen …": Mit einem Kabel von Ausgang 1 oder 2 der Soundkarte in einen Eingang misst die DAW die tatsächliche Verzögerung und stellt die Aufnahme-Latenz darauf ein.
 
-Menü "Datei": Neu (Strg+N), Öffnen (Strg+O), Speichern (Strg+S), Speichern unter (Strg+Umschalt+S), Als WAV exportieren (Strg+E). Projekte haben die Endung `.mdaw` und sind lesbare Textdateien; die Audiodateien bleiben an ihrem Ort.
+Menü "Datei": Neu (Strg+N), Öffnen (Strg+O), Speichern (Strg+S), Speichern unter (Strg+Umschalt+S), Als WAV exportieren (Strg+E), MIDI-Datei importieren (Strg+I), Als MIDI-Datei exportieren. Projekte haben die Endung `.mdaw` und sind lesbare Textdateien; die Audiodateien bleiben an ihrem Ort.
+
+MIDI-Dateien (Standard-MIDI-Datei Typ 0 und 1, auch .kar und .rmi): Beim Import wird jede Spur der Datei ein eigener MIDI-Clip auf einer eigenen Spur; benutzt eine Spur der Datei mehrere Kanäle, wird sie nach Kanälen aufgeteilt. Tempowechsel der Datei sind eingerechnet, die Noten liegen also zeitlich richtig. Ist das Projekt noch leer, übernimmt es das Tempo der Datei. Der Import aus dem Menü landet auf der ersten leeren Spur ab der gewählten, am Anfang. Der Export schreibt alle MIDI-Clips als Typ-1-Datei mit dem Projekttempo, eine Spur je Projektspur; Kanal ist der MIDI-Ausgang der Spur, sonst Kanal 1 bis 16 nach Spurnummer (Kanal 10, bei General MIDI das Schlagzeug, wird übersprungen). Controller, Pitchbend und Programmwechsel werden weder gelesen noch geschrieben.
 
 Am Spurkopf rechts stehen zwei Felder: oben der Eingang der Spur, unten ihr MIDI-Ausgang (Synth oder MIDI 1 bis 16; Linksklick schaltet weiter, Rechtsklick zurück, Mausrad). Ein Klick auf den Eingang öffnet eine Liste: Stereopaare ("In 1+2", "In 3+4"), einzelne Kanäle ("In 1" bis "In 4") und MIDI (alle oder Kanal 1 bis 16); das Mausrad schaltet direkt weiter. Ein gelber Eingang steht auf einem Kanal, den das Gerät nicht hat. Zum Aufnehmen mehrerer Quellen jede Spur auf ihren Eingang stellen, alle mit R scharfschalten und Rec drücken: Jede Spur bekommt ihre eigene Datei. In der Statusleiste wählt ein Klick auf "MIDI aus" das Ausgabegerät.
 

@@ -298,6 +298,8 @@ void saveSettings(const Settings& settings) {
 
 
 const wchar_t* const kProjectFilter = L"MiniDAW-Projekt (*.mdaw)\0*.mdaw\0Alle Dateien (*.*)\0*.*\0";
+const wchar_t* const kMidiFilter = L"MIDI-Datei (*.mid, *.midi, *.kar, *.rmi)\0*.mid;*.midi;*.kar;*.rmi\0Alle Dateien (*.*)\0*.*\0";
+const wchar_t* const kMidiSaveFilter = L"MIDI-Datei (*.mid)\0*.mid\0";
 const wchar_t* const kExportFilter =
     L"WAV, 24 Bit (*.wav)\0*.wav\0WAV, 16 Bit (*.wav)\0*.wav\0WAV, 32 Bit Float (*.wav)\0*.wav\0";
 
@@ -703,6 +705,24 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
         else MessageBoxW(window.hwnd(), (L"Export fehlgeschlagen.\n\n" + fromUtf8(message)).c_str(), L"MiniDAW",
                          MB_OK | MB_ICONERROR);
     };
+    const auto exportMidi = [&] {
+        const auto tracks = controller.midiExportTracks();
+        if (tracks.empty()) {
+            view.showMessage(L"Im Projekt gibt es keine MIDI-Noten zu exportieren.");
+            return;
+        }
+        const std::wstring suggestion =
+            (controller.projectPath().empty() ? std::wstring(L"Export") : controller.projectPath().stem().wstring()) + L".mid";
+        const auto path = ui::askSaveFile(window.hwnd(), L"Als MIDI-Datei exportieren", kMidiSaveFilter, L"mid", suggestion, nullptr);
+        if (path.empty()) return;
+        std::string message;
+        if (saveMidiFile(path, buildMidiFile(tracks, controller.bpm()), message))
+            view.showMessage(L"Exportiert: " + path.filename().wstring() + L" (" + std::to_wstring(tracks.size()) +
+                             (tracks.size() == 1 ? L" Spur)" : L" Spuren)"));
+        else
+            MessageBoxW(window.hwnd(), (L"MIDI-Export fehlgeschlagen.\n\n" + fromUtf8(message)).c_str(), L"MiniDAW",
+                        MB_OK | MB_ICONERROR);
+    };
     window.onCommand = [&](int command) {
         // WASAPI: Ausgabe oder Eingang tauschen, das jeweils andere bleibt wie zuletzt eingestellt.
         AudioChoice wasapi{false, {}, settings.audioOutput, settings.audioInput, settings.noInput};
@@ -750,6 +770,12 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
             case ui::kFileSave: save(); break;
             case ui::kFileSaveAs: saveAs(); break;
             case ui::kFileExport: exportWav(); break;
+            case ui::kFileImportMidi: {
+                const auto path = ui::askOpenFile(window.hwnd(), L"MIDI-Datei importieren", kMidiFilter);
+                if (!path.empty()) view.importMidiFile(path);
+                break;
+            }
+            case ui::kFileExportMidi: exportMidi(); break;
             case ui::kToolsMeasureLatency: measureLatency(); break;
             default: break;
         }

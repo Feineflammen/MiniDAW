@@ -76,6 +76,8 @@ public:
     void shiftOctave(int delta);
     void releaseAllNotes();
     void dropFiles(float x, float y, const std::vector<std::filesystem::path>& paths);
+    // MIDI-Datei aus dem Menue: auf die gewaehlte Spur (sonst die erste leere), an den Anfang.
+    void importMidiFile(const std::filesystem::path& path);
 
 private:
     enum class Drag { None, MasterGain, TrackGain, TrackPan, Scrub, Clip, TrimStart, TrimEnd, AutoPoint };
@@ -180,6 +182,9 @@ private:
     double framesPerPixel_ = 882.0;  // Zoom
 
     int selTrack_ = -1, selIndex_ = -1;
+    // Laedt eine MIDI-Datei ab Spur track bei start und meldet das Ergebnis.
+    // Liefert die Zahl der belegten Spuren (0 bei Fehler).
+    int loadMidi(int track, std::int64_t start, const std::filesystem::path& path);
     bool selMidi_ = false;  // die Auswahl meint einen MIDI-Clip
 
     Drag drag_ = Drag::None;

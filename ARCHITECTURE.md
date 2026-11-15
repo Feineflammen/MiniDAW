@@ -313,7 +313,7 @@ src/
   engine/   Transport, Spuren, Mixer, Latenzausgleich
   midi/     MIDI-Geräte, MIDI-Daten
   vst3/     Plugin-Scan, Hosting, Editor-Fenster
-  model/    Projektmodell, Undo, Speichern und Laden
+  model/    Projektmodell, Undo, Speichern und Laden, MIDI-Dateien
   disk/     WAV lesen und schreiben, Streaming, Wellenform-Übersichten
   ui/       Fenster, Zeichnen, Mischpult, Ladebild
   res/      Programmsymbol und Titelbild (in die exe eingebunden)
@@ -342,6 +342,7 @@ Windows-Code. Sie bilden die Bibliothek `dawcore`, die auch die Tests benutzen.
 | 10 | Automation (Lautstärke, Panorama je Spur), Rückgängig/Wiederholen | Code und Offline-Tests fertig, per Screenshot geprüft, Bedientest offen |
 | 11 | ASIO, Aufnahme mehrerer Spuren mit eigenem Eingang | fertig, mit ASIO-Treiber (UMC404HD) getestet |
 | 12 | Lizenz (GPLv3), ASIO SDK, Programmsymbol, Ladebild, Über-Fenster | fertig, per Screenshot geprüft |
+| 13 | MIDI-Dateien importieren (Menü, Ziehen auf eine Spur) und exportieren (`model/MidiFile`) | Code und Offline-Tests fertig (auch mit zufällig beschädigten Dateien), Bedientest offen |
 
 Jeder Schritt gilt erst als fertig, wenn er auf echter Hardware läuft und
 ohne Knackser klingt.

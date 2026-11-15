@@ -46,6 +46,7 @@ add_library(dawcore STATIC
     src/disk/TrackStream.cpp
     src/disk/WavFile.cpp
     src/model/ProjectController.cpp
+    src/model/MidiFile.cpp
     src/model/ProjectFile.cpp
 )
 target_include_directories(dawcore PUBLIC src)

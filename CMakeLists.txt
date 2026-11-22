@@ -38,6 +38,8 @@ endif()
 # Plattformunabhaengiger Kern: Engine, Dateien, Projektmodell.
 add_library(dawcore STATIC
     src/engine/Engine.cpp
+    src/engine/BuiltinEffect.cpp
+    src/engine/Effects.cpp
     src/engine/Mastering.cpp
     src/engine/LatencyProbe.cpp
     src/engine/OfflineRender.cpp
@@ -84,7 +86,8 @@ if(WIN32)
         src/ui/MainView.cpp
         src/ui/MainWindow.cpp
         src/ui/MasteringView.cpp
-        src/ui/MasteringWindow.cpp
+        src/ui/EffectView.cpp
+        src/ui/EffectWindow.cpp
         src/ui/MixerView.cpp
         src/ui/SplashWindow.cpp
         src/ui/PianoRoll.cpp

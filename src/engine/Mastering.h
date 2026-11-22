@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/AudioPlugin.h"
+#include "engine/BuiltinEffect.h"
 
 #include <array>
 #include <atomic>
@@ -31,14 +32,7 @@ enum Param : int {
     kParamCount
 };
 
-struct ParamInfo {
-    const char* key;       // Name in der Projektdatei, nie aendern
-    const wchar_t* label;  // Anzeige
-    const wchar_t* unit;
-    float min, max, def;
-    bool toggle;
-    bool logScale;  // Regler logarithmisch (Frequenz, Zeit)
-};
+using ParamInfo = fx::ParamInfo;
 
 inline constexpr std::array<ParamInfo, kParamCount> kParams{{
     {"eingang", L"Eingang", L"dB", -12.0f, 12.0f, 0.0f, false, false},
@@ -218,21 +212,16 @@ private:
 
 // --- Als Plugin fuer die Engine ------------------------------------------------
 
-// Parameter schreibt die Oberflaeche (atomar), der Audio-Thread liest sie zu
-// Beginn jedes Blocks. Messwerte gehen den umgekehrten Weg.
-class MasteringEffect final : public AudioPlugin {
+// Parameter und Speichern kommen aus fx::BuiltinEffect. Messwerte gehen
+// atomar vom Audio-Thread zur Oberflaeche.
+class MasteringEffect final : public fx::BuiltinEffect {
 public:
     explicit MasteringEffect(double sampleRate);
 
-    bool isInstrument() const noexcept override { return false; }
     int latencyFrames() const noexcept override { return processor_.latency(); }
-    double sampleRate() const noexcept { return processor_.sampleRate(); }
     void process(float* left, float* right, int numFrames, const PluginMidiEvent* events, int numEvents,
                  const PluginTransport& transport) noexcept override;
 
-    // UI-Thread
-    float param(int param) const noexcept;
-    void setParam(int param, float value) noexcept;
     void resetMeters() noexcept { resetRequested_.store(true, std::memory_order_relaxed); }
 
     struct Meters {
@@ -242,13 +231,8 @@ public:
     };
     Meters meters() const noexcept;
 
-    // Einstellungen als Text ("schluessel=wert" je Zeile); unbekannte Zeilen werden uebergangen.
-    std::vector<char> saveState() const;
-    void loadState(const std::vector<char>& state);
-
 private:
     Processor processor_;
-    std::array<std::atomic<float>, kParamCount> params_;
     std::atomic<bool> resetRequested_{false};
     bool wasPlaying_ = false;
     std::atomic<double> momentary_{kSilence}, shortTerm_{kSilence}, integrated_{kSilence},

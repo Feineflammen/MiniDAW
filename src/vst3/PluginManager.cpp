@@ -1,5 +1,9 @@
 #include "vst3/PluginManager.h"
 
+#include "engine/Mastering.h"
+#include "ui/EffectView.h"
+#include "ui/MasteringView.h"
+
 #include <algorithm>
 
 namespace vst3 {
@@ -81,40 +85,47 @@ void PluginManager::install(int strip, int slot, std::shared_ptr<Vst3Plugin> plu
     Slot* target = find(strip, slot);
     if (!target) return;
     target->window.reset();
-    target->masteringWindow.reset();
+    target->builtinWindow.reset();
     const std::wstring name = plugin->name();
     controller_.setPlugin(strip, slot, plugin, name);
-    target->mastering.reset();
+    target->builtin.reset();
     target->plugin = std::move(plugin);
     target->path = path;
 }
 
-void PluginManager::installMastering(int strip, int slot, std::shared_ptr<mastering::MasteringEffect> effect) {
+void PluginManager::installBuiltin(int strip, int slot, std::shared_ptr<fx::BuiltinEffect> effect) {
     Slot* target = find(strip, slot);
     if (!target) return;
     target->window.reset();
-    target->masteringWindow.reset();
-    controller_.setPlugin(strip, slot, effect, kMasteringName);
+    target->builtinWindow.reset();
+    controller_.setPlugin(strip, slot, effect, effect->name());
     target->plugin.reset();
-    target->mastering = std::move(effect);
-    target->path = kMasteringPath;
+    target->path = std::wstring(kBuiltinPrefix) + widen(effect->id());
+    target->builtin = std::move(effect);
+}
+
+std::vector<std::wstring> PluginManager::builtinNames() {
+    std::vector<std::wstring> names;
+    for (const fx::BuiltinType& type : fx::builtinTypes()) names.push_back(type.name);
+    return names;
 }
 
 bool PluginManager::loadBuiltin(int strip, int slot, int index, std::wstring& error) {
-    if (index != 0 || !find(strip, slot) || slot == 0) {
-        error = L"Der Mastering-Effekt geh\u00F6rt auf einen Effekt-Platz.";
+    const auto& types = fx::builtinTypes();
+    if (index < 0 || index >= static_cast<int>(types.size()) || !find(strip, slot) || slot == 0) {
+        error = L"Eingebaute Effekte geh\u00F6ren auf einen Effekt-Platz.";
         return false;
     }
-    installMastering(strip, slot, std::make_shared<mastering::MasteringEffect>(sampleRate_));
+    installBuiltin(strip, slot, fx::createBuiltin(types[static_cast<std::size_t>(index)].id, sampleRate_));
     return true;
 }
 
 bool PluginManager::capture(int strip, int slot, std::filesystem::path& file, std::vector<char>& state) {
     Slot* target = find(strip, slot);
     if (!target) return false;
-    if (target->mastering) {
-        file = kMasteringPath;
-        state = target->mastering->saveState();
+    if (target->builtin) {
+        file = target->path;
+        state = target->builtin->saveState();
         return true;
     }
     if (!target->plugin) return false;
@@ -129,15 +140,23 @@ bool PluginManager::restore(int strip, int slot, const std::filesystem::path& fi
         unload(strip, slot);
         return true;
     }
-    if (file == std::filesystem::path(kMasteringPath)) {
+    const std::wstring stored = file.wstring();
+    const std::wstring prefix = kBuiltinPrefix;
+    if (stored.compare(0, prefix.size(), prefix) == 0) {
+        const std::wstring wideId = stored.substr(prefix.size());
+        const std::string id(wideId.begin(), wideId.end());  // ids sind reines ASCII
+        auto effect = fx::createBuiltin(id, sampleRate_);
+        if (!effect) {
+            error = "Unbekannter eingebauter Effekt: " + id;
+            return false;
+        }
         if (slot < 0) slot = 1;
         if (!find(strip, slot) || slot == 0) {
             error = "Ungueltiger Plugin-Platz";
             return false;
         }
-        auto effect = std::make_shared<mastering::MasteringEffect>(sampleRate_);
         if (!state.empty()) effect->loadState(state);
-        installMastering(strip, slot, std::move(effect));
+        installBuiltin(strip, slot, std::move(effect));
         return true;
     }
     std::shared_ptr<Vst3Plugin> plugin = loadPlugin(file, sampleRate_, maxFrames_, error);
@@ -158,7 +177,7 @@ void PluginManager::unload(int strip, int slot) {
     Slot* target = find(strip, slot);
     if (!target) return;
     target->window.reset();
-    target->masteringWindow.reset();
+    target->builtinWindow.reset();
     controller_.setPlugin(strip, slot, nullptr, L"");
     target->clear();
 }
@@ -166,19 +185,24 @@ void PluginManager::unload(int strip, int slot) {
 bool PluginManager::openEditor(int strip, int slot, std::wstring& error) {
     Slot* target = find(strip, slot);
     if (!target) return false;
-    if (target->mastering) {
-        if (!target->masteringWindow) {
-            std::wstring title = L"Mastering \u2013 ";
+    if (target->builtin) {
+        if (!target->builtinWindow) {
+            std::wstring title = std::wstring(target->builtin->name()) + L" \u2013 ";
             if (strip < kProjectTracks) title += L"Spur " + std::to_wstring(strip + 1);
             else if (strip < kMasterStripIndex) title += L"Bus " + std::to_wstring(strip - kFirstBusStrip + 1);
             else title += L"Master";
-            target->masteringWindow = std::make_unique<ui::MasteringWindow>(*target->mastering, owner_, title);
-            target->masteringWindow->onChange = [this] {
+            std::unique_ptr<ui::PanelView> view;
+            if (std::string(target->builtin->id()) == "Mastering")
+                view = std::make_unique<ui::MasteringView>(static_cast<mastering::MasteringEffect&>(*target->builtin));
+            else
+                view = std::make_unique<ui::EffectView>(*target->builtin);
+            target->builtinWindow = std::make_unique<ui::EffectWindow>(std::move(view), owner_, title);
+            target->builtinWindow->onChange = [this] {
                 if (onBuiltinChange) onBuiltinChange();
             };
         }
         std::string reason;
-        if (!target->masteringWindow->open(reason)) {
+        if (!target->builtinWindow->open(reason)) {
             error = widen(reason);
             return false;
         }

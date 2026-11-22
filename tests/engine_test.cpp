@@ -6,6 +6,7 @@
 #include "disk/WavFile.h"
 #include "engine/Engine.h"
 #include "engine/OfflineRender.h"
+#include "engine/Effects.h"
 #include "engine/Mastering.h"
 #include "model/MidiFile.h"
 #include "model/ProjectController.h"
@@ -2931,6 +2932,203 @@ void testMastering() {
     CHECK(std::fabs(toPosition(kLowCut, fromPosition(kLowCut, 0.3f)) - 0.3f) < 1e-5f);
 }
 
+// --- Eingebaute Effekte (EQ, Kompressor, Hall, Echo) -------------------------
+
+namespace effects_test {
+
+// Laesst das Signal in Bloecken durch den Effekt laufen.
+void runEffect(AudioPlugin& fx, std::vector<float>& l, std::vector<float>& r, double tempo = 120.0) {
+    PluginTransport transport;
+    transport.playing = true;
+    transport.tempo = tempo;
+    for (std::size_t s = 0; s < l.size(); s += 256) {
+        const int n = static_cast<int>(std::min<std::size_t>(256, l.size() - s));
+        fx.process(l.data() + s, r.data() + s, n, nullptr, 0, transport);
+    }
+}
+
+double rmsDb(const std::vector<float>& x, std::size_t from, std::size_t to) {
+    double e = 0.0;
+    for (std::size_t i = from; i < to; ++i) e += static_cast<double>(x[i]) * x[i];
+    return 10.0 * std::log10(std::max(e / static_cast<double>(to - from), 1e-30));
+}
+
+std::vector<float> sine(double hz, double amp, int frames, double rate = 48000.0) {
+    std::vector<float> v(static_cast<std::size_t>(frames));
+    for (int i = 0; i < frames; ++i) v[static_cast<std::size_t>(i)] = static_cast<float>(amp * std::sin(2.0 * 3.141592653589793 * hz * i / rate));
+    return v;
+}
+
+}  // namespace effects_test
+
+void testBuiltinEffects() {
+    using namespace fx;
+    using namespace effects_test;
+    const double rate = 48000.0;
+
+    // Liste und Fabrik: jede id liefert ihren Effekt, Einstellungen ueberstehen Speichern und Laden.
+    CHECK(builtinTypes().size() == 5);
+    for (const BuiltinType& type : builtinTypes()) {
+        auto a = createBuiltin(type.id, rate);
+        CHECK(a && std::string(a->id()) == type.id && !a->isInstrument());
+        if (!a) continue;
+        for (int i = 0; i < a->paramCount(); ++i) {
+            const ParamInfo& p = a->info(i);
+            a->setParam(i, p.toggle ? 1.0f - p.def : fromPosition(p, 0.37f));
+        }
+        auto b = createBuiltin(type.id, 44100.0);
+        b->loadState(a->saveState());
+        for (int i = 0; i < a->paramCount(); ++i) CHECK(a->param(i) == b->param(i));
+        // Stille bleibt Stille, NaN wird nicht weitergegeben.
+        auto c = createBuiltin(type.id, rate);
+        std::vector<float> l(9600, 0.0f), r(9600, 0.0f);
+        l[100] = std::numeric_limits<float>::quiet_NaN();
+        runEffect(*c, l, r);
+        CHECK(std::all_of(l.begin(), l.end(), [](float v) { return std::isfinite(v); }));
+    }
+    CHECK(createBuiltin("Unbekannt", rate) == nullptr);
+    {
+        DelayEffect d(rate);
+        d.setParam(DelayEffect::kNote, 2.6f);
+        CHECK(d.param(DelayEffect::kNote) == 3.0f);  // Auswahl: ganzzahlig
+        CHECK(toPosition(DelayEffect::kParams[DelayEffect::kNote], 7.0f) == 1.0f);
+    }
+
+    // EQ: neutral ist exakt durchlaessig; ein Band wirkt wie berechnet.
+    {
+        EqEffect eq(rate);
+        std::vector<float> l = sine(1000.0, 0.3, 9600), r = sine(300.0, 0.3, 9600);
+        const auto l0 = l, r0 = r;
+        runEffect(eq, l, r);
+        double err = 0.0;
+        for (std::size_t i = 0; i < l.size(); ++i) err = std::max({err, std::fabs(static_cast<double>(l[i] - l0[i])), std::fabs(static_cast<double>(r[i] - r0[i]))});
+        CHECK(err < 1e-6);
+
+        EqEffect boost(rate);
+        boost.setParam(EqEffect::kMid1Freq, 1000.0f);
+        boost.setParam(EqEffect::kMid1Gain, 6.0f);
+        boost.setParam(EqEffect::kLowCutOn, 1.0f);
+        boost.setParam(EqEffect::kLowCut, 200.0f);
+        l = sine(1000.0, 0.3, 48000);
+        r = sine(40.0, 0.3, 48000);
+        runEffect(boost, l, r);
+        const double gain1k = rmsDb(l, 24000, 48000) - rmsDb(sine(1000.0, 0.3, 48000), 24000, 48000);
+        CHECK(std::fabs(gain1k - 6.0) < 0.3);
+        CHECK(rmsDb(r, 24000, 48000) - rmsDb(sine(40.0, 0.3, 48000), 24000, 48000) < -20.0);
+        float values[EqEffect::kCount];
+        for (int i = 0; i < EqEffect::kCount; ++i) values[i] = boost.param(i);
+        CHECK(std::fabs(EqEffect::responseDb(values, rate, 1000.0) - gain1k) < 0.3);
+        CHECK(EqEffect::responseDb(values, rate, 40.0) < -20.0);
+    }
+
+    // Kompressor: Kennlinie und eingeschwungener Pegel.
+    {
+        CHECK(CompressorEffect::curve(-30.0, -20.0, 4.0, 0.0) == -30.0);
+        CHECK(std::fabs(CompressorEffect::curve(-8.0, -20.0, 4.0, 0.0) + 17.0) < 1e-9);
+        CHECK(std::fabs(CompressorEffect::curve(-20.0, -20.0, 4.0, 6.0) + 20.0 + 0.75 * 9.0 / 12.0) < 1e-9);
+        CompressorEffect c(rate);
+        c.setParam(CompressorEffect::kThreshold, -20.0f);
+        c.setParam(CompressorEffect::kRatio, 4.0f);
+        c.setParam(CompressorEffect::kKnee, 0.0f);
+        c.setParam(CompressorEffect::kAutoMakeup, 0.0f);
+        const double amp = std::pow(10.0, -8.0 / 20.0);
+        std::vector<float> l = sine(1000.0, amp, 48000), r = l;
+        runEffect(c, l, r);
+        double peak = 0.0;
+        for (std::size_t i = 36000; i < 48000; ++i) peak = std::max(peak, std::fabs(static_cast<double>(l[i])));
+        CHECK(std::fabs(20.0 * std::log10(peak) + 17.0) < 0.5);
+        CHECK(std::fabs(c.reductionDb() - 9.0) < 0.5 && std::fabs(c.inputDb() + 8.0) < 0.1);
+
+        CompressorEffect dry(rate);
+        dry.setParam(CompressorEffect::kMix, 0.0f);
+        l = sine(1000.0, 0.9, 9600);
+        r = l;
+        const auto before = l;
+        runEffect(dry, l, r);
+        double err = 0.0;
+        for (std::size_t i = 4800; i < l.size(); ++i) err = std::max(err, std::fabs(static_cast<double>(l[i] - before[i])));
+        CHECK(err < 1e-6);
+    }
+
+    // Hall: Nachhallzeit ungefaehr wie eingestellt, Stereo verschieden, Mischung 0 = trocken.
+    {
+        ReverbEffect h(rate);
+        h.setParam(ReverbEffect::kDecay, 2.0f);
+        h.setParam(ReverbEffect::kDamping, 20000.0f);
+        h.setParam(ReverbEffect::kLowCut, 20.0f);
+        h.setParam(ReverbEffect::kPredelay, 0.0f);
+        h.setParam(ReverbEffect::kMix, 100.0f);
+        std::vector<float> l(static_cast<std::size_t>(rate * 4), 0.0f), r = l;
+        l[0] = r[0] = 1.0f;
+        runEffect(h, l, r);
+        // Abklingkurve nach Schroeder (rueckwaerts integrierte Energie)
+        std::vector<double> energy(l.size());
+        double acc = 0.0;
+        for (std::size_t i = l.size(); i-- > 0;) {
+            acc += static_cast<double>(l[i]) * l[i] + static_cast<double>(r[i]) * r[i];
+            energy[i] = acc;
+        }
+        const auto timeAt = [&](double db) {
+            for (std::size_t i = 0; i < energy.size(); ++i)
+                if (10.0 * std::log10(energy[i] / energy[0]) <= db) return static_cast<double>(i) / rate;
+            return 99.0;
+        };
+        const double rt60 = (timeAt(-35.0) - timeAt(-5.0)) * 2.0;
+        CHECK(rt60 > 1.5 && rt60 < 2.5);
+        double diff = 0.0;
+        for (std::size_t i = 0; i < 48000; ++i) diff += std::fabs(static_cast<double>(l[i] - r[i]));
+        CHECK(diff > 1.0);
+
+        ReverbEffect dry(rate);
+        dry.setParam(ReverbEffect::kMix, 0.0f);
+        std::vector<float> a = sine(440.0, 0.5, 9600), b = a;
+        const auto before = a;
+        runEffect(dry, a, b);
+        double err = 0.0;
+        for (std::size_t i = 4800; i < a.size(); ++i) err = std::max(err, std::fabs(static_cast<double>(a[i] - before[i])));
+        CHECK(err < 1e-6);
+    }
+
+    // Echo: im Takt (1/4 bei 120 BPM = 0,5 s), Rueckkopplung, Ping-Pong.
+    {
+        DelayEffect e(rate);
+        e.setParam(DelayEffect::kMix, 100.0f);
+        e.setParam(DelayEffect::kFeedback, 50.0f);
+        e.setParam(DelayEffect::kLowCut, 20.0f);
+        e.setParam(DelayEffect::kHighCut, 20000.0f);
+        float values[DelayEffect::kCount];
+        for (int i = 0; i < DelayEffect::kCount; ++i) values[i] = e.param(i);
+        CHECK(std::fabs(DelayEffect::delaySeconds(values, 120.0) - 0.5) < 1e-9);
+        CHECK(std::fabs(DelayEffect::delaySeconds(values, 90.0) - 2.0 / 3.0) < 1e-9);
+        std::vector<float> l(static_cast<std::size_t>(rate * 1.6), 0.0f), r = l;
+        l[0] = r[0] = 1.0f;
+        runEffect(e, l, r);
+        const auto peakNear = [&](const std::vector<float>& x, std::size_t at) {
+            std::size_t best = at - 50;
+            for (std::size_t i = at - 50; i < at + 50; ++i)
+                if (std::fabs(x[i]) > std::fabs(x[best])) best = i;
+            return best;
+        };
+        const std::size_t first = peakNear(l, 24000), second = peakNear(l, 48000);
+        CHECK(first >= 23998 && first <= 24004 && second >= 47998 && second <= 48006);
+        const double ratio = std::fabs(l[second]) / std::fabs(l[first]);
+        CHECK(ratio > 0.4 && ratio < 0.6);
+        CHECK(e.lastTempo() == 120.0);
+
+        DelayEffect p(rate);
+        p.setParam(DelayEffect::kPingPong, 1.0f);
+        p.setParam(DelayEffect::kMix, 100.0f);
+        p.setParam(DelayEffect::kFeedback, 50.0f);
+        std::vector<float> pl(static_cast<std::size_t>(rate * 1.6), 0.0f), pr = pl;
+        pl[0] = pr[0] = 1.0f;
+        runEffect(p, pl, pr);
+        double l1 = 0, r1 = 0, l2 = 0, r2 = 0;
+        for (std::size_t i = 23500; i < 24500; ++i) { l1 += std::fabs(pl[i]); r1 += std::fabs(pr[i]); }
+        for (std::size_t i = 47500; i < 48500; ++i) { l2 += std::fabs(pl[i]); r2 += std::fabs(pr[i]); }
+        CHECK(l1 > 10.0 * r1 && r2 > 10.0 * l2);  // erst links, dann rechts
+    }
+}
+
 int main() {
     testStoppedIsSilent();
     testPlayAdvancesPosition();
@@ -2974,6 +3172,7 @@ int main() {
     testAutomation();
     testMidiFiles();
     testMastering();
+    testBuiltinEffects();
     {
         std::error_code ec;
         std::filesystem::remove_all(tempFile("minidaw_test_aufnahmen"), ec);

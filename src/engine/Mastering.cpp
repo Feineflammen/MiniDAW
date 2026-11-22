@@ -68,19 +68,11 @@ double sanitize(double v) { return std::isfinite(v) ? std::clamp(v, -64.0, 64.0)
 }  // namespace
 
 float toPosition(int param, float value) noexcept {
-    const ParamInfo& p = kParams[static_cast<std::size_t>(param)];
-    if (p.toggle) return value >= 0.5f ? 1.0f : 0.0f;
-    value = std::clamp(value, p.min, p.max);
-    if (p.logScale) return static_cast<float>(std::log(value / p.min) / std::log(p.max / p.min));
-    return (value - p.min) / (p.max - p.min);
+    return fx::toPosition(kParams[static_cast<std::size_t>(param)], value);
 }
 
 float fromPosition(int param, float position) noexcept {
-    const ParamInfo& p = kParams[static_cast<std::size_t>(param)];
-    position = std::clamp(position, 0.0f, 1.0f);
-    if (p.toggle) return position >= 0.5f ? 1.0f : 0.0f;
-    if (p.logScale) return static_cast<float>(p.min * std::pow(p.max / p.min, static_cast<double>(position)));
-    return p.min + (p.max - p.min) * position;
+    return fx::fromPosition(kParams[static_cast<std::size_t>(param)], position);
 }
 
 // --- LoudnessMeter -------------------------------------------------------------
@@ -647,22 +639,9 @@ void Processor::process(float* left, float* right, int numFrames) noexcept {
 
 // --- MasteringEffect -----------------------------------------------------------
 
-MasteringEffect::MasteringEffect(double sampleRate) {
-    for (int i = 0; i < kParamCount; ++i)
-        params_[static_cast<std::size_t>(i)].store(kParams[static_cast<std::size_t>(i)].def, std::memory_order_relaxed);
-    processor_.prepare(sampleRate);
-}
-
-float MasteringEffect::param(int param) const noexcept {
-    if (param < 0 || param >= kParamCount) return 0.0f;
-    return params_[static_cast<std::size_t>(param)].load(std::memory_order_relaxed);
-}
-
-void MasteringEffect::setParam(int param, float value) noexcept {
-    if (param < 0 || param >= kParamCount || !std::isfinite(value)) return;
-    const ParamInfo& p = kParams[static_cast<std::size_t>(param)];
-    value = p.toggle ? (value >= 0.5f ? 1.0f : 0.0f) : std::clamp(value, p.min, p.max);
-    params_[static_cast<std::size_t>(param)].store(value, std::memory_order_relaxed);
+MasteringEffect::MasteringEffect(double sampleRate)
+    : fx::BuiltinEffect("Mastering", L"Mastering", kParams.data(), kParamCount, sampleRate) {
+    processor_.prepare(sampleRate_);
 }
 
 void MasteringEffect::process(float* left, float* right, int numFrames, const PluginMidiEvent*, int,
@@ -671,8 +650,9 @@ void MasteringEffect::process(float* left, float* right, int numFrames, const Pl
     if (resetRequested_.exchange(false, std::memory_order_relaxed) || (transport.playing && !wasPlaying_))
         processor_.resetMeters();
     wasPlaying_ = transport.playing;
-    for (int i = 0; i < kParamCount; ++i)
-        processor_.setParam(i, params_[static_cast<std::size_t>(i)].load(std::memory_order_relaxed));
+    const bool first = pullParams();
+    for (int i = 0; i < kParamCount; ++i) processor_.setParam(i, value(i));
+    if (first) processor_.reset();  // geladene Einstellungen gleich, ohne Gleiten
     processor_.process(left, right, numFrames);
 
     momentary_.store(processor_.output().momentary(), std::memory_order_relaxed);
@@ -693,37 +673,6 @@ MasteringEffect::Meters MasteringEffect::meters() const noexcept {
     m.truePeakDb = truePeak_.load(std::memory_order_relaxed);
     m.reductionDb = reduction_.load(std::memory_order_relaxed);
     return m;
-}
-
-std::vector<char> MasteringEffect::saveState() const {
-    std::string text = "mastering 1\n";
-    for (int i = 0; i < kParamCount; ++i) {
-        char line[96];
-        std::snprintf(line, sizeof line, "%s=%.6g\n", kParams[static_cast<std::size_t>(i)].key, static_cast<double>(param(i)));
-        text += line;
-    }
-    return std::vector<char>(text.begin(), text.end());
-}
-
-void MasteringEffect::loadState(const std::vector<char>& state) {
-    const std::string text(state.begin(), state.end());
-    std::size_t start = 0;
-    while (start < text.size()) {
-        std::size_t end = text.find('\n', start);
-        if (end == std::string::npos) end = text.size();
-        const std::string line = text.substr(start, end - start);
-        start = end + 1;
-        const std::size_t eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        const std::string key = line.substr(0, eq);
-        for (int i = 0; i < kParamCount; ++i) {
-            if (key != kParams[static_cast<std::size_t>(i)].key) continue;
-            char* rest = nullptr;
-            const double value = std::strtod(line.c_str() + eq + 1, &rest);
-            if (rest != line.c_str() + eq + 1) setParam(i, static_cast<float>(value));
-            break;
-        }
-    }
 }
 
 }  // namespace mastering

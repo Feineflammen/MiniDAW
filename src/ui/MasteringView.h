@@ -2,6 +2,7 @@
 
 #include "engine/Mastering.h"
 #include "ui/Canvas.h"
+#include "ui/PanelView.h"
 
 #include <functional>
 #include <initializer_list>
@@ -13,23 +14,22 @@ namespace ui {
 // Bedienfeld des eingebauten Mastering-Effekts: Stufen mit Reglern links,
 // Lautheit und Spitzenpegel rechts. Zeichnet nur ueber Canvas, damit es sich
 // auch fuer Screenshots in ein Bild zeichnen laesst.
-class MasteringView {
+class MasteringView final : public PanelView {
 public:
     static constexpr float kViewWidth = 900.0f;
     static constexpr float kViewHeight = 540.0f;
 
     explicit MasteringView(mastering::MasteringEffect& effect) : fx_(effect) {}
 
-    void draw(Canvas& c, float width, float height);
-    void mouseDown(float x, float y);
-    void mouseMove(float x, float y, bool fine);
-    void mouseUp();
-    void doubleClick(float x, float y);
-    void wheel(float x, float y, float notches, bool fine);
-    bool dragging() const { return dragParam_ >= 0; }
-
-    // Wird nach jeder Aenderung durch den Benutzer gerufen.
-    std::function<void()> onChange;
+    float viewWidth() const override { return kViewWidth; }
+    float viewHeight() const override { return kViewHeight; }
+    void draw(Canvas& c, float width, float height) override;
+    void mouseDown(float x, float y) override;
+    void mouseMove(float x, float y, bool fine) override;
+    void mouseUp() override;
+    void doubleClick(float x, float y) override;
+    void wheel(float x, float y, float notches, bool fine) override;
+    bool dragging() const override { return dragParam_ >= 0; }
 
 private:
     enum class HitKind { Slider, Toggle, ResetMeters };

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "ui/Canvas.h"
-#include "ui/MasteringView.h"
+#include "ui/PanelView.h"
 
 #include <windows.h>
 
@@ -11,13 +11,13 @@
 
 namespace ui {
 
-// Eigenes Fenster fuer den eingebauten Mastering-Effekt (Direct2D wie das Hauptfenster).
-class MasteringWindow {
+// Eigenes Fenster fuer einen eingebauten Effekt (Direct2D wie das Hauptfenster).
+class EffectWindow {
 public:
-    MasteringWindow(mastering::MasteringEffect& effect, HWND owner, std::wstring title);
-    ~MasteringWindow() { close(); }
-    MasteringWindow(const MasteringWindow&) = delete;
-    MasteringWindow& operator=(const MasteringWindow&) = delete;
+    EffectWindow(std::unique_ptr<PanelView> view, HWND owner, std::wstring title);
+    ~EffectWindow() { close(); }
+    EffectWindow(const EffectWindow&) = delete;
+    EffectWindow& operator=(const EffectWindow&) = delete;
 
     // Oeffnet das Fenster oder holt es nach vorn.
     bool open(std::string& error);
@@ -32,7 +32,7 @@ private:
     void paint();
     float toDip(int pixels) const { return static_cast<float>(pixels) * 96.0f / dpi_; }
 
-    MasteringView view_;
+    std::unique_ptr<PanelView> view_;
     HWND owner_;
     std::wstring title_;
     HWND hwnd_ = nullptr;

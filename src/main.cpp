@@ -11,6 +11,7 @@
 #include "disk/WavFile.h"
 #include "engine/Engine.h"
 #include "engine/LatencyProbe.h"
+#include "engine/Effects.h"
 #include "engine/Mastering.h"
 #include "engine/OfflineRender.h"
 #include "midi/MidiInput.h"
@@ -18,6 +19,7 @@
 #include "model/ProjectController.h"
 #include "ui/MainView.h"
 #include "ui/MainWindow.h"
+#include "ui/EffectView.h"
 #include "ui/MasteringView.h"
 #include "ui/SplashWindow.h"
 #include "vst3/PluginManager.h"
@@ -75,22 +77,46 @@ struct DemoPluginHost final : ui::PluginHost {
     bool load(int, int, int, std::wstring&) override { return false; }
     void unload(int, int) override {}
     bool openEditor(int, int, std::wstring&) override { return false; }
-    std::vector<std::wstring> builtinNames() override { return {L"Mastering"}; }
+    std::vector<std::wstring> builtinNames() override {
+        std::vector<std::wstring> names;
+        for (const fx::BuiltinType& type : fx::builtinTypes()) names.push_back(type.name);
+        return names;
+    }
 };
 
-// Mastering-Fenster fuer den Screenshot: der Effekt bekommt einige Sekunden
-// Beispielmusik, damit die Messwerte etwas zeigen.
-int renderMasteringScreenshot(const std::filesystem::path& output) {
+// Fenster eines eingebauten Effekts fuer den Screenshot: Der Effekt bekommt
+// einige Sekunden Beispielmusik, damit Messwerte etwas zeigen.
+int renderEffectScreenshot(const std::filesystem::path& output, const std::string& id) {
     constexpr double kRate = 44100.0;
-    mastering::MasteringEffect effect(kRate);
-    effect.setParam(mastering::kLoudness, 6.0f);
-    effect.setParam(mastering::kWidth, 115.0f);
-    effect.setParam(mastering::kBass, 1.5f);
-    effect.setParam(mastering::kMonoBass, 1.0f);
+    auto effect = fx::createBuiltin(id, kRate);
+    if (!effect) return 4;
+    if (id == "Mastering") {
+        effect->setParam(mastering::kLoudness, 6.0f);
+        effect->setParam(mastering::kWidth, 115.0f);
+        effect->setParam(mastering::kBass, 1.5f);
+        effect->setParam(mastering::kMonoBass, 1.0f);
+    } else if (id == "EQ") {
+        effect->setParam(fx::EqEffect::kLowCutOn, 1.0f);
+        effect->setParam(fx::EqEffect::kLowCut, 60.0f);
+        effect->setParam(fx::EqEffect::kLowGain, 3.0f);
+        effect->setParam(fx::EqEffect::kMid1Freq, 350.0f);
+        effect->setParam(fx::EqEffect::kMid1Gain, -4.0f);
+        effect->setParam(fx::EqEffect::kMid1Q, 1.6f);
+        effect->setParam(fx::EqEffect::kMid2Freq, 3200.0f);
+        effect->setParam(fx::EqEffect::kMid2Gain, 2.5f);
+        effect->setParam(fx::EqEffect::kHighGain, 4.0f);
+    } else if (id == "Kompressor") {
+        effect->setParam(fx::CompressorEffect::kThreshold, -24.0f);
+    } else if (id == "Echo") {
+        effect->setParam(fx::DelayEffect::kNote, 4.0f);  // 1/8 punktiert
+        effect->setParam(fx::DelayEffect::kPingPong, 1.0f);
+        effect->setParam(fx::DelayEffect::kFeedback, 45.0f);
+    }
     std::vector<float> left(512), right(512);
     PluginTransport transport;
     transport.playing = true;
     transport.sampleRate = kRate;
+    transport.tempo = 120.0;
     std::uint32_t seed = 1;
     for (int block = 0; block < 1200; ++block) {
         for (int i = 0; i < 512; ++i) {
@@ -104,13 +130,15 @@ int renderMasteringScreenshot(const std::filesystem::path& output) {
             left[static_cast<std::size_t>(i)] = static_cast<float>(0.45 * kick + 0.25 * noise + chord);
             right[static_cast<std::size_t>(i)] = static_cast<float>(0.45 * kick + 0.2 * noise + chord * 0.9);
         }
-        effect.process(left.data(), right.data(), 512, nullptr, 0, transport);
+        effect->process(left.data(), right.data(), 512, nullptr, 0, transport);
     }
-    ui::MasteringView view(effect);
+    std::unique_ptr<ui::PanelView> view;
+    if (id == "Mastering") view = std::make_unique<ui::MasteringView>(static_cast<mastering::MasteringEffect&>(*effect));
+    else view = std::make_unique<ui::EffectView>(*effect);
     std::string error;
-    const bool ok = ui::renderToPng([&view](ui::Canvas& c, float w, float h) { view.draw(c, w, h); },
-                                    static_cast<int>(ui::MasteringView::kViewWidth),
-                                    static_cast<int>(ui::MasteringView::kViewHeight), output, error);
+    const bool ok = ui::renderToPng([&view](ui::Canvas& c, float w, float h) { view->draw(c, w, h); },
+                                    static_cast<int>(view->viewWidth()), static_cast<int>(view->viewHeight()), output,
+                                    error);
     return ok ? 0 : 2;
 }
 
@@ -125,12 +153,17 @@ struct DemoPlugin final : AudioPlugin {
 };
 
 // mode: leer = Spuren mit Plugin-Auswahl, "mixer" = Mischpult, "eingang" = Eingangsliste,
-// "auswahl" = Effekt-Auswahl am Master, "mastering" = Mastering-Fenster,
+// "auswahl" = Effekt-Auswahl am Master, "mastering", "eq", "kompressor", "hall",
+// "echo" = Fenster der eingebauten Effekte,
 // "ladebild" und "ueber" = Ladebild bzw. Fenster "Ueber MiniDAW".
 int runScreenshot(const std::filesystem::path& output, const std::wstring& mode) {
     if (mode == L"ladebild" || mode == L"ueber")
         return ui::SplashWindow::renderPng(GetModuleHandleW(nullptr), mode == L"ueber", output.wstring()) ? 0 : 3;
-    if (mode == L"mastering") return renderMasteringScreenshot(output);
+    if (mode == L"mastering") return renderEffectScreenshot(output, "Mastering");
+    if (mode == L"eq") return renderEffectScreenshot(output, "EQ");
+    if (mode == L"kompressor") return renderEffectScreenshot(output, "Kompressor");
+    if (mode == L"hall") return renderEffectScreenshot(output, "Hall");
+    if (mode == L"echo") return renderEffectScreenshot(output, "Echo");
     constexpr int kRate = 44100;
     constexpr int kBlock = 512;
 

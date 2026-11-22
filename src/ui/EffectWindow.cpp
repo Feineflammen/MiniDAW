@@ -1,4 +1,4 @@
-#include "ui/MasteringWindow.h"
+#include "ui/EffectWindow.h"
 
 #include "resource.h"
 
@@ -7,7 +7,7 @@
 namespace ui {
 
 namespace {
-const wchar_t* const kClassName = L"MiniDawMasteringWindow";
+const wchar_t* const kClassName = L"MiniDawEffectWindow";
 constexpr UINT_PTR kMeterTimer = 1;
 
 void registerClass() {
@@ -26,14 +26,14 @@ void registerClass() {
 }
 }  // namespace
 
-MasteringWindow::MasteringWindow(mastering::MasteringEffect& effect, HWND owner, std::wstring title)
-    : view_(effect), owner_(owner), title_(std::move(title)) {
-    view_.onChange = [this] {
+EffectWindow::EffectWindow(std::unique_ptr<PanelView> view, HWND owner, std::wstring title)
+    : view_(std::move(view)), owner_(owner), title_(std::move(title)) {
+    view_->onChange = [this] {
         if (onChange) onChange();
     };
 }
 
-bool MasteringWindow::open(std::string& error) {
+bool EffectWindow::open(std::string& error) {
     if (hwnd_) {
         ShowWindow(hwnd_, SW_SHOWNORMAL);
         SetForegroundWindow(hwnd_);
@@ -54,18 +54,18 @@ bool MasteringWindow::open(std::string& error) {
     hwnd_ = CreateWindowExW(0, kClassName, title_.c_str(), style, CW_USEDEFAULT, CW_USEDEFAULT, 900, 540, owner_,
                             nullptr, GetModuleHandleW(nullptr), nullptr);
     if (!hwnd_) {
-        error = "Fenster fuer das Mastering nicht anlegbar";
+        error = "Fenster fuer den Effekt nicht anlegbar";
         return false;
     }
     SetWindowLongPtrW(hwnd_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
-    SetWindowLongPtrW(hwnd_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&MasteringWindow::windowProc));
+    SetWindowLongPtrW(hwnd_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&EffectWindow::windowProc));
 
     // Feste Groesse in geraeteunabhaengigen Pixeln, an die Skalierung angepasst.
     dpi_ = static_cast<float>(GetDpiForWindow(hwnd_));
     if (dpi_ <= 0.0f) dpi_ = 96.0f;
     const UINT dpi = static_cast<UINT>(dpi_);
-    RECT rect{0, 0, MulDiv(static_cast<int>(MasteringView::kViewWidth), static_cast<int>(dpi), 96),
-              MulDiv(static_cast<int>(MasteringView::kViewHeight), static_cast<int>(dpi), 96)};
+    RECT rect{0, 0, MulDiv(static_cast<int>(view_->viewWidth()), static_cast<int>(dpi), 96),
+              MulDiv(static_cast<int>(view_->viewHeight()), static_cast<int>(dpi), 96)};
     AdjustWindowRectExForDpi(&rect, style, FALSE, 0, dpi);
     SetWindowPos(hwnd_, nullptr, 0, 0, rect.right - rect.left, rect.bottom - rect.top,
                  SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -75,7 +75,7 @@ bool MasteringWindow::open(std::string& error) {
     return true;
 }
 
-void MasteringWindow::close() {
+void EffectWindow::close() {
     canvas_.reset();
     target_.Reset();
     if (hwnd_) {
@@ -88,13 +88,13 @@ void MasteringWindow::close() {
     }
 }
 
-LRESULT CALLBACK MasteringWindow::windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
-    auto* self = reinterpret_cast<MasteringWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+LRESULT CALLBACK EffectWindow::windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* self = reinterpret_cast<EffectWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (self) return self->handle(message, wParam, lParam);
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
-LRESULT MasteringWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
+LRESULT EffectWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
         case WM_CLOSE:
             close();
@@ -122,28 +122,28 @@ LRESULT MasteringWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
             return 0;
         case WM_LBUTTONDOWN:
             SetCapture(hwnd_);
-            view_.mouseDown(toDip(GET_X_LPARAM(lParam)), toDip(GET_Y_LPARAM(lParam)));
+            view_->mouseDown(toDip(GET_X_LPARAM(lParam)), toDip(GET_Y_LPARAM(lParam)));
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         case WM_LBUTTONDBLCLK:
-            view_.doubleClick(toDip(GET_X_LPARAM(lParam)), toDip(GET_Y_LPARAM(lParam)));
+            view_->doubleClick(toDip(GET_X_LPARAM(lParam)), toDip(GET_Y_LPARAM(lParam)));
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         case WM_MOUSEMOVE:
-            if (view_.dragging()) {
-                view_.mouseMove(toDip(GET_X_LPARAM(lParam)), toDip(GET_Y_LPARAM(lParam)), (wParam & MK_SHIFT) != 0);
+            if (view_->dragging()) {
+                view_->mouseMove(toDip(GET_X_LPARAM(lParam)), toDip(GET_Y_LPARAM(lParam)), (wParam & MK_SHIFT) != 0);
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
             return 0;
         case WM_LBUTTONUP:
         case WM_CAPTURECHANGED:
-            view_.mouseUp();
+            view_->mouseUp();
             if (message == WM_LBUTTONUP) ReleaseCapture();
             return 0;
         case WM_MOUSEWHEEL: {
             POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             ScreenToClient(hwnd_, &pt);
-            view_.wheel(toDip(pt.x), toDip(pt.y), static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam)) / WHEEL_DELTA,
+            view_->wheel(toDip(pt.x), toDip(pt.y), static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam)) / WHEEL_DELTA,
                         (GET_KEYSTATE_WPARAM(wParam) & MK_SHIFT) != 0);
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
@@ -154,7 +154,7 @@ LRESULT MasteringWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
     return DefWindowProcW(hwnd_, message, wParam, lParam);
 }
 
-void MasteringWindow::paint() {
+void EffectWindow::paint() {
     if (!target_) {
         RECT rc{};
         GetClientRect(hwnd_, &rc);
@@ -170,7 +170,7 @@ void MasteringWindow::paint() {
     }
     target_->BeginDraw();
     const D2D1_SIZE_F size = target_->GetSize();
-    view_.draw(*canvas_, size.width, size.height);
+    view_->draw(*canvas_, size.width, size.height);
     if (target_->EndDraw() == D2DERR_RECREATE_TARGET) {
         canvas_.reset();
         target_.Reset();

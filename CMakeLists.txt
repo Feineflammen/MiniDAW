@@ -38,6 +38,7 @@ endif()
 # Plattformunabhaengiger Kern: Engine, Dateien, Projektmodell.
 add_library(dawcore STATIC
     src/engine/Engine.cpp
+    src/engine/Mastering.cpp
     src/engine/LatencyProbe.cpp
     src/engine/OfflineRender.cpp
     src/engine/Synth.cpp
@@ -82,6 +83,8 @@ if(WIN32)
         src/ui/Canvas.cpp
         src/ui/MainView.cpp
         src/ui/MainWindow.cpp
+        src/ui/MasteringView.cpp
+        src/ui/MasteringWindow.cpp
         src/ui/MixerView.cpp
         src/ui/SplashWindow.cpp
         src/ui/PianoRoll.cpp

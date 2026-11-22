@@ -26,6 +26,14 @@ public:
     virtual void unload(int strip, int slot) = 0;
     // Oeffnet das Fenster des Plugins auf dem Platz.
     virtual bool openEditor(int strip, int slot, std::wstring& error) = 0;
+
+    // Eingebaute Effekte (fuer die Effekt-Plaetze 1..4), unabhaengig von VST3.
+    virtual std::vector<std::wstring> builtinNames() { return {}; }
+    virtual bool loadBuiltin(int strip, int slot, int index, std::wstring& error) {
+        (void)strip, (void)slot, (void)index;
+        error = L"Keine eingebauten Effekte";
+        return false;
+    }
 };
 
 }  // namespace ui

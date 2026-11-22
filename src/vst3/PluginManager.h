@@ -1,6 +1,8 @@
 #pragma once
 
+#include "engine/Mastering.h"
 #include "model/ProjectController.h"
+#include "ui/MasteringWindow.h"
 #include "ui/PluginHost.h"
 #include "vst3/PluginWindow.h"
 #include "vst3/Vst3Host.h"
@@ -9,6 +11,7 @@
 #include <windows.h>
 
 #include <array>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -44,6 +47,11 @@ public:
     bool load(int strip, int slot, int index, std::wstring& error) override;
     void unload(int strip, int slot) override;
     bool openEditor(int strip, int slot, std::wstring& error) override;
+    std::vector<std::wstring> builtinNames() override { return {kMasteringName}; }
+    bool loadBuiltin(int strip, int slot, int index, std::wstring& error) override;
+
+    // Wird gerufen, wenn der Benutzer im Fenster eines eingebauten Effekts etwas aendert.
+    std::function<void()> onBuiltinChange;
 
     // --- PluginPersistence (Projekt speichern und laden) ---
     bool capture(int strip, int slot, std::filesystem::path& file, std::vector<char>& state) override;
@@ -51,13 +59,28 @@ public:
                  std::string& error) override;
 
 private:
+    // Eingebaute Effekte stehen in der Projektdatei unter diesem "Pfad". Das
+    // Zeichen < kommt in Windows-Dateinamen nicht vor, eine Verwechslung ist ausgeschlossen.
+    static constexpr const wchar_t* kMasteringPath = L"<MiniDAW>/Mastering";
+    static constexpr const wchar_t* kMasteringName = L"Mastering";
+
     struct Slot {
         std::unique_ptr<PluginWindow> window;  // vor dem Plugin zerstoeren
         std::shared_ptr<Vst3Plugin> plugin;
+        std::shared_ptr<mastering::MasteringEffect> mastering;  // statt plugin, wenn eingebaut
+        std::unique_ptr<ui::MasteringWindow> masteringWindow;   // nach dem Effekt: wird vor ihm zerstoert
         std::filesystem::path path;            // Datei, aus der das Plugin stammt
+        void clear() {
+            window.reset();
+            masteringWindow.reset();
+            plugin.reset();
+            mastering.reset();
+            path.clear();
+        }
     };
     Slot* find(int strip, int slot);
     void install(int strip, int slot, std::shared_ptr<Vst3Plugin> plugin, const std::filesystem::path& path);
+    void installMastering(int strip, int slot, std::shared_ptr<mastering::MasteringEffect> effect);
 
     ProjectController& controller_;
     double sampleRate_;

@@ -11,12 +11,14 @@
 #include "disk/WavFile.h"
 #include "engine/Engine.h"
 #include "engine/LatencyProbe.h"
+#include "engine/Mastering.h"
 #include "engine/OfflineRender.h"
 #include "midi/MidiInput.h"
 #include "midi/MidiOutput.h"
 #include "model/ProjectController.h"
 #include "ui/MainView.h"
 #include "ui/MainWindow.h"
+#include "ui/MasteringView.h"
 #include "ui/SplashWindow.h"
 #include "vst3/PluginManager.h"
 
@@ -73,7 +75,44 @@ struct DemoPluginHost final : ui::PluginHost {
     bool load(int, int, int, std::wstring&) override { return false; }
     void unload(int, int) override {}
     bool openEditor(int, int, std::wstring&) override { return false; }
+    std::vector<std::wstring> builtinNames() override { return {L"Mastering"}; }
 };
+
+// Mastering-Fenster fuer den Screenshot: der Effekt bekommt einige Sekunden
+// Beispielmusik, damit die Messwerte etwas zeigen.
+int renderMasteringScreenshot(const std::filesystem::path& output) {
+    constexpr double kRate = 44100.0;
+    mastering::MasteringEffect effect(kRate);
+    effect.setParam(mastering::kLoudness, 6.0f);
+    effect.setParam(mastering::kWidth, 115.0f);
+    effect.setParam(mastering::kBass, 1.5f);
+    effect.setParam(mastering::kMonoBass, 1.0f);
+    std::vector<float> left(512), right(512);
+    PluginTransport transport;
+    transport.playing = true;
+    transport.sampleRate = kRate;
+    std::uint32_t seed = 1;
+    for (int block = 0; block < 1200; ++block) {
+        for (int i = 0; i < 512; ++i) {
+            const double t = (block * 512 + i) / kRate;
+            const double beat = std::fmod(t, 0.5);
+            const double kick = std::exp(-beat * 18.0) * std::sin(6.283185307179586 * (50.0 + 90.0 * std::exp(-beat * 30.0)) * beat);
+            seed = seed * 1664525u + 1013904223u;
+            const double noise = (static_cast<double>(seed >> 8) / 16777216.0 - 0.5) * std::exp(-std::fmod(t + 0.25, 0.5) * 40.0);
+            const double chord = 0.08 * (std::sin(6.283185307179586 * 220.0 * t) + std::sin(6.283185307179586 * 277.2 * t) +
+                                         std::sin(6.283185307179586 * 329.6 * t));
+            left[static_cast<std::size_t>(i)] = static_cast<float>(0.45 * kick + 0.25 * noise + chord);
+            right[static_cast<std::size_t>(i)] = static_cast<float>(0.45 * kick + 0.2 * noise + chord * 0.9);
+        }
+        effect.process(left.data(), right.data(), 512, nullptr, 0, transport);
+    }
+    ui::MasteringView view(effect);
+    std::string error;
+    const bool ok = ui::renderToPng([&view](ui::Canvas& c, float w, float h) { view.draw(c, w, h); },
+                                    static_cast<int>(ui::MasteringView::kViewWidth),
+                                    static_cast<int>(ui::MasteringView::kViewHeight), output, error);
+    return ok ? 0 : 2;
+}
 
 // Plugin fuer den Screenshot-Modus: laesst den Klang unveraendert, belegt nur einen Platz.
 struct DemoPlugin final : AudioPlugin {
@@ -86,10 +125,12 @@ struct DemoPlugin final : AudioPlugin {
 };
 
 // mode: leer = Spuren mit Plugin-Auswahl, "mixer" = Mischpult, "eingang" = Eingangsliste,
+// "auswahl" = Effekt-Auswahl am Master, "mastering" = Mastering-Fenster,
 // "ladebild" und "ueber" = Ladebild bzw. Fenster "Ueber MiniDAW".
 int runScreenshot(const std::filesystem::path& output, const std::wstring& mode) {
     if (mode == L"ladebild" || mode == L"ueber")
         return ui::SplashWindow::renderPng(GetModuleHandleW(nullptr), mode == L"ueber", output.wstring()) ? 0 : 3;
+    if (mode == L"mastering") return renderMasteringScreenshot(output);
     constexpr int kRate = 44100;
     constexpr int kBlock = 512;
 
@@ -141,7 +182,7 @@ int runScreenshot(const std::filesystem::path& output, const std::wstring& mode)
     controller.setPlugin(5, 1, std::make_shared<DemoPlugin>(false), L"Beispiel-EQ");
     controller.setPlugin(1, 1, std::make_shared<DemoPlugin>(false, 512), L"Beispiel-Kompressor");
     controller.setPlugin(kFirstBusStrip, 1, std::make_shared<DemoPlugin>(false), L"Beispiel-Hall");
-    controller.setPlugin(kMasterStripIndex, 1, std::make_shared<DemoPlugin>(false, 64), L"Beispiel-Limiter");
+    controller.setPlugin(kMasterStripIndex, 1, std::make_shared<mastering::MasteringEffect>(kRate), L"Mastering");
     controller.setTrackSend(0, 0, 0.5f);
     controller.setTrackSend(2, 0, 0.3f);
     controller.setTrackSend(5, 0, 0.7f);
@@ -182,6 +223,10 @@ int runScreenshot(const std::filesystem::path& output, const std::wstring& mode)
     view.setPluginHost(&demoPlugins);
     if (mode == L"mixer") view.setMixerMode(true);
     else if (mode == L"eingang") view.openInputMenu(2);
+    else if (mode == L"auswahl") {
+        view.setMixerMode(true);
+        view.openEffectPicker(kMasterStripIndex, 2, 860.0f, 300.0f);
+    }
     else view.openPluginPicker(1);
     view.tick();
 
@@ -804,6 +849,7 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
         return 1;
     }
     plugins.setOwner(window.hwnd());
+    plugins.onBuiltinChange = [&] { controller.markModified(); };
     updateTitle();
     // Das Ladebild geht, bevor ein Projekt geladen wird: Dessen Meldungen
     // erscheinen ueber dem Hauptfenster und duerfen nicht verdeckt sein.

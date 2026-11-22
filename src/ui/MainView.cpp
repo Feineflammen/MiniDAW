@@ -149,7 +149,8 @@ Rect MainView::editorButtonRect(int track) const { return {290.0f, rowY(track) +
 
 // Die Liste klappt am angeklickten Feld auf, soweit Platz ist.
 Rect MainView::pickerRect() const {
-    const int rows = std::min(kPickerRows, static_cast<int>(pickerNames_.size()) + 1);
+    const bool noPlugins = static_cast<int>(pickerNames_.size()) == pickerBuiltins_;
+    const int rows = std::min(kPickerRows, static_cast<int>(pickerNames_.size()) + 1 + (noPlugins ? 1 : 0));
     const float h = 26.0f + static_cast<float>(std::max(rows, 2)) * kPickerRowH + 6.0f;
     const float w = 340.0f;
     const float top = kTopH + kRulerH + 4.0f;
@@ -394,7 +395,10 @@ void MainView::openPluginPicker(int track) {
 
 void MainView::openPicker(int strip, int slot, const Rect& anchor) {
     if (!pluginHost_ || strip < 0 || strip >= kProjectStrips || slot < 0 || slot >= kSlotsPerStrip) return;
-    pickerNames_ = pluginHost_->pluginNames();
+    pickerNames_.clear();
+    if (slot > 0) pickerNames_ = pluginHost_->builtinNames();
+    pickerBuiltins_ = static_cast<int>(pickerNames_.size());
+    for (auto& name : pluginHost_->pluginNames()) pickerNames_.push_back(std::move(name));
     pickerStrip_ = strip;
     pickerSlot_ = slot;
     pickerScroll_ = 0;
@@ -431,15 +435,18 @@ void MainView::drawPluginPicker(Canvas& c) {
         const Rect row{r.x + 6.0f, r.y + 26.0f + static_cast<float>(i) * kPickerRowH, r.w - 12.0f, kPickerRowH - 2.0f};
         const bool isNone = item == 0;
         const std::wstring& name = isNone ? current : pickerNames_[static_cast<std::size_t>(item - 1)];
+        const bool builtin = !isNone && item - 1 < pickerBuiltins_;
         const bool active = isNone ? current.empty() : name == current;
         if (active) c.fillRounded(row, 3.0f, kButton);
         const std::wstring noneText = pickerSlot_ == 0 ? std::wstring(L"Kein Instrument (eingebauter Synthesizer)")
                                                        : std::wstring(L"Kein Effekt (Platz leeren)");
         c.text(isNone ? noneText : name, {row.x + 8.0f, row.y, row.w - 16.0f, row.h}, isNone ? kTextDim : kText);
+        if (builtin) c.text(L"eingebaut", {row.x + 8.0f, row.y, row.w - 16.0f, row.h}, kAccent, Font::Small, Align::Right);
     }
-    if (pickerNames_.empty() && pluginHost_) {
+    if (static_cast<int>(pickerNames_.size()) == pickerBuiltins_ && pluginHost_) {
+        const float y = r.y + 26.0f + static_cast<float>(std::min(kPickerRows - 1, total)) * kPickerRowH;
         c.text(L"Keine Plugins gefunden in " + pluginHost_->pluginFolder(),
-               {r.x + 14.0f, r.y + 26.0f + kPickerRowH, r.w - 28.0f, kPickerRowH}, kMuteOn, Font::Small);
+               {r.x + 14.0f, y, r.w - 28.0f, kPickerRowH}, kMuteOn, Font::Small);
     } else if (total > visible) {
         // Rollbalken
         const float trackH = static_cast<float>(visible) * kPickerRowH;
@@ -467,7 +474,10 @@ bool MainView::pickerMouseDown(float x, float y) {
         pluginHost_->unload(strip, slot);
     } else {
         std::wstring error;
-        if (!pluginHost_->load(strip, slot, item - 1, error)) {
+        const bool builtin = item - 1 < pickerBuiltins_;
+        const bool loaded = builtin ? pluginHost_->loadBuiltin(strip, slot, item - 1, error)
+                                    : pluginHost_->load(strip, slot, item - 1 - pickerBuiltins_, error);
+        if (!loaded) {
             setStatus(error);
         } else {
             // Ein frisch geladenes Plugin zeigt gleich sein Fenster.

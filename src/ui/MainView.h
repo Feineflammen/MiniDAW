@@ -39,6 +39,8 @@ public:
     void setPluginHost(PluginHost* host) { pluginHost_ = host; }
     // Oeffnet die Plugin-Auswahl fuer das Instrument einer Spur.
     void openPluginPicker(int track);
+    // Auswahl fuer einen Effekt-Platz an fester Stelle (Screenshot-Modus).
+    void openEffectPicker(int strip, int slot, float x, float y) { openPicker(strip, slot, {x, y, 0.0f, 0.0f}); }
     // Fuer das Menue Bearbeiten.
     bool canUndo() const { return controller_.canUndo(); }
     bool canRedo() const { return controller_.canRedo(); }
@@ -175,7 +177,8 @@ private:
     int pickerSlot_ = 0;
     Rect pickerAnchor_{};   // Feld, an dem die Liste aufklappt
     int pickerScroll_ = 0;
-    std::vector<std::wstring> pickerNames_;
+    std::vector<std::wstring> pickerNames_;  // zuerst die eingebauten Effekte, dann die Plugins
+    int pickerBuiltins_ = 0;
 
     float width_ = 1280.0f, height_ = 800.0f;
     double viewStart_ = 0.0;         // Frame am linken Rand der Zeitachse

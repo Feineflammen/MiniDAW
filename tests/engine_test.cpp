@@ -6,6 +6,7 @@
 #include "disk/WavFile.h"
 #include "engine/Engine.h"
 #include "engine/OfflineRender.h"
+#include "engine/Mastering.h"
 #include "model/MidiFile.h"
 #include "model/ProjectController.h"
 #include "util/SpscQueue.h"
@@ -2650,6 +2651,286 @@ void testMidiFiles() {
           back.parts[0].name == named.name);
 }
 
+// --- Mastering ----------------------------------------------------------------
+
+namespace mastering_test {
+
+// Unabhaengige True-Peak-Messung: 32-fach mit langem gefenstertem Sinc.
+double referenceTruePeak(const std::vector<float>& x) {
+    constexpr int up = 32, half = 48;
+    double peak = 0.0;
+    for (std::size_t n = half; n + half < x.size(); ++n) {
+        for (int k = 0; k < up; ++k) {
+            const double t = static_cast<double>(k) / up;
+            double v = 0.0;
+            for (int j = -half + 1; j <= half; ++j) {
+                const double d = j - t;
+                const double s = std::abs(d) < 1e-12 ? 1.0 : std::sin(3.141592653589793 * d) / (3.141592653589793 * d);
+                v += x[n + static_cast<std::size_t>(j)] * s * (0.5 + 0.5 * std::cos(3.141592653589793 * d / half));
+            }
+            peak = std::max(peak, std::abs(v));
+        }
+    }
+    return peak;
+}
+
+// Stereo-Sinus mit dbfs Spitzenpegel auf beiden Kanaelen in den Messer.
+void feedSine(mastering::LoudnessMeter& meter, double rate, double dbfs, double seconds, double hz = 1000.0) {
+    const double amp = std::pow(10.0, dbfs / 20.0);
+    static double phase = 0.0;
+    const auto frames = static_cast<long>(seconds * rate);
+    for (long i = 0; i < frames; ++i) {
+        const double v = amp * std::sin(phase);
+        phase += 2.0 * 3.141592653589793 * hz / rate;
+        meter.process(v, v);
+    }
+}
+
+void setAll(mastering::Processor& p, bool on) {
+    using namespace mastering;
+    for (Param t : {kEqOn, kCompOn, kSatOn, kToneOn, kStereoOn, kClipOn, kLimitOn}) p.setParam(t, on ? 1.0f : 0.0f);
+}
+
+}  // namespace mastering_test
+
+void testMastering() {
+    using namespace mastering;
+    using namespace mastering_test;
+
+    // Lautheit nach EBU Tech 3341 (Toleranz +-0,1 LU).
+    for (double rate : {48000.0, 44100.0}) {
+        LoudnessMeter m;
+        m.prepare(rate);
+        feedSine(m, rate, -23.0, 20.0);
+        CHECK(std::fabs(m.momentary() + 23.0) < 0.1 && std::fabs(m.shortTerm() + 23.0) < 0.1 &&
+              std::fabs(m.integrated() + 23.0) < 0.1);
+        m.reset();
+        feedSine(m, rate, -33.0, 20.0);
+        CHECK(std::fabs(m.integrated() + 33.0) < 0.1);
+    }
+    {
+        LoudnessMeter m;
+        m.prepare(48000.0);
+        feedSine(m, 48000.0, -36.0, 10.0);
+        feedSine(m, 48000.0, -23.0, 60.0);
+        feedSine(m, 48000.0, -36.0, 10.0);
+        CHECK(std::fabs(m.integrated() + 23.0) < 0.1);  // Fall 3: relatives Gate
+        m.reset();
+        feedSine(m, 48000.0, -72.0, 10.0);
+        feedSine(m, 48000.0, -36.0, 10.0);
+        feedSine(m, 48000.0, -23.0, 60.0);
+        feedSine(m, 48000.0, -36.0, 10.0);
+        feedSine(m, 48000.0, -72.0, 10.0);
+        CHECK(std::fabs(m.integrated() + 23.0) < 0.1);  // Fall 4: auch das absolute Gate
+        m.reset();
+        feedSine(m, 48000.0, -26.0, 20.0);
+        feedSine(m, 48000.0, -20.0, 20.1);
+        feedSine(m, 48000.0, -26.0, 20.0);
+        CHECK(std::fabs(m.integrated() + 23.0) < 0.1);  // Fall 5
+        m.reset();
+        CHECK(m.integrated() == kSilence && m.momentary() == kSilence);
+    }
+
+    // True Peak: Sinus bei einem Viertel der Abtastrate, um 45 Grad verschoben.
+    // Die Samples liegen bei 0,707, die echte Spitze bei 1.
+    {
+        TruePeak tp;
+        double peak = 0.0, samplePeak = 0.0;
+        for (int i = 0; i < 400; ++i) {
+            const double v = std::sin(3.141592653589793 / 2.0 * i + 3.141592653589793 / 4.0);
+            samplePeak = std::max(samplePeak, std::abs(v));
+            const double seg = tp.push(v);
+            if (i > 100) peak = std::max(peak, seg);  // der harte Anfang schwingt ueber
+        }
+        CHECK(samplePeak < 0.71 && peak > 0.995 && peak < 1.005);
+    }
+
+    const double rate = 48000.0;
+    const int block = 512;
+    const auto run = [&](Processor& p, const std::function<double(int, int)>& source, int frames,
+                         std::vector<float>& outL, std::vector<float>& outR) {
+        outL.assign(static_cast<std::size_t>(frames), 0.0f);
+        outR.assign(static_cast<std::size_t>(frames), 0.0f);
+        for (int i = 0; i < frames; ++i) {
+            outL[static_cast<std::size_t>(i)] = static_cast<float>(source(i, 0));
+            outR[static_cast<std::size_t>(i)] = static_cast<float>(source(i, 1));
+        }
+        for (int s = 0; s < frames; s += block)
+            p.process(outL.data() + s, outR.data() + s, std::min(block, frames - s));
+    };
+    std::vector<float> l, r;
+
+    // Alles aus: genau das Eingangssignal, um die gemeldete Latenz verzoegert. Umgehen ebenso.
+    for (bool bypass : {false, true}) {
+        Processor p;
+        p.prepare(rate);
+        setAll(p, bypass);
+        p.setParam(kBypass, bypass ? 1.0f : 0.0f);
+        p.setParam(kInput, 6.0f);
+        if (!bypass) p.setParam(kInput, 0.0f);
+        p.reset();
+        const int latency = p.latency();
+        CHECK(latency == 23 + TruePeak::kDelay + 240 - 1);
+        const auto signal = [](int i, int ch) { return 0.5 * std::sin(0.01 * i + ch) * std::sin(0.0007 * i); };
+        run(p, signal, 20000, l, r);
+        double err = 0.0;
+        for (int i = latency; i < 20000; ++i) {
+            err = std::max(err, std::fabs(l[static_cast<std::size_t>(i)] - signal(i - latency, 0)));
+            err = std::max(err, std::fabs(r[static_cast<std::size_t>(i)] - signal(i - latency, 1)));
+        }
+        CHECK(err < 1e-6);
+    }
+
+    // Saettigung ueberabgetastet: leise Signale kommen gleich laut und zeitgleich heraus.
+    {
+        Processor p;
+        p.prepare(rate);
+        setAll(p, false);
+        p.setParam(kSatOn, 1.0f);
+        p.setParam(kSatMix, 100.0f);
+        p.setParam(kDrive, 0.0f);
+        p.reset();
+        const auto quiet = [](int i, int) { return 0.01 * std::sin(2.0 * 3.141592653589793 * 1000.0 * i / 48000.0); };
+        run(p, quiet, 9600, l, r);
+        double err = 0.0;
+        for (int i = 2000; i < 9600; ++i)
+            err = std::max(err, std::fabs(l[static_cast<std::size_t>(i)] - quiet(i - p.latency(), 0)));
+        CHECK(err < 0.01 * 0.002);  // unter 0,02 dB Abweichung
+    }
+
+    // Werkseinstellung: Saettigung an oder aus aendert den Pegel leiser Signale kaum.
+    {
+        double level[2]{};
+        for (int on = 0; on < 2; ++on) {
+            Processor p;
+            p.prepare(rate);
+            setAll(p, false);
+            p.setParam(kSatOn, static_cast<float>(on));
+            p.reset();
+            run(p, [](int i, int) { return 0.1 * std::sin(2.0 * 3.141592653589793 * 1000.0 * i / 48000.0); }, 48000, l, r);
+            double e = 0.0;
+            for (int i = 24000; i < 48000; ++i) e += l[static_cast<std::size_t>(i)] * l[static_cast<std::size_t>(i)];
+            level[on] = std::sqrt(e);
+        }
+        CHECK(std::fabs(20.0 * std::log10(level[1] / level[0])) < 0.1);
+    }
+
+    // Breite 0 % ist mono; "Bass mono" nimmt das Seitensignal unter 120 Hz heraus.
+    {
+        Processor p;
+        p.prepare(rate);
+        setAll(p, false);
+        p.setParam(kStereoOn, 1.0f);
+        p.setParam(kWidth, 0.0f);
+        p.reset();
+        run(p, [](int i, int ch) { return (ch ? -0.5 : 0.5) * std::sin(0.02 * i) + 0.1 * std::sin(0.3 * i + ch); }, 9600, l, r);
+        double diff = 0.0;
+        for (int i = 4000; i < 9600; ++i) diff = std::max(diff, static_cast<double>(std::fabs(l[static_cast<std::size_t>(i)] - r[static_cast<std::size_t>(i)])));
+        CHECK(diff < 1e-6);
+
+        Processor q;
+        q.prepare(rate);
+        setAll(q, false);
+        q.setParam(kStereoOn, 1.0f);
+        q.setParam(kMonoBass, 1.0f);
+        q.reset();
+        const auto bassSide = [](int i, int ch) { return (ch ? -0.5 : 0.5) * std::sin(2.0 * 3.141592653589793 * 40.0 * i / 48000.0); };
+        run(q, bassSide, 48000, l, r);
+        double side = 0.0;
+        for (int i = 24000; i < 48000; ++i) side = std::max(side, 0.5 * std::fabs(l[static_cast<std::size_t>(i)] - r[static_cast<std::size_t>(i)]));
+        CHECK(side < 0.5 * 0.35);  // 40 Hz: deutlich unter einem Drittel uebrig (1-Pol-Weiche)
+    }
+
+    // Limiter: True Peak bleibt unter der Grenze, die Absenkung springt nicht.
+    {
+        Processor p;
+        p.prepare(rate);
+        setAll(p, false);
+        p.setParam(kLimitOn, 1.0f);
+        p.setParam(kCeiling, -1.0f);
+        p.setParam(kLoudness, 12.0f);
+        p.reset();
+        std::uint32_t seed = 7;
+        double lp = 0.0, lp2 = 0.0;
+        const auto noisy = [&](int i, int ch) {
+            if (ch == 0) {  // Rauschen mit abfallenden Hoehen wie bei Musik
+                seed = seed * 1664525u + 1013904223u;
+                const double white = (static_cast<double>(seed >> 8) / 16777216.0) * 2.0 - 1.0;
+                lp = 0.8 * lp + 0.2 * white;
+                lp2 = 0.8 * lp2 + 0.2 * lp * 3.0;
+            }
+            const double hit = (i % 12000) < 30 ? 0.9 : 0.0;  // harte Schlaege
+            return 0.25 * lp2 + hit + 0.2 * std::sin(2.0 * 3.141592653589793 * 11000.0 * i / 48000.0 + ch);
+        };
+        run(p, noisy, 96000, l, r);
+        const std::vector<float> tailL(l.begin() + 60000, l.end());
+        const std::vector<float> tailR(r.begin() + 60000, r.end());
+        const double tp = 20.0 * std::log10(std::max(referenceTruePeak(tailL), referenceTruePeak(tailR)));
+        CHECK(tp <= -1.0 + 0.1);
+        CHECK(p.gainReductionDb() > 3.0);
+        CHECK(20.0 * std::log10(p.truePeakMax()) <= -0.9);
+
+        // Sprung: ruhiger Sinus, dann ein harter Schlag. Die Absenkung beginnt
+        // vor dem Schlag und aendert sich je Sample nur wenig.
+        Processor q;
+        q.prepare(rate);
+        setAll(q, false);
+        q.setParam(kLimitOn, 1.0f);
+        q.reset();
+        // Gleichspannung, damit sich die Verstaerkung je Sample direkt ablesen laesst.
+        const auto step = [](int i, int) { return 0.5 + ((i >= 12000 && i < 12010) ? 1.0 : 0.0); };
+        run(q, step, 24000, l, r);
+        const int latency = q.latency();
+        double worst = 0.0, prev = 1.0;
+        for (int i = latency + 100; i < 24000; ++i) {
+            const double x = step(i - latency, 0);
+            const double g = l[static_cast<std::size_t>(i)] / x;
+            worst = std::max(worst, std::fabs(20.0 * std::log10(g / prev)));
+            prev = g;
+        }
+        CHECK(worst < 0.05);
+        CHECK(l[static_cast<std::size_t>(11000 + latency)] == 0.5f);  // vorher unberuehrt
+        CHECK(std::fabs(l[static_cast<std::size_t>(12000 + latency)]) <= std::pow(10.0, -1.0 / 20.0) + 1e-6);
+    }
+
+    // Stille bleibt Stille, kaputte Eingaben werden nicht weitergereicht.
+    {
+        Processor p;
+        p.prepare(44100.0);
+        run(p, [](int, int) { return 0.0; }, 44100, l, r);
+        CHECK(*std::max_element(l.begin(), l.end()) == 0.0f && *std::min_element(r.begin(), r.end()) == 0.0f);
+        run(p, [](int i, int) { return i == 5 ? std::numeric_limits<double>::quiet_NaN() : 0.1; }, 4096, l, r);
+        CHECK(std::all_of(l.begin(), l.end(), [](float v) { return std::isfinite(v); }));
+    }
+
+    // Plugin-Huelle: Einstellungen sichern und laden, Messung startet mit der Wiedergabe neu.
+    {
+        MasteringEffect fx(48000.0);
+        CHECK(!fx.isInstrument() && fx.latencyFrames() == 23 + TruePeak::kDelay + 240 - 1);
+        fx.setParam(kCeiling, -0.5f);
+        fx.setParam(kWidth, 500.0f);  // wird begrenzt
+        fx.setParam(kMonoBass, 1.0f);
+        const auto state = fx.saveState();
+        MasteringEffect other(44100.0);
+        other.loadState(state);
+        CHECK(other.param(kCeiling) == -0.5f && other.param(kWidth) == 150.0f && other.param(kMonoBass) == 1.0f);
+        other.loadState(std::vector<char>{'x', '=', '1', '\n', 'g', 'r', 'e', 'n', 'z', 'e', '=', '?'});
+        CHECK(other.param(kCeiling) == -0.5f);
+
+        std::vector<float> a(4800, 0.3f), b(4800, 0.3f);
+        PluginTransport stopped, playing;
+        playing.playing = true;
+        for (int i = 0; i < 20; ++i) fx.process(a.data(), b.data(), 4800, nullptr, 0, stopped);
+        CHECK(fx.meters().integrated > -20.0 && fx.meters().truePeakDb > -20.0);
+        fx.process(a.data(), b.data(), 0, nullptr, 0, playing);  // Start: Messung beginnt neu
+        CHECK(fx.meters().integrated == kSilence);
+    }
+
+    // Positionen der Regler: logarithmisch fuer Frequenz und Zeit.
+    CHECK(std::fabs(fromPosition(kRelease, 0.5f) - 100.0f) < 0.01f);
+    CHECK(std::fabs(toPosition(kLowCut, fromPosition(kLowCut, 0.3f)) - 0.3f) < 1e-5f);
+}
+
 int main() {
     testStoppedIsSilent();
     testPlayAdvancesPosition();
@@ -2692,6 +2973,7 @@ int main() {
     testUndoRedo();
     testAutomation();
     testMidiFiles();
+    testMastering();
     {
         std::error_code ec;
         std::filesystem::remove_all(tempFile("minidaw_test_aufnahmen"), ec);

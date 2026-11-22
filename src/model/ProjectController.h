@@ -70,6 +70,8 @@ public:
     // true, wenn seit dem letzten Speichern oder Laden etwas geaendert wurde.
     // Einstellungen in Plugin-Fenstern werden dabei nicht erkannt.
     bool modified() const noexcept { return modified_; }
+    // Fuer Einstellungen, die das Projekt nicht selbst sieht (eingebaute Effekte).
+    void markModified() noexcept { modified_ = true; }
     // Laenge fuer den Export: Ende des letzten Audio- oder MIDI-Clips.
     std::int64_t contentLength() const noexcept;
 

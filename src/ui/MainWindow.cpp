@@ -451,6 +451,11 @@ std::filesystem::path askSaveFile(HWND owner, const wchar_t* title, const wchar_
 
 bool renderToPng(MainView& view, int width, int height, const std::filesystem::path& path,
                  std::string& error) {
+    return renderToPng([&view](Canvas& c, float w, float h) { view.draw(c, w, h); }, width, height, path, error);
+}
+
+bool renderToPng(const std::function<void(Canvas&, float, float)>& draw, int width, int height,
+                 const std::filesystem::path& path, std::string& error) {
     ComPtr<ID2D1Factory> d2d;
     ComPtr<IDWriteFactory> dwrite;
     if (!createFactories(d2d, dwrite, error)) return false;
@@ -480,7 +485,7 @@ bool renderToPng(MainView& view, int width, int height, const std::filesystem::p
     {
         Canvas canvas(target.Get(), dwrite.Get());
         target->BeginDraw();
-        view.draw(canvas, static_cast<float>(width), static_cast<float>(height));
+        draw(canvas, static_cast<float>(width), static_cast<float>(height));
         if (FAILED(target->EndDraw())) { error = "Zeichnen fehlgeschlagen"; return false; }
     }
 

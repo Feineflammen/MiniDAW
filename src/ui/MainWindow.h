@@ -88,5 +88,8 @@ std::filesystem::path askSaveFile(HWND owner, const wchar_t* title, const wchar_
 // Zeichnet die Ansicht ohne Fenster in eine PNG-Datei (fuer automatische Pruefungen).
 bool renderToPng(MainView& view, int width, int height, const std::filesystem::path& path,
                  std::string& error);
+// Dasselbe fuer beliebige Zeichnungen (z. B. das Mastering-Fenster).
+bool renderToPng(const std::function<void(Canvas&, float, float)>& draw, int width, int height,
+                 const std::filesystem::path& path, std::string& error);
 
 }  // namespace ui

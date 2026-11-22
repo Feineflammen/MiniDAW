@@ -45,12 +45,8 @@ void PluginManager::idle() {
 }
 
 void PluginManager::shutdown() {
-    for (auto& strip : slots_) {
-        for (auto& slot : strip) {
-            slot.window.reset();
-            slot.plugin.reset();
-        }
-    }
+    for (auto& strip : slots_)
+        for (auto& slot : strip) slot.clear();
 }
 
 std::vector<std::wstring> PluginManager::pluginNames() {
@@ -85,15 +81,43 @@ void PluginManager::install(int strip, int slot, std::shared_ptr<Vst3Plugin> plu
     Slot* target = find(strip, slot);
     if (!target) return;
     target->window.reset();
+    target->masteringWindow.reset();
     const std::wstring name = plugin->name();
     controller_.setPlugin(strip, slot, plugin, name);
+    target->mastering.reset();
     target->plugin = std::move(plugin);
     target->path = path;
 }
 
+void PluginManager::installMastering(int strip, int slot, std::shared_ptr<mastering::MasteringEffect> effect) {
+    Slot* target = find(strip, slot);
+    if (!target) return;
+    target->window.reset();
+    target->masteringWindow.reset();
+    controller_.setPlugin(strip, slot, effect, kMasteringName);
+    target->plugin.reset();
+    target->mastering = std::move(effect);
+    target->path = kMasteringPath;
+}
+
+bool PluginManager::loadBuiltin(int strip, int slot, int index, std::wstring& error) {
+    if (index != 0 || !find(strip, slot) || slot == 0) {
+        error = L"Der Mastering-Effekt geh\u00F6rt auf einen Effekt-Platz.";
+        return false;
+    }
+    installMastering(strip, slot, std::make_shared<mastering::MasteringEffect>(sampleRate_));
+    return true;
+}
+
 bool PluginManager::capture(int strip, int slot, std::filesystem::path& file, std::vector<char>& state) {
     Slot* target = find(strip, slot);
-    if (!target || !target->plugin) return false;
+    if (!target) return false;
+    if (target->mastering) {
+        file = kMasteringPath;
+        state = target->mastering->saveState();
+        return true;
+    }
+    if (!target->plugin) return false;
     file = target->path;
     target->plugin->saveState(state);  // liefert das Plugin nichts, wird es ohne Einstellungen gespeichert
     return true;
@@ -103,6 +127,17 @@ bool PluginManager::restore(int strip, int slot, const std::filesystem::path& fi
                             std::string& error) {
     if (file.empty()) {
         unload(strip, slot);
+        return true;
+    }
+    if (file == std::filesystem::path(kMasteringPath)) {
+        if (slot < 0) slot = 1;
+        if (!find(strip, slot) || slot == 0) {
+            error = "Ungueltiger Plugin-Platz";
+            return false;
+        }
+        auto effect = std::make_shared<mastering::MasteringEffect>(sampleRate_);
+        if (!state.empty()) effect->loadState(state);
+        installMastering(strip, slot, std::move(effect));
         return true;
     }
     std::shared_ptr<Vst3Plugin> plugin = loadPlugin(file, sampleRate_, maxFrames_, error);
@@ -123,14 +158,32 @@ void PluginManager::unload(int strip, int slot) {
     Slot* target = find(strip, slot);
     if (!target) return;
     target->window.reset();
+    target->masteringWindow.reset();
     controller_.setPlugin(strip, slot, nullptr, L"");
-    target->plugin.reset();
-    target->path.clear();
+    target->clear();
 }
 
 bool PluginManager::openEditor(int strip, int slot, std::wstring& error) {
     Slot* target = find(strip, slot);
     if (!target) return false;
+    if (target->mastering) {
+        if (!target->masteringWindow) {
+            std::wstring title = L"Mastering \u2013 ";
+            if (strip < kProjectTracks) title += L"Spur " + std::to_wstring(strip + 1);
+            else if (strip < kMasterStripIndex) title += L"Bus " + std::to_wstring(strip - kFirstBusStrip + 1);
+            else title += L"Master";
+            target->masteringWindow = std::make_unique<ui::MasteringWindow>(*target->mastering, owner_, title);
+            target->masteringWindow->onChange = [this] {
+                if (onBuiltinChange) onBuiltinChange();
+            };
+        }
+        std::string reason;
+        if (!target->masteringWindow->open(reason)) {
+            error = widen(reason);
+            return false;
+        }
+        return true;
+    }
     if (!target->plugin) {
         error = L"Auf diesem Platz ist kein Plugin geladen.";
         return false;

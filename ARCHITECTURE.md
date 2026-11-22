@@ -239,6 +239,26 @@ auf etwa 1 ms genau. Der Audio-Thread ruft nie in den MIDI-Treiber.
 Einstellungen, die zum Rechner gehören (Latenz-Zusatz, MIDI-Ausgabegerät),
 liegen in `%APPDATA%\MiniDAW\einstellungen.txt`.
 
+## Eingebaute Effekte
+
+- EQ, Kompressor, Hall, Echo und Mastering sind `AudioPlugin`s wie VST3-Plugins
+  und belegen dieselben Plätze. Grundlage ist `engine/BuiltinEffect`: Die
+  Parameter stehen in einer festen Tabelle (Schlüssel für die Projektdatei,
+  Anzeige, Bereich, logarithmisch, Auswahlwerte). Die Oberfläche setzt sie
+  atomar, der Audio-Thread übernimmt sie zu Beginn jedes Blocks und glättet
+  sie selbst (Abschnitte von 32 Samples, Schalter werden in 10 ms überblendet).
+- Gespeichert wird wie bei VST3 als Datei und Zustand: Die "Datei" ist
+  `<MiniDAW>/id` (das Zeichen `<` kommt in Windows-Pfaden nicht vor), der
+  Zustand lesbarer Text `schlüssel=wert`. Unbekannte Schlüssel werden
+  übergangen, fehlende behalten ihre Vorgabe; so bleiben alte Projekte ladbar.
+- Fenster: `ui/EffectWindow` (Direct2D) mit einer `ui/PanelView`, für das
+  Mastering `ui/MasteringView`, für die übrigen `ui/EffectView` mit Grafik
+  (EQ-Kurve aus `EqEffect::responseDb`, Kennlinie aus `CompressorEffect::curve`).
+- Hall: Feedback Delay Network mit acht Leitungen und Hadamard-Matrix,
+  Verstärkung je Leitung aus der Nachhallzeit (RT60), Tiefpass in jeder
+  Leitung, leichte Modulation gegen metallischen Klang. Echo: lineare
+  Interpolation, Zeitwechsel gleitet (50 ms), Filter in der Rückkopplung.
+
 ## VST3-Plugins
 
 - Die Engine kennt nur `engine/AudioPlugin`: `process()` mit Stereo-Puffern,
@@ -310,12 +330,12 @@ der ASIO-Treiber belegt), werden die Windows-Standardgeräte benutzt.
 ```
 src/
   audio/    Audiogeräte (WASAPI, ASIO), Callback-Schnittstelle
-  engine/   Transport, Spuren, Mixer, Latenzausgleich, Mastering-Effekt
+  engine/   Transport, Spuren, Mixer, Latenzausgleich, eingebaute Effekte
   midi/     MIDI-Geräte, MIDI-Daten
   vst3/     Plugin-Scan, Hosting, Editor-Fenster
   model/    Projektmodell, Undo, Speichern und Laden, MIDI-Dateien
   disk/     WAV lesen und schreiben, Streaming, Wellenform-Übersichten
-  ui/       Fenster, Zeichnen, Mischpult, Mastering-Fenster, Ladebild
+  ui/       Fenster, Zeichnen, Mischpult, Effekt-Fenster, Ladebild
   res/      Programmsymbol und Titelbild (in die exe eingebunden)
   util/     Ringpuffer, Hilfsfunktionen
 tests/      Offline-Tests der Engine
@@ -344,6 +364,7 @@ Windows-Code. Sie bilden die Bibliothek `dawcore`, die auch die Tests benutzen.
 | 12 | Lizenz (GPLv3), ASIO SDK, Programmsymbol, Ladebild, Über-Fenster | fertig, per Screenshot geprüft |
 | 13 | MIDI-Dateien importieren (Menü, Ziehen auf eine Spur) und exportieren (`model/MidiFile`) | Code und Offline-Tests fertig (auch mit zufällig beschädigten Dateien), Bedientest offen |
 | 14 | Eingebauter Mastering-Effekt (`engine/Mastering`, `ui/MasteringView`): Limiter mit True Peak, Lautheit nach BS.1770 | Code und Offline-Tests fertig (EBU Tech 3341, True Peak gegen 32-fache Referenz), Bedientest offen |
+| 15 | Eingebaute Effekte EQ, Kompressor, Hall, Echo (`engine/BuiltinEffect`, `engine/Effects`, `ui/EffectView`) | Code und Offline-Tests fertig (Frequenzgang, Kennlinie, Nachhallzeit, Echo-Zeiten), per Screenshot geprüft, Bedientest offen |
 
 Jeder Schritt gilt erst als fertig, wenn er auf echter Hardware läuft und
 ohne Knackser klingt.

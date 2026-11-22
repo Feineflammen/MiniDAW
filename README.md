@@ -5,7 +5,8 @@ C++20 ohne Fremdbibliotheken. Freie Software unter der GPLv3, kostenlos für all
 
 Was es kann: Aufnahme mehrerer Spuren gleichzeitig (WASAPI oder ASIO) mit
 gemessener Latenz, MIDI mit Noten-Editor und Metronom, VST3-Instrumente und
--Effekte, eingebauter Mastering-Effekt mit Limiter und Lautheitsmessung (LUFS),
+-Effekte, eingebaute Effekte (EQ, Kompressor, Hall, Echo und Mastering mit
+Limiter und Lautheitsmessung in LUFS),
 Mischpult mit Bussen und Latenzausgleich, Automation von Lautstärke
 und Panorama, Rückgängig/Wiederholen, Projekte speichern und als WAV exportieren,
 MIDI-Dateien importieren und exportieren.
@@ -116,7 +117,7 @@ Links neben dem Lineal stehen Taktposition, Tempo (Klick +1, Rechtsklick −1, M
 
 Noten-Editor: Doppelklick auf einen MIDI-Clip öffnet ihn, Doppelklick auf eine leere Stelle einer MIDI-Spur legt einen neuen Clip von vier Takten an. Klick setzt eine Note, Ziehen verschiebt sie, Ziehen am rechten Rand ändert die Länge, Rechtsklick oder Entf löscht. Unten lässt sich der Anschlag je Note ziehen. Mausrad scrollt durch die Tonhöhen, Umschalt + Mausrad waagerecht, Strg + Mausrad zoomt. Esc oder × schließt.
 
-Plugins: Das Feld "Plugin …" ganz rechts am Spurkopf öffnet eine Liste der VST3-Plugins aus `C:\Program Files\Common Files\VST3` für das Instrument der Spur; es ersetzt den eingebauten Synthesizer. "Fenster" öffnet die Oberfläche des Plugins. Effekte kommen im Mischpult dazu.
+Plugins: Das Feld "Plugin …" ganz rechts am Spurkopf öffnet eine Liste der VST3-Plugins aus `C:\Program Files\Common Files\VST3` für das Instrument der Spur; es ersetzt den eingebauten Synthesizer. "Fenster" öffnet die Oberfläche des Plugins. Effekte (VST3 oder eingebaut) kommen im Mischpult dazu.
 
 Mischpult: F3, Menü "Ansicht" oder der Knopf "Mixer" links über den Spuren. Je Spur ein Kanalzug, dann Bus 1 bis 4 und der Master. Von oben nach unten:
 
@@ -127,7 +128,14 @@ Mischpult: F3, Menü "Ansicht" oder der Knopf "Mixer" links über den Spuren. Je
 
 Busse sind für Hall, Delay oder eine gemeinsame Gruppe gedacht: Effekt auf den Bus, Sends der Spuren aufdrehen. Die Verzögerung der Plugins gleicht die DAW automatisch aus; "Plugin-Latenz" oben zeigt, um wie viel.
 
-Mastering (eingebaut, ohne Plugin): In der Effekt-Liste jedes FX-Platzes steht oben "Mastering", gedacht für den Master. Das Fenster zeigt die Stufen in Signalreihenfolge, jede mit eigenem Schalter: Eingang, Korrektur (Tiefenfilter, Mulm bei 320 Hz), Kompressor (Pegel wird automatisch ausgeglichen), Sättigung (doppelt überabgetastet, ändert die Lautstärke leiser Stellen nicht), Klang (Bass 110 Hz, Höhen 8 kHz), Stereo (Breite, "Bass mono" unter 120 Hz), Clipper und Limiter. Der Limiter schaut 5 ms voraus, senkt vor einer Spitze gleitend ab und erkennt auch Spitzen zwischen den Samples (True Peak, 8-fach interpoliert). "Lautheit" ist die Verstärkung vor Clipper und Limiter, "Grenze" der höchste erlaubte True Peak.
+Eingebaute Effekte: In der Effekt-Liste jedes FX-Platzes stehen oben EQ, Kompressor, Hall, Echo und Mastering, markiert mit "eingebaut". Sie brauchen keine Plugins, öffnen ein eigenes Fenster und werden mit dem Projekt gespeichert. Überall gilt: Regler ziehen (mit Umschalt fein), Mausrad, Doppelklick setzt zurück.
+
+- EQ: Hochpass, Tiefen (Kuhschwanz), zwei Mitten mit Güte, Höhen (Kuhschwanz), Tiefpass und Ausgangspegel. In der Kurve lassen sich die Griffe ziehen (waagerecht Frequenz, senkrecht Pegel), das Mausrad auf einem Griff ändert die Güte, Doppelklick setzt das Band auf 0 dB. Hoch- und Tiefpass schalten sich beim Anfassen ein.
+- Kompressor: Schwelle, Verhältnis, Knie, Attack, Release, Aufholen (auf Wunsch automatisch) und Mischung für parallele Kompression. Das Fenster zeigt die Kennlinie, einen Punkt für den aktuellen Pegel und wie viel gerade abgesenkt wird.
+- Hall: Größe, Nachhall (Zeit bis −60 dB), Vorverzögerung, Höhen bis (Dämpfung), Tiefen weg bis, Breite und Mischung. Am besten auf einen Bus legen, Mischung auf 100 % und die Spuren über die Sends dazugeben.
+- Echo: im Takt (Notenwert vom 1/1 bis 1/16, auch punktiert und Triole, folgt dem Projekttempo) oder frei in Millisekunden, Rückkopplung, Ping-Pong zwischen links und rechts, Filter für die Wiederholungen (jede wird etwas dumpfer) und Mischung. Wechselt die Zeit, gleitet das Echo wie ein Bandecho.
+
+Mastering, gedacht für den Master: Das Fenster zeigt die Stufen in Signalreihenfolge, jede mit eigenem Schalter: Eingang, Korrektur (Tiefenfilter, Mulm bei 320 Hz), Kompressor (Pegel wird automatisch ausgeglichen), Sättigung (doppelt überabgetastet, ändert die Lautstärke leiser Stellen nicht), Klang (Bass 110 Hz, Höhen 8 kHz), Stereo (Breite, "Bass mono" unter 120 Hz), Clipper und Limiter. Der Limiter schaut 5 ms voraus, senkt vor einer Spitze gleitend ab und erkennt auch Spitzen zwischen den Samples (True Peak, 8-fach interpoliert). "Lautheit" ist die Verstärkung vor Clipper und Limiter, "Grenze" der höchste erlaubte True Peak.
 
 Rechts im Fenster die Messung nach ITU-R BS.1770 / EBU R128: integrierte Lautheit (mit Gating, wie Streaming-Dienste messen), Kurzzeit (3 s), Momentan (0,4 s), höchster True Peak, Absenkung des Limiters und die integrierte Lautheit am Eingang zum Vergleich. Die Messung beginnt bei jedem Start der Wiedergabe neu, auch beim WAV-Export; nach einem Export steht dort also die Lautheit des ganzen Songs. Richtwert für Streaming: um −14 LUFS, True Peak höchstens −1 dBTP. Regler: ziehen (mit Umschalt fein), Mausrad, Doppelklick setzt zurück. "Umgehen" vergleicht mit dem unbearbeiteten Signal. Die Einstellungen werden im Projekt gespeichert; der Effekt verzögert um etwa 6 ms, was die DAW ausgleicht.
 

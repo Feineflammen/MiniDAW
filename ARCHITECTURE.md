@@ -310,12 +310,12 @@ der ASIO-Treiber belegt), werden die Windows-Standardgeräte benutzt.
 ```
 src/
   audio/    Audiogeräte (WASAPI, ASIO), Callback-Schnittstelle
-  engine/   Transport, Spuren, Mixer, Latenzausgleich
+  engine/   Transport, Spuren, Mixer, Latenzausgleich, Mastering-Effekt
   midi/     MIDI-Geräte, MIDI-Daten
   vst3/     Plugin-Scan, Hosting, Editor-Fenster
   model/    Projektmodell, Undo, Speichern und Laden, MIDI-Dateien
   disk/     WAV lesen und schreiben, Streaming, Wellenform-Übersichten
-  ui/       Fenster, Zeichnen, Mischpult, Ladebild
+  ui/       Fenster, Zeichnen, Mischpult, Mastering-Fenster, Ladebild
   res/      Programmsymbol und Titelbild (in die exe eingebunden)
   util/     Ringpuffer, Hilfsfunktionen
 tests/      Offline-Tests der Engine
@@ -343,6 +343,7 @@ Windows-Code. Sie bilden die Bibliothek `dawcore`, die auch die Tests benutzen.
 | 11 | ASIO, Aufnahme mehrerer Spuren mit eigenem Eingang | fertig, mit ASIO-Treiber (UMC404HD) getestet |
 | 12 | Lizenz (GPLv3), ASIO SDK, Programmsymbol, Ladebild, Über-Fenster | fertig, per Screenshot geprüft |
 | 13 | MIDI-Dateien importieren (Menü, Ziehen auf eine Spur) und exportieren (`model/MidiFile`) | Code und Offline-Tests fertig (auch mit zufällig beschädigten Dateien), Bedientest offen |
+| 14 | Eingebauter Mastering-Effekt (`engine/Mastering`, `ui/MasteringView`): Limiter mit True Peak, Lautheit nach BS.1770 | Code und Offline-Tests fertig (EBU Tech 3341, True Peak gegen 32-fache Referenz), Bedientest offen |
 
 Jeder Schritt gilt erst als fertig, wenn er auf echter Hardware läuft und
 ohne Knackser klingt.

@@ -5,7 +5,8 @@ C++20 ohne Fremdbibliotheken. Freie Software unter der GPLv3, kostenlos für all
 
 Was es kann: Aufnahme mehrerer Spuren gleichzeitig (WASAPI oder ASIO) mit
 gemessener Latenz, MIDI mit Noten-Editor und Metronom, VST3-Instrumente und
--Effekte, Mischpult mit Bussen und Latenzausgleich, Automation von Lautstärke
+-Effekte, eingebauter Mastering-Effekt mit Limiter und Lautheitsmessung (LUFS),
+Mischpult mit Bussen und Latenzausgleich, Automation von Lautstärke
 und Panorama, Rückgängig/Wiederholen, Projekte speichern und als WAV exportieren,
 MIDI-Dateien importieren und exportieren.
 
@@ -22,7 +23,8 @@ Abschnitte 15 und 16 der Lizenz.
 
 Entstehung: Idee, Vorgaben und Tests am echten Gerät kommen von Feineflammen.
 Der Programmcode wurde vollständig von einer KI geschrieben (Claude von
-Anthropic), Programmsymbol und Titelbild von ChatGPT (OpenAI). MiniDAW ist ein
+Anthropic), Programmsymbol und Titelbild von ChatGPT (OpenAI). Der Ablauf des
+Mastering-Effekts geht auf einen Entwurf von ChatGPT zurück. MiniDAW ist ein
 kostenloses Hobbyprojekt ohne Gewähr; vor wichtigen Aufnahmen
 Sicherungskopien anlegen.
 
@@ -124,6 +126,10 @@ Mischpult: F3, Menü "Ansicht" oder der Knopf "Mixer" links über den Spuren. Je
 - Panorama, Fader mit Pegelanzeige (Ziehen, mit Umschalt fein; Mausrad 1 dB; Doppelklick 0 dB), M und S.
 
 Busse sind für Hall, Delay oder eine gemeinsame Gruppe gedacht: Effekt auf den Bus, Sends der Spuren aufdrehen. Die Verzögerung der Plugins gleicht die DAW automatisch aus; "Plugin-Latenz" oben zeigt, um wie viel.
+
+Mastering (eingebaut, ohne Plugin): In der Effekt-Liste jedes FX-Platzes steht oben "Mastering", gedacht für den Master. Das Fenster zeigt die Stufen in Signalreihenfolge, jede mit eigenem Schalter: Eingang, Korrektur (Tiefenfilter, Mulm bei 320 Hz), Kompressor (Pegel wird automatisch ausgeglichen), Sättigung (doppelt überabgetastet, ändert die Lautstärke leiser Stellen nicht), Klang (Bass 110 Hz, Höhen 8 kHz), Stereo (Breite, "Bass mono" unter 120 Hz), Clipper und Limiter. Der Limiter schaut 5 ms voraus, senkt vor einer Spitze gleitend ab und erkennt auch Spitzen zwischen den Samples (True Peak, 8-fach interpoliert). "Lautheit" ist die Verstärkung vor Clipper und Limiter, "Grenze" der höchste erlaubte True Peak.
+
+Rechts im Fenster die Messung nach ITU-R BS.1770 / EBU R128: integrierte Lautheit (mit Gating, wie Streaming-Dienste messen), Kurzzeit (3 s), Momentan (0,4 s), höchster True Peak, Absenkung des Limiters und die integrierte Lautheit am Eingang zum Vergleich. Die Messung beginnt bei jedem Start der Wiedergabe neu, auch beim WAV-Export; nach einem Export steht dort also die Lautheit des ganzen Songs. Richtwert für Streaming: um −14 LUFS, True Peak höchstens −1 dBTP. Regler: ziehen (mit Umschalt fein), Mausrad, Doppelklick setzt zurück. "Umgehen" vergleicht mit dem unbearbeiteten Signal. Die Einstellungen werden im Projekt gespeichert; der Effekt verzögert um etwa 6 ms, was die DAW ausgleicht.
 
 Menü "Hilfe" → "Über MiniDAW …": Version, Lizenz, Herkunft und Impressum.
 

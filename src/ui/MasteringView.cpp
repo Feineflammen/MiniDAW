@@ -46,6 +46,14 @@ std::wstring valueText(int param, float value) {
     return text + L" " + unit;
 }
 
+// Mehrere Zeilen untereinander (die Canvas bricht nicht selbst um).
+void lines(Canvas& c, std::initializer_list<const wchar_t*> rows, float x, float y, float w, Color color) {
+    for (const wchar_t* row : rows) {
+        c.text(row, {x, y, w, 16.0f}, color, Font::Small);
+        y += 15.0f;
+    }
+}
+
 std::wstring lufsText(double value) { return value <= -100.0 ? std::wstring(L"—") : number(value, 1); }
 
 // Auf der Skala -36..0 LUFS.
@@ -108,8 +116,9 @@ void MasteringView::drawSection(Canvas& c, const Rect& box, const wchar_t* title
         c.fillRounded(check, 3.0f, on && enabled ? kAccent : kDark);
         c.strokeRounded(check, 3.0f, kLine);
         if (on) c.text(L"✓", {check.x, check.y - 3.0f, check.w, 18.0f}, kText, Font::Small, Align::Center);
-        c.text(kParams[static_cast<std::size_t>(extraToggle)].label, {check.right() + 8.0f, y + 1.0f, box.w - 40.0f, 20.0f},
-               enabled ? kTextDim : rgb(0x5C5F66), Font::Small);
+        const Rect text{check.right() + 8.0f, y + 1.0f, box.right() - 12.0f - check.right() - 8.0f, 20.0f};
+        c.text(L"Bass mono", text, enabled ? kText : rgb(0x6C6F76), Font::Small);
+        c.text(L"unter 120 Hz", text, enabled ? kTextDim : rgb(0x5C5F66), Font::Small, Align::Right);
         hits_.push_back({{box.x + 8.0f, y, box.w - 16.0f, 22.0f}, HitKind::Toggle, extraToggle, 0.0f});
     }
 }
@@ -180,9 +189,10 @@ void MasteringView::drawMeters(Canvas& c, const Rect& panel) {
     hits_.push_back({reset, HitKind::ResetMeters, -1, 0.0f});
     y += 36.0f;
 
-    c.text(L"Streaming: um −14 LUFS, True Peak höchstens −1 dBTP. "
-           L"Die Messung beginnt bei jedem Start der Wiedergabe und beim Export neu.",
-           {x, y, w, panel.bottom() - y - 8.0f}, kTextDim, Font::Small);
+    lines(c,
+          {L"Richtwert für Streaming: um −14 LUFS", L"integriert, True Peak höchstens −1 dBTP.",
+           L"Die Messung beginnt bei jedem Start", L"der Wiedergabe und beim Export neu."},
+          x, y, w, kTextDim);
 }
 
 void MasteringView::draw(Canvas& c, float width, float height) {
@@ -190,10 +200,10 @@ void MasteringView::draw(Canvas& c, float width, float height) {
     c.clear(kBg);
 
     // Kopf: Titel, Latenz, Umgehen
-    c.text(L"Mastering", {kMargin + 4.0f, 8.0f, 300.0f, 34.0f}, kText, Font::Large);
+    c.text(L"Mastering", {kMargin + 4.0f, 12.0f, 140.0f, 26.0f}, kText);
     const double latencyMs = 1000.0 * fx_.latencyFrames() / std::max(1.0, fx_.sampleRate());
     c.text(L"Eingebauter Effekt · Latenz " + number(latencyMs, 1) + L" ms (wird ausgeglichen)",
-           {kMargin + 160.0f, 16.0f, 420.0f, 22.0f}, kTextDim, Font::Small);
+           {kMargin + 90.0f, 14.0f, 420.0f, 22.0f}, kTextDim, Font::Small);
     const bool bypass = fx_.param(kBypass) >= 0.5f;
     const Rect bypassRect{width - kMargin - 130.0f, 12.0f, 130.0f, 28.0f};
     c.fillRounded(bypassRect, 4.0f, bypass ? kMuteOn : kButton);
@@ -222,10 +232,10 @@ void MasteringView::draw(Canvas& c, float width, float height) {
 
     // Signalweg-Hinweis unten im Eingang-Feld
     const Rect in = box(0, 0);
-    c.text(L"Signalweg: Eingang → Korrektur → Kompressor → Sättigung → Klang → Stereo "
-           L"→ Lautheit → Clipper → Limiter",
-           {in.x + 12.0f, in.y + 44.0f + kSliderRowH + 4.0f, in.w - 24.0f, in.h - 44.0f - kSliderRowH - 10.0f}, kTextDim,
-           Font::Small);
+    lines(c,
+          {L"Signalweg:", L"Eingang → Korrektur →", L"Kompressor → Sättigung →", L"Klang → Stereo → Lautheit",
+           L"→ Clipper → Limiter"},
+          in.x + 12.0f, in.y + 44.0f + kSliderRowH + 8.0f, in.w - 24.0f, kTextDim);
 }
 
 void MasteringView::mouseDown(float x, float y) {

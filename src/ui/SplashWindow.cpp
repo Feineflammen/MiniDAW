@@ -19,12 +19,12 @@ namespace {
 constexpr wchar_t kClassName[] = L"MiniDAWSplash";
 constexpr int kWidthDip = 860;   // 16:9 wie das Bild
 constexpr int kHeightDip = 484;
-constexpr wchar_t kVersion[] = L"Version 0.7";
+constexpr wchar_t kVersion[] = L"Version 0.8";
 
 constexpr wchar_t kAboutText[] =
-    L"Kleine Musik-Software für Windows: 16 Spuren, Audio und MIDI, VST3, Mischpult.\n\n"
+    L"Kleine Musik-Software für Windows: 16 Spuren, Audio und MIDI, VST3, Mischpult, Mastering.\n\n"
     L"Idee, Vorgaben und Tests: Feineflammen. Der Programmcode wurde vollständig von einer KI "
-    L"geschrieben (Claude von Anthropic), die Grafiken von ChatGPT (OpenAI).\n\n"
+    L"geschrieben (Claude von Anthropic), Grafiken und Mastering-Entwurf von ChatGPT (OpenAI).\n\n"
     L"Freie Software unter der GPLv3: kostenlos benutzen, weitergeben und verändern; "
     L"veränderte Fassungen ebenfalls unter der GPLv3 mit Quellcode. Ohne Gewähr; vor "
     L"wichtigen Aufnahmen Sicherungskopien anlegen.\n\n"

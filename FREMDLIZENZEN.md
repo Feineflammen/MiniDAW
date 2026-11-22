@@ -22,6 +22,16 @@ Programmsymbol (`minidaw.ico`) und Titelbild (`splash.jpg`) wurden mit ChatGPT
 (OpenAI) erzeugt und für MiniDAW zugeschnitten. Sie stehen wie der übrige
 Inhalt des Projekts unter der GPLv3.
 
+## Mastering-Effekt (`src/engine/Mastering`)
+
+Der Ablauf (Stufen und ihre Reihenfolge, Vorgaben der Regler) folgt
+"MasterForge", einem VST3-Entwurf, den ChatGPT (OpenAI) für Feineflammen
+geschrieben hat. Für MiniDAW wurden Limiter, True-Peak-Erkennung,
+Lautheitsmessung, Sättigung und Stereobreite neu geschrieben; der Code steht wie
+das übrige Projekt unter der GPLv3. Die Koeffizienten der K-Filter folgen
+ITU-R BS.1770 (für andere Abtastraten umgerechnet wie in libebur128, ohne
+dessen Code zu übernehmen).
+
 ## Marken
 
 VST ist eine eingetragene Marke der Steinberg Media Technologies GmbH.

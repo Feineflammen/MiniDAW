@@ -118,7 +118,8 @@ void MasteringView::drawSection(Canvas& c, const Rect& box, const wchar_t* title
         if (on) c.text(L"✓", {check.x, check.y - 3.0f, check.w, 18.0f}, kText, Font::Small, Align::Center);
         const Rect text{check.right() + 8.0f, y + 1.0f, box.right() - 12.0f - check.right() - 8.0f, 20.0f};
         c.text(L"Bass mono", text, enabled ? kText : rgb(0x6C6F76), Font::Small);
-        c.text(L"unter 120 Hz", text, enabled ? kTextDim : rgb(0x5C5F66), Font::Small, Align::Right);
+        c.text(L"Stereo unter 120 Hz wird mono", {box.x + 12.0f, y + 22.0f, box.w - 24.0f, 18.0f},
+               enabled ? kTextDim : rgb(0x5C5F66), Font::Small);
         hits_.push_back({{box.x + 8.0f, y, box.w - 16.0f, 22.0f}, HitKind::Toggle, extraToggle, 0.0f});
     }
 }
@@ -233,7 +234,7 @@ void MasteringView::draw(Canvas& c, float width, float height) {
     // Signalweg-Hinweis unten im Eingang-Feld
     const Rect in = box(0, 0);
     lines(c,
-          {L"Signalweg:", L"Eingang → Korrektur →", L"Kompressor → Sättigung →", L"Klang → Stereo → Lautheit",
+          {L"Signalweg:", L"Eingang → Korrektur", L"→ Kompressor", L"→ Sättigung → Klang", L"→ Stereo → Lautheit",
            L"→ Clipper → Limiter"},
           in.x + 12.0f, in.y + 44.0f + kSliderRowH + 8.0f, in.w - 24.0f, kTextDim);
 }

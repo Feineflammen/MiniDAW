@@ -30,6 +30,21 @@ constexpr Color kWhiteKey = rgb(0xD9DBE0);
 constexpr Color kBlackKey = rgb(0x2A2B30);
 constexpr Color kPlayhead = rgb(0xFF5A5A);
 
+// Kurzname fuer das schmale Feld links unten.
+std::wstring laneShortName(int lane) {
+    switch (lane) {
+        case -1: return L"Anschlag";
+        case 1: return L"Mod.";
+        case 7: return L"Lautst.";
+        case 10: return L"Pan";
+        case 11: return L"Expr.";
+        case 64: return L"Sustain";
+        case 128: return L"Druck";
+        case 129: return L"Bend";
+        default: return L"CC " + std::to_wstring(lane);
+    }
+}
+
 bool isBlackKey(int pitch) {
     const int n = ((pitch % 12) + 12) % 12;
     return n == 1 || n == 3 || n == 6 || n == 8 || n == 10;
@@ -254,8 +269,7 @@ void PianoRoll::draw(Canvas& c, const Rect& panel) {
     c.line(panel.x, velocity_.y + 0.5f, panel.right(), velocity_.y + 0.5f, kLine);
     laneLabel_ = {panel.x, velocity_.y, kKeysW, kVelocityH};
     {
-        const wchar_t* name = lane_ < 0 ? L"Anschlag" : controllerName(lane_);
-        const std::wstring title = name ? std::wstring(name) : L"CC " + std::to_wstring(lane_);
+        const std::wstring title = laneShortName(lane_);
         c.fillRounded({laneLabel_.x + 2.0f, laneLabel_.y + 4.0f, laneLabel_.w - 4.0f, laneLabel_.h - 8.0f}, 3.0f, kButton);
         c.text(title, {laneLabel_.x + 4.0f, laneLabel_.y + 8.0f, laneLabel_.w - 8.0f, 18.0f}, kText, Font::Small, Align::Center);
         const std::wstring sub = lane_ < 0 ? std::wstring(L"Noten") : lane_ < 128 ? L"CC " + std::to_wstring(lane_) : std::wstring(L"");

@@ -239,6 +239,25 @@ auf etwa 1 ms genau. Der Audio-Thread ruft nie in den MIDI-Treiber.
 Einstellungen, die zum Rechner gehören (Latenz-Zusatz, MIDI-Ausgabegerät),
 liegen in `%APPDATA%\MiniDAW\einstellungen.txt`.
 
+## MIDI-Controller
+
+- Clips speichern Controller als `MidiControl` (Position, Nummer, Wert) mit
+  denselben Nummern wie VST3: 0..127 CC, 128 Aftertouch, 129 Pitchbend.
+  `syncMidi` legt sie in die Sequenz der Engine; bei gleicher Zeit gilt die
+  Reihenfolge "Note aus", Controller, "Note an". Am Clip-Ende kommen
+  Ruhewerte für Pedale (CC 64..69), Modulation (CC 1), Aftertouch und
+  Pitchbend dazu (`controlRestValue`), Lautstärke und Panorama bleiben stehen.
+- Die Engine merkt sich je Spur die zuletzt gesendeten Werte. Springt die
+  Wiedergabe, schickt sie die vor der neuen Position gültigen Werte nach;
+  beim Anhalten stellt sie Pedale und Pitchbend in Ruhe.
+- VST3-Plugins bekommen Controller als Parameteränderungen: über
+  `IMidiMapping` des Plugins (bei `kMidiCCAssignmentChanged` neu gelesen,
+  deshalb als atomare Tabelle) und über die vom Benutzer gelernten
+  Zuweisungen (64 atomare Plätze, nur der UI-Thread schreibt). Gesetzte Werte
+  gehen auch an den Bedienteil, damit sich die Oberfläche mitbewegt. Die
+  gelernten Zuweisungen hängen mit Kennung `MDAWZUW1` hinten am
+  Plugin-Zustand (`vst3/MidiLearn.h`).
+
 ## Eingebaute Effekte
 
 - EQ, Kompressor, Hall, Echo, Gate, Chorus und Mastering sind `AudioPlugin`s wie VST3-Plugins
@@ -366,6 +385,7 @@ Windows-Code. Sie bilden die Bibliothek `dawcore`, die auch die Tests benutzen.
 | 14 | Eingebauter Mastering-Effekt (`engine/Mastering`, `ui/MasteringView`): Limiter mit True Peak, Lautheit nach BS.1770 | Code und Offline-Tests fertig (EBU Tech 3341, True Peak gegen 32-fache Referenz), Bedientest offen |
 | 15 | Eingebaute Effekte EQ, Kompressor, Hall, Echo (`engine/BuiltinEffect`, `engine/Effects`, `ui/EffectView`) | fertig; EQ-Kurve am Gerät bedient |
 | 16 | Gate und Chorus | Code und Offline-Tests fertig (Öffnen/Schließen mit Hysterese, Verzögerung, Breite, Pegel), Bedientest offen |
+| 17 | MIDI-Controller: Aufnahme, Wiedergabe mit Ruhestellung und Nachführen, Controller-Spur im Noten-Editor, MIDI-Dateien, VST3-Zuordnung dynamisch, MIDI-Lernen im Plugin-Fenster (`vst3/MidiLearn.h`) | Code und Offline-Tests fertig, per Screenshot geprüft, Bedientest mit Hardware offen |
 
 Jeder Schritt gilt erst als fertig, wenn er auf echter Hardware läuft und
 ohne Knackser klingt.

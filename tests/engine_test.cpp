@@ -2828,27 +2828,27 @@ void testMidiFiles() {
         clip.notes = {{0, 24000, 60, 100}};
         clip.controls = {{0, 64, 127}, {12000, 1, 70}, {24000, kCtrlPitchBend, 4096}, {36000, kCtrlAftertouch, 20}};
         CHECK(withCtrl.addMidiClip(0, clip) == 0);
-        const auto tracks = withCtrl.midiExportTracks();
-        CHECK(tracks.size() == 1 && tracks[0].controls.size() == 4 + 4);  // vier Ruhestellungen am Ende
+        const auto exportedCtrl = withCtrl.midiExportTracks();
+        CHECK(exportedCtrl.size() == 1 && exportedCtrl[0].controls.size() == 4 + 4);  // vier Ruhestellungen am Ende
         MidiFileData read;
-        CHECK(parseMidiFile(buildMidiFile(tracks, 120.0), read, error) && read.parts.size() == 1);
+        CHECK(parseMidiFile(buildMidiFile(exportedCtrl, 120.0), read, error) && read.parts.size() == 1);
         if (read.parts.size() == 1) {
-            const auto& c = read.parts[0].controls;
-            CHECK(c.size() == 8);
-            if (c.size() == 8) {
-                CHECK(c[0].controller == 64 && c[0].value == 127 && c[0].time == 0.0);
-                CHECK(c[1].controller == 1 && c[1].value == 70 && std::fabs(c[1].time - 0.25) < 1e-6);
-                CHECK(c[2].controller == kCtrlPitchBend && c[2].value == 4096 && std::fabs(c[2].time - 0.5) < 1e-6);
-                CHECK(c[3].controller == kCtrlAftertouch && c[3].value == 20);
-                CHECK(std::fabs(c[7].time - 2.0) < 1e-6);
+            const auto& rc = read.parts[0].controls;
+            CHECK(rc.size() == 8);
+            if (rc.size() == 8) {
+                CHECK(rc[0].controller == 64 && rc[0].value == 127 && rc[0].time == 0.0);
+                CHECK(rc[1].controller == 1 && rc[1].value == 70 && std::fabs(rc[1].time - 0.25) < 1e-6);
+                CHECK(rc[2].controller == kCtrlPitchBend && rc[2].value == 4096 && std::fabs(rc[2].time - 0.5) < 1e-6);
+                CHECK(rc[3].controller == kCtrlAftertouch && rc[3].value == 20);
+                CHECK(std::fabs(rc[7].time - 2.0) < 1e-6);
             }
             // Wieder ins Projekt: Controller landen im Clip.
             const auto imported = withCtrl.importMidi(4, 0, read, L"ctrl");
             CHECK(imported.tracksUsed == 1);
-            const auto& back = withCtrl.project().tracks[4].midiClips;
-            CHECK(back.size() == 1 && back[0].controls.size() == 8);
-            if (!back.empty() && back[0].controls.size() == 8)
-                CHECK(back[0].controls[2].position == 24000 && back[0].controls[2].value == 4096);
+            const auto& backClips = withCtrl.project().tracks[4].midiClips;
+            CHECK(backClips.size() == 1 && backClips[0].controls.size() == 8);
+            if (!backClips.empty() && backClips[0].controls.size() == 8)
+                CHECK(backClips[0].controls[2].position == 24000 && backClips[0].controls[2].value == 4096);
         }
         std::string msg;
         ctrlRig.render();

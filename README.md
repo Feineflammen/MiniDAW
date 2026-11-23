@@ -44,7 +44,7 @@ braucht.
 
 - Gebaut von GitHub Actions aus genau diesem Quellcode. Drei unabhängige
   Builds ergaben Byte für Byte dieselbe Datei.
-- SHA-256: `6C9D4B5C5646265F701687B388BDA1E1D14E1D64AC77CDF5E431C678E47FCAEC`
+- SHA-256: `B614F7378611498611C5CDCDBC50A1865566375D6CC07E003DAAB81107364115`
   (prüfen in PowerShell mit `Get-FileHash minidaw.exe`)
 - Browser und Windows warnen beim Herunterladen, weil die Datei nicht signiert
   und weitgehend unbekannt ist. Eine frühere Fassung wurde bei VirusTotal

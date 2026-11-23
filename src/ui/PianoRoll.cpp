@@ -58,6 +58,8 @@ void PianoRoll::open(int track, int index) {
     selected_ = -1;
     drag_ = Drag::None;
     editing_ = false;
+    controlEditing_ = false;
+    lastControlFrame_ = -1;
     fitPending_ = true;
     if (!clip()) close();
 }
@@ -67,6 +69,8 @@ void PianoRoll::close() {
     selected_ = -1;
     drag_ = Drag::None;
     editing_ = false;
+    controlEditing_ = false;
+    lastControlFrame_ = -1;
 }
 
 const MidiClipModel* PianoRoll::clip() const {
@@ -430,6 +434,11 @@ void PianoRoll::commitControls() {
 
 void PianoRoll::mouseDown(float x, float y, bool rightButton) {
     if (!clip()) return;
+    // Eine neue Geste beginnt: eine liegengebliebene Kopie (Loslassen nicht
+    // angekommen) gilt nicht mehr, sonst wuerde sie neuere Daten ueberschreiben.
+    controlEditing_ = false;
+    editing_ = false;
+    drag_ = Drag::None;
 
     if (header_.contains(x, y)) {
         if (closeRect_.contains(x, y)) {

@@ -66,6 +66,7 @@ public:
 
     void mouseDown(float x, float y, bool doubleClick);
     void rightMouseDown(float x, float y);
+    void rightMouseUp(float x, float y);
     // free: Umschalttaste gedrueckt, Clips rasten nicht ein.
     void mouseMove(float x, float y, bool free = false);
     void mouseUp(float x, float y, bool free = false);
@@ -213,6 +214,8 @@ private:
     std::wstring midiInfo_;
     std::wstring midiOutInfo_;
     std::uint32_t midiSeen_ = 0;       // zuletzt gesehener Zaehlerstand der Engine
+    bool wasRecording_ = false;        // Aufnahme lief beim letzten tick()
+    std::array<int, kProjectTracks> clipsBeforeRecording_{};  // MIDI-Clips je Spur bei Aufnahmestart
     std::uint32_t midiErrorsSeen_ = 0;
     int midiLedTicks_ = 0;             // LED leuchtet, solange > 0
     int midiErrorTicks_ = 0;

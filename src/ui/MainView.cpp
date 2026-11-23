@@ -198,6 +198,30 @@ void MainView::tick() {
     mixer_.tick();
     if (statusTicks_ > 0 && --statusTicks_ == 0) status_.clear();
 
+    // Aufnahme beendet: zeigt der Noten-Editor eine Spur, auf der gerade ein
+    // Clip entstanden ist, springt er auf diesen neuen Clip.
+    const bool recording = controller_.isRecording();
+    if (recording != wasRecording_) {
+        const Project& project = controller_.project();
+        if (recording) {
+            for (int t = 0; t < kProjectTracks; ++t)
+                clipsBeforeRecording_[static_cast<std::size_t>(t)] =
+                    static_cast<int>(project.tracks[static_cast<std::size_t>(t)].midiClips.size());
+        } else if (pianoRoll_.isOpen()) {
+            const int t = pianoRoll_.track();
+            if (t >= 0 && t < kProjectTracks) {
+                const int now = static_cast<int>(project.tracks[static_cast<std::size_t>(t)].midiClips.size());
+                if (now > clipsBeforeRecording_[static_cast<std::size_t>(t)]) {
+                    pianoRoll_.open(t, now - 1);
+                    selTrack_ = t;
+                    selIndex_ = now - 1;
+                    selMidi_ = true;
+                }
+            }
+        }
+        wasRecording_ = recording;
+    }
+
     // MIDI-Anzeige: LED kurz aufleuchten lassen, letzte Nachricht merken.
     if (midiLedTicks_ > 0) --midiLedTicks_;
     if (midiErrorTicks_ > 0) --midiErrorTicks_;
@@ -667,6 +691,30 @@ void MainView::drawMidiClip(Canvas& c, const MidiClipModel& clip, int track, std
         if (nx1 < visible0 || nx0 > visible1) continue;
         const float ny = top + rangeH - static_cast<float>(note.pitch - low + 1) * rangeH / static_cast<float>(high - low + 1);
         c.fill({nx0, ny, std::max(2.0f, nx1 - nx0 - 1.0f), noteH}, rgb(0xF2F4F8, 0.9f * alpha));
+    }
+    // Controller: der haeufigste als Linie am unteren Rand (Werte halten bis zum naechsten).
+    if (!clip.controls.empty()) {
+        std::array<int, kCtrlCount> counts{};
+        for (const MidiControl& m : clip.controls) ++counts[m.controller];
+        const int shown = static_cast<int>(std::max_element(counts.begin(), counts.end()) - counts.begin());
+        const float laneBottom = body.bottom() - 3.0f, laneH = std::min(14.0f, body.h * 0.3f);
+        const auto yOf = [&](int value) {
+            return laneBottom - laneH * static_cast<float>(value) / static_cast<float>(controlMax(shown));
+        };
+        float lastX = -1.0f, lastY = 0.0f;
+        for (const MidiControl& m : clip.controls) {
+            if (m.controller != shown || m.position >= clip.length) continue;
+            const float x = frameToX(static_cast<double>(start + m.position));
+            const float y = yOf(m.value);
+            if (lastX >= 0.0f) {
+                c.line(lastX, lastY, x, lastY, rgb(0xE6D34A, 0.85f * alpha));
+                c.line(x, lastY, x, y, rgb(0xE6D34A, 0.85f * alpha));
+            }
+            lastX = x;
+            lastY = y;
+        }
+        if (lastX >= 0.0f)
+            c.line(lastX, lastY, frameToX(static_cast<double>(start + clip.length)), lastY, rgb(0xE6D34A, 0.85f * alpha));
     }
     c.popClip();
 
@@ -1143,11 +1191,18 @@ void MainView::stepOutput(int track, int delta) {
     controller_.setTrackMidiOutput(track, ((current + 1 + delta) % count + count) % count - 1);
 }
 
+void MainView::rightMouseUp(float x, float y) {
+    if (!editorDrag_) return;
+    editorDrag_ = false;
+    pianoRoll_.mouseUp(x, y);
+}
+
 void MainView::rightMouseDown(float x, float y) {
     if (pickerStrip_ >= 0) { pickerStrip_ = -1; return; }
     if (inputMenuTrack_ >= 0) { inputMenuTrack_ = -1; return; }
     if (mixerMode_ && mixer_.rightMouseDown(x, y)) return;
     if (!mixerMode_ && pianoRoll_.isOpen() && editorRect().contains(x, y)) {
+        editorDrag_ = true;  // Loeschen in der Controller-Spur geht auch durch Ziehen
         pianoRoll_.mouseDown(x, y, true);
         return;
     }

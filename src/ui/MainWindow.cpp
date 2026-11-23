@@ -261,13 +261,20 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_RBUTTONDOWN:
+            SetCapture(hwnd_);
             view_.rightMouseDown(toDip(GET_X_LPARAM(lParam)), toDip(GET_Y_LPARAM(lParam)));
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+
+        case WM_RBUTTONUP:
+            view_.rightMouseUp(toDip(GET_X_LPARAM(lParam)), toDip(GET_Y_LPARAM(lParam)));
+            ReleaseCapture();
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
 
         case WM_MOUSEMOVE:
             view_.mouseMove(toDip(GET_X_LPARAM(lParam)), toDip(GET_Y_LPARAM(lParam)), (wParam & MK_SHIFT) != 0);
-            if (wParam & MK_LBUTTON) InvalidateRect(hwnd_, nullptr, FALSE);
+            if (wParam & (MK_LBUTTON | MK_RBUTTON)) InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
 
         case WM_LBUTTONUP:

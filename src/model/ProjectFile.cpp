@@ -235,6 +235,10 @@ bool writeProjectFile(const std::filesystem::path& path, const SavedProject& pro
                 out << "    note " << note.start << ' ' << note.length << ' ' << static_cast<int>(note.pitch) << ' '
                     << static_cast<int>(note.velocity) << '\n';
             }
+            // Controller: Position, Nummer (128 Aftertouch, 129 Pitchbend), Wert
+            for (const MidiControl& control : clip.controls)
+                out << "    ctrl " << control.position << ' ' << static_cast<int>(control.controller) << ' '
+                    << control.value << '\n';
         }
     }
 
@@ -425,6 +429,17 @@ bool readProjectFile(const std::filesystem::path& path, SavedProject& project, s
                 note.pitch = static_cast<std::uint8_t>(pitch);
                 note.velocity = static_cast<std::uint8_t>(velocity < 1 ? 1 : velocity > 127 ? 127 : velocity);
                 midiClip->notes.push_back(note);
+            }
+        } else if (key == "ctrl" && midiClip) {
+            char* cursor = nullptr;
+            MidiControl control;
+            control.position = std::strtoll(rest.c_str(), &cursor, 10);
+            const long controller = std::strtol(cursor, &cursor, 10);
+            const long value = std::strtol(cursor, &cursor, 10);
+            if (control.position >= 0 && controller >= 0 && controller < kCtrlCount) {
+                control.controller = static_cast<std::uint8_t>(controller);
+                control.value = static_cast<std::uint16_t>(std::clamp<long>(value, 0, controlMax(static_cast<int>(controller))));
+                midiClip->controls.push_back(control);
             }
         }
         // Unbekannte Schluesselwoerter werden uebersprungen (spaetere Erweiterungen).

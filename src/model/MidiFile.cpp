@@ -102,9 +102,17 @@ struct RawNote {
     int channel = 0;
 };
 
+struct RawControl {
+    std::int64_t tick = 0;
+    int channel = 0;
+    int controller = 0;
+    int value = 0;
+};
+
 struct RawTrack {
     std::wstring name;
     std::vector<RawNote> notes;
+    std::vector<RawControl> controls;
 };
 
 struct TempoChange {
@@ -188,6 +196,12 @@ bool parseTrack(Reader r, std::int64_t minLength, RawTrack& track, std::vector<T
             open[channel * 128 + a].push_back({tick, b});
         } else if (kind == 0x80 || kind == 0x90) {
             finish(channel, a, tick);
+        } else if (kind == 0xB0 && a < 120) {  // Regler; 120..127 sind Kanalbefehle
+            track.controls.push_back({tick, channel, a, b});
+        } else if (kind == 0xD0) {
+            track.controls.push_back({tick, channel, 128, a});
+        } else if (kind == 0xE0) {
+            track.controls.push_back({tick, channel, 129, (b << 7) | a});
         }
     }
 
@@ -376,6 +390,9 @@ bool parseMidiFile(const std::vector<std::uint8_t>& bytes, MidiFileData& out, st
         std::vector<int> channels;
         for (const RawNote& n : track.notes)
             if (std::find(channels.begin(), channels.end(), n.channel) == channels.end()) channels.push_back(n.channel);
+        // Kanaele nur mit Controllern (z. B. ein Pedal-Spur) kommen hinten dazu.
+        for (const RawControl& c : track.controls)
+            if (std::find(channels.begin(), channels.end(), c.channel) == channels.end()) channels.push_back(c.channel);
         for (int channel : channels) {
             MidiFilePart part;
             part.name = track.name;
@@ -391,10 +408,20 @@ bool parseMidiFile(const std::vector<std::uint8_t>& bytes, MidiFileData& out, st
                 out.end = std::max(out.end, note.start + note.length);
                 part.notes.push_back(note);
             }
+            for (const RawControl& c : track.controls) {  // in Dateireihenfolge, also schon nach Zeit
+                if (c.channel != channel) continue;
+                MidiFileControl control;
+                control.time = toSeconds(c.tick);
+                control.controller = c.controller;
+                control.value = c.value;
+                out.end = std::max(out.end, control.time);
+                part.controls.push_back(control);
+            }
             out.parts.push_back(std::move(part));
         }
     }
-    if (out.parts.empty()) {
+    const bool anyNotes = std::any_of(out.parts.begin(), out.parts.end(), [](const MidiFilePart& p) { return !p.notes.empty(); });
+    if (!anyNotes) {
         error = "Die MIDI-Datei enth\xC3\xA4lt keine Noten.";
         return false;
     }
@@ -449,31 +476,45 @@ std::vector<std::uint8_t> buildMidiFile(const std::vector<MidiExportTrack>& trac
             putVar(body, name.size());
             body.insert(body.end(), name.begin(), name.end());
         }
+        // Ereignisse: Rang 0 = Note aus, 1 = Controller, 2 = Note an (bei gleichem Tick in dieser Reihenfolge)
         struct Event {
             std::int64_t tick;
-            bool on;
-            std::uint8_t pitch;
-            std::uint8_t velocity;
+            int rank;
+            std::uint8_t status, data1, data2;
         };
         std::vector<Event> events;
-        events.reserve(track.notes.size() * 2);
+        events.reserve(track.notes.size() * 2 + track.controls.size());
+        const auto ch = static_cast<std::uint8_t>(channel);
         for (const MidiExportNote& n : track.notes) {
             const std::int64_t start = std::max<std::int64_t>(0, n.tick);
-            events.push_back({start, true, static_cast<std::uint8_t>(n.pitch & 0x7F),
+            const auto pitch = static_cast<std::uint8_t>(n.pitch & 0x7F);
+            events.push_back({start, 2, static_cast<std::uint8_t>(0x90 | ch), pitch,
                               static_cast<std::uint8_t>(std::clamp<int>(n.velocity, 1, 127))});
-            events.push_back({start + std::max<std::int64_t>(1, n.length), false, static_cast<std::uint8_t>(n.pitch & 0x7F), 64});
+            events.push_back({start + std::max<std::int64_t>(1, n.length), 0, static_cast<std::uint8_t>(0x80 | ch), pitch, 64});
         }
-        // Auf demselben Tick zuerst Noten beenden, dann neue anschlagen.
+        for (const MidiExportControl& c : track.controls) {
+            const std::int64_t at = std::max<std::int64_t>(0, c.tick);
+            if (c.controller == 129) {
+                const int v = std::clamp(c.value, 0, 16383);
+                events.push_back({at, 1, static_cast<std::uint8_t>(0xE0 | ch), static_cast<std::uint8_t>(v & 0x7F),
+                                  static_cast<std::uint8_t>(v >> 7)});
+            } else if (c.controller == 128) {
+                events.push_back({at, 1, static_cast<std::uint8_t>(0xD0 | ch), static_cast<std::uint8_t>(std::clamp(c.value, 0, 127)), 0});
+            } else if (c.controller >= 0 && c.controller < 120) {
+                events.push_back({at, 1, static_cast<std::uint8_t>(0xB0 | ch), static_cast<std::uint8_t>(c.controller),
+                                  static_cast<std::uint8_t>(std::clamp(c.value, 0, 127))});
+            }
+        }
         std::stable_sort(events.begin(), events.end(), [](const Event& a, const Event& b) {
-            return a.tick != b.tick ? a.tick < b.tick : (!a.on && b.on);
+            return a.tick != b.tick ? a.tick < b.tick : a.rank < b.rank;
         });
         std::int64_t last = 0;
         for (const Event& e : events) {
             putVar(body, static_cast<std::uint64_t>(e.tick - last));
             last = e.tick;
-            body.push_back(static_cast<std::uint8_t>((e.on ? 0x90 : 0x80) | channel));
-            body.push_back(e.pitch);
-            body.push_back(e.velocity);
+            body.push_back(e.status);
+            body.push_back(e.data1);
+            if ((e.status & 0xF0) != 0xD0) body.push_back(e.data2);  // Kanaldruck hat nur ein Datenbyte
         }
         body.insert(body.end(), {0x00, 0xFF, 0x2F, 0x00});
         putChunk(out, body);

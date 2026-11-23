@@ -253,6 +253,11 @@ private:
         LatencyProbe* probe = nullptr;
     };
 
+    static std::array<std::int16_t, 130> makeUnset() {
+        std::array<std::int16_t, 130> a{};
+        a.fill(-1);
+        return a;
+    }
     struct Track {
         // Mixerwerte
         float gain = 1.0f;
@@ -274,6 +279,8 @@ private:
         std::int64_t seqNextPos = -1;    // Position, an der die Wiedergabe fortsetzt
         bool seqDirty = false;           // Sequenz wurde ersetzt
         std::array<std::uint64_t, 2> held{};  // klingende Noten aus der Sequenz
+        std::array<std::int16_t, 130> ctrl = makeUnset();  // zuletzt gesendete Controller-Werte (-1: keiner)
+        bool ctrlAway = false;                 // ein Pedal o. ae. steht nicht in Ruhe
         // Mixer
         std::array<AudioPlugin*, kNumSlots> slots{};
         std::array<float, kNumBuses> send{};     // angestrebter Send-Pegel
@@ -385,7 +392,7 @@ private:
     std::array<Synth, kNumTracks> synths_;
     std::array<LiveMidi, 128> liveMidi_{};  // Nachrichten fuer den naechsten Block
     int liveMidiCount_ = 0;
-    std::array<BlockEvent, 256> blockEvents_{};
+    std::array<BlockEvent, 512> blockEvents_{};
 
     // Rueckkanal zur UI
     std::atomic<std::int64_t> positionOut_{0};

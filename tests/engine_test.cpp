@@ -9,6 +9,7 @@
 #include "engine/Effects.h"
 #include "engine/Mastering.h"
 #include "model/MidiFile.h"
+#include "vst3/MidiLearn.h"
 #include "model/ProjectController.h"
 #include "util/SpscQueue.h"
 
@@ -1386,6 +1387,177 @@ void testMidiRecording() {
     CHECK(clips.size() == 1);
 }
 
+// Controller (CC, Pitchbend, Aftertouch): Wiedergabe in der richtigen
+// Reihenfolge, Ruhestellung am Clip-Ende, Nachfuehren beim Springen,
+// Aufnahme, Teilen, Speichern.
+void testMidiControllers() {
+    // Hilfen fuer Nachrichten
+    CHECK(controllerOf(controlMessage(64, 127)) == 64 && controlValueOf(controlMessage(64, 127)) == 127);
+    CHECK(controllerOf(controlMessage(kCtrlPitchBend, 12000)) == kCtrlPitchBend &&
+          controlValueOf(controlMessage(kCtrlPitchBend, 12000)) == 12000);
+    CHECK(controllerOf(controlMessage(kCtrlAftertouch, 33)) == kCtrlAftertouch);
+    CHECK(controllerOf(MidiMessage::allNotesOff()) == -1 && controllerOf(MidiMessage::noteOn(60, 1)) == -1);
+
+    Rig rig;
+    ProjectController controller(*rig.engine);
+    controller.setSampleRate(kRate);
+    MidiClipModel clip;
+    clip.start = 1000;
+    clip.length = 4000;
+    clip.notes = {{0, 3000, 60, 100}};
+    clip.controls = {{0, 64, 127}, {500, 1, 40}, {1500, kCtrlPitchBend, 12000}, {2000, 7, 90}};
+    CHECK(controller.addMidiClip(2, clip) == 0);
+    controller.setTrackMidiOutput(2, 0);
+    rig.render();
+    drainMidiOut(*rig.engine);
+
+    rig.engine->play();
+    for (int b = 0; b < 40; ++b) rig.render();
+    auto sent = drainMidiOut(*rig.engine);
+    const std::vector<MidiMessage> expected = {
+        controlMessage(64, 127), MidiMessage::noteOn(60, 100), controlMessage(1, 40), controlMessage(kCtrlPitchBend, 12000),
+        controlMessage(7, 90),   MidiMessage::noteOff(60),     controlMessage(1, 0),  controlMessage(64, 0),
+        controlMessage(kCtrlPitchBend, kPitchBendCenter)};
+    CHECK(sent.size() == expected.size());
+    for (std::size_t i = 0; i < std::min(sent.size(), expected.size()); ++i)
+        CHECK(sent[i].status == expected[i].status && sent[i].data1 == expected[i].data1 &&
+              (expected[i].isNoteOff() || sent[i].data2 == expected[i].data2));
+
+    // Mitten in den Clip springen: Pedal, Modulation und Pitchbend werden nachgefuehrt
+    // (Lautstaerke CC 7 steht schon auf 90). Beim Anhalten geht alles in Ruhe.
+    rig.engine->stop();
+    rig.render();
+    rig.render();
+    rig.engine->locate(3200);
+    rig.render();
+    drainMidiOut(*rig.engine);
+    rig.engine->play();
+    rig.render();
+    rig.engine->stop();
+    rig.render();
+    rig.render();
+    sent = drainMidiOut(*rig.engine);
+    const std::vector<MidiMessage> chase = {controlMessage(1, 40), controlMessage(64, 127),
+                                            controlMessage(kCtrlPitchBend, 12000), controlMessage(1, 0),
+                                            controlMessage(64, 0), controlMessage(kCtrlPitchBend, kPitchBendCenter)};
+    CHECK(sent.size() == chase.size());
+    for (std::size_t i = 0; i < std::min(sent.size(), chase.size()); ++i)
+        CHECK(sent[i].status == chase[i].status && sent[i].data1 == chase[i].data1 && sent[i].data2 == chase[i].data2);
+
+    // Teilen: Der hintere Teil beginnt mit den Werten am Schnitt.
+    CHECK(controller.splitMidiClip(2, 0, 1000 + 1000));
+    const auto& clips = controller.project().tracks[2].midiClips;
+    CHECK(clips.size() == 2);
+    if (clips.size() == 2) {
+        CHECK(clips[0].controls.size() == 2);  // CC64 bei 0, CC1 bei 500
+        const auto& back = clips[1].controls;
+        CHECK(back.size() == 4);
+        if (back.size() == 4) {
+            CHECK(back[0].position == 0 && back[1].position == 0);
+            CHECK(back[2].position == 500 && back[2].controller == kCtrlPitchBend);
+            CHECK(back[3].position == 1000 && back[3].controller == 7);
+        }
+    }
+    CHECK(controller.updateMidiControls(2, 1, {{10, 11, 64}}));
+    CHECK(clips[1].controls.size() == 1 && controller.undoLabel() == L"Controller bearbeiten");
+
+    // Speichern und Laden
+    const auto folder = tempFile("minidaw_ctrl");
+    std::filesystem::create_directories(folder);
+    std::string message;
+    CHECK(controller.saveProject(folder / "ctrl.mdaw", message));
+    ProjectController loaded(*rig.engine);
+    loaded.setSampleRate(kRate);
+    CHECK(loaded.loadProject(folder / "ctrl.mdaw", message));
+    CHECK(loaded.project().tracks[2].midiClips.size() == 2);
+    if (loaded.project().tracks[2].midiClips.size() == 2) {
+        CHECK(loaded.project().tracks[2].midiClips[0].controls == clips[0].controls);
+        CHECK(loaded.project().tracks[2].midiClips[1].controls == clips[1].controls);
+    }
+    std::filesystem::remove_all(folder);
+    rig.render();
+    controller.poll(message);
+    loaded.poll(message);
+}
+
+// Aufnahme von Controllern vom MIDI-Eingang.
+void testControllerRecordingMidi() {
+    Rig rig;
+    ProjectController controller(*rig.engine);
+    controller.setSampleRate(kRate);
+    std::string message;
+    controller.armTrack(1);
+    controller.setTrackInput(1, kTrackInputMidiAll);
+    rig.render();
+    CHECK(controller.startRecording(message));
+    rig.render();
+    controller.poll(message);
+    for (int b = 0; b < 2; ++b) rig.render();
+    rig.engine->postMidi(controlMessage(64, 127));
+    rig.engine->postMidi(MidiMessage::noteOn(60, 90));
+    rig.render();
+    rig.engine->postMidi(controlMessage(kCtrlPitchBend, 9000));
+    rig.engine->postMidi(controlMessage(kCtrlAftertouch, 50));
+    rig.engine->postMidi(MidiMessage::allNotesOff());  // Kanalbefehl: kein Controller
+    rig.render();
+    rig.engine->postMidi(controlMessage(64, 0));
+    rig.engine->postMidi(MidiMessage::noteOff(60));
+    rig.render();
+    rig.engine->stop();
+    rig.render();
+    controller.poll(message);
+    const auto& clips = controller.project().tracks[1].midiClips;
+    CHECK(clips.size() == 1);
+    if (clips.size() == 1) {
+        const auto& c = clips[0].controls;
+        CHECK(c.size() == 4);
+        if (c.size() == 4) {
+            CHECK(c[0].controller == 64 && c[0].value == 127);
+            CHECK(c[1].controller == kCtrlPitchBend && c[1].value == 9000);
+            CHECK(c[2].controller == kCtrlAftertouch && c[2].value == 50);
+            CHECK(c[3].controller == 64 && c[3].value == 0);
+            CHECK(c[0].position < c[1].position && c[1].position == c[2].position && c[2].position < c[3].position);
+        }
+        CHECK(clips[0].notes.size() == 1);
+    }
+
+    // Nur Controller, keine Noten: gibt trotzdem einen Clip.
+    CHECK(controller.startRecording(message));
+    rig.render();
+    controller.poll(message);
+    rig.engine->postMidi(controlMessage(1, 64));
+    rig.render();
+    rig.engine->stop();
+    rig.render();
+    controller.poll(message);
+    CHECK(clips.size() == 2);
+}
+
+// Gelernte MIDI-Zuweisungen hinter dem Plugin-Zustand.
+void testMidiLearnState() {
+    const std::vector<char> plugin = {'a', 'b', 'c', 0, 1, 2};
+    std::vector<char> state = plugin;
+    midilearn::append(state, {});
+    CHECK(state == plugin);  // ohne Zuweisungen unveraendert
+    CHECK(midilearn::extract(state).empty() && state == plugin);
+
+    const std::vector<midilearn::Assignment> list = {{1, 42}, {64, 0xFFFFFFF0u}, {midilearn::kPitchBend, 7}};
+    midilearn::append(state, list);
+    CHECK(state.size() == plugin.size() + 3 * 6 + 12);
+    CHECK(midilearn::extract(state) == list);
+    CHECK(state == plugin);
+
+    // Beschaedigte Anhaenge werden nicht abgenommen.
+    std::vector<char> broken = plugin;
+    midilearn::append(broken, list);
+    broken[broken.size() - 12] = 99;  // Anzahl zu gross fuer die Laenge
+    const auto keep = broken;
+    CHECK(midilearn::extract(broken).empty() && broken == keep);
+    std::vector<char> tiny = {'M', 'D', 'A', 'W', 'Z', 'U', 'W', '1'};
+    CHECK(midilearn::extract(tiny).empty());
+    CHECK(std::wstring(midilearn::controllerName(64)) == L"Sustain" && midilearn::controllerName(3) == nullptr);
+}
+
 void testMetronome() {
     Rig rig;
     ProjectController controller(*rig.engine);
@@ -2644,6 +2816,45 @@ void testMidiFiles() {
     }
     std::filesystem::remove(path);
 
+    // Controller in MIDI-Dateien: hinaus und wieder herein, mit Ruhestellung am Clip-Ende.
+    {
+        Rig ctrlRig;
+        ProjectController withCtrl(*ctrlRig.engine);
+        withCtrl.setSampleRate(kRate);
+        withCtrl.setBpm(120.0);  // eine Viertel = 24000 Frames
+        MidiClipModel clip;
+        clip.start = 0;
+        clip.length = 96000;
+        clip.notes = {{0, 24000, 60, 100}};
+        clip.controls = {{0, 64, 127}, {12000, 1, 70}, {24000, kCtrlPitchBend, 4096}, {36000, kCtrlAftertouch, 20}};
+        CHECK(withCtrl.addMidiClip(0, clip) == 0);
+        const auto tracks = withCtrl.midiExportTracks();
+        CHECK(tracks.size() == 1 && tracks[0].controls.size() == 4 + 4);  // vier Ruhestellungen am Ende
+        MidiFileData read;
+        CHECK(parseMidiFile(buildMidiFile(tracks, 120.0), read, error) && read.parts.size() == 1);
+        if (read.parts.size() == 1) {
+            const auto& c = read.parts[0].controls;
+            CHECK(c.size() == 8);
+            if (c.size() == 8) {
+                CHECK(c[0].controller == 64 && c[0].value == 127 && c[0].time == 0.0);
+                CHECK(c[1].controller == 1 && c[1].value == 70 && std::fabs(c[1].time - 0.25) < 1e-6);
+                CHECK(c[2].controller == kCtrlPitchBend && c[2].value == 4096 && std::fabs(c[2].time - 0.5) < 1e-6);
+                CHECK(c[3].controller == kCtrlAftertouch && c[3].value == 20);
+                CHECK(std::fabs(c[7].time - 2.0) < 1e-6);
+            }
+            // Wieder ins Projekt: Controller landen im Clip.
+            const auto imported = withCtrl.importMidi(4, 0, read, L"ctrl");
+            CHECK(imported.tracksUsed == 1);
+            const auto& back = withCtrl.project().tracks[4].midiClips;
+            CHECK(back.size() == 1 && back[0].controls.size() == 8);
+            if (!back.empty() && back[0].controls.size() == 8)
+                CHECK(back[0].controls[2].position == 24000 && back[0].controls[2].value == 4096);
+        }
+        std::string msg;
+        ctrlRig.render();
+        withCtrl.poll(msg);
+    }
+
     // Namen ausserhalb von Latin-1 gehen als UTF-8 hinaus und kommen gleich zurueck.
     MidiExportTrack named;
     named.name = L"Geräusch ♫";
@@ -3243,6 +3454,9 @@ int main() {
     testUndoRedo();
     testAutomation();
     testMidiFiles();
+    testMidiControllers();
+    testControllerRecordingMidi();
+    testMidiLearnState();
     testMastering();
     testBuiltinEffects();
     {

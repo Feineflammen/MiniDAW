@@ -32,9 +32,10 @@ public:
     void mouseUp(float x, float y);
     void wheel(float x, float y, float notches, bool ctrl, bool shift);
     bool deleteSelected();  // true, wenn eine Note geloescht wurde
+    void showLane(int controller) { lane_ = controller; }  // -1: Anschlag
 
 private:
-    enum class Drag { None, Move, Resize, Velocity };
+    enum class Drag { None, Move, Resize, Velocity, Control, ControlErase };
 
     const MidiClipModel* clip() const;
     const std::vector<MidiNote>& notes() const;
@@ -49,6 +50,16 @@ private:
     void commit();
     void applyVelocity(float x, float y);
 
+    // Untere Spur: Anschlag (lane_ < 0) oder ein Controller
+    std::vector<int> laneChoices() const;
+    void stepLane(int direction);
+    int laneValueAt(float y) const;
+    float laneYOf(int value) const;
+    void drawLane(Canvas& c, const MidiClipModel& clip);
+    void applyControl(float x, float y);
+    void eraseControl(float x);
+    void commitControls();
+
     ProjectController& controller_;
     Engine& engine_;
 
@@ -56,7 +67,7 @@ private:
     int index_ = -1;
 
     // Aufteilung, bei jedem Zeichnen neu berechnet
-    Rect panel_, header_, keys_, grid_, velocity_, closeRect_, divisionRect_;
+    Rect panel_, header_, keys_, grid_, velocity_, laneLabel_, closeRect_, divisionRect_;
 
     // Ansicht
     bool fitPending_ = false;
@@ -72,6 +83,11 @@ private:
     bool changed_ = false;
     std::vector<MidiNote> edit_;
     std::int64_t grabOffset_ = 0;
+
+    int lane_ = -1;                        // -1: Anschlag, sonst Controller (0..129)
+    std::vector<MidiControl> controlEdit_; // Kopie waehrend des Zeichnens
+    bool controlEditing_ = false;
+    std::int64_t lastControlFrame_ = -1;
 };
 
 }  // namespace ui

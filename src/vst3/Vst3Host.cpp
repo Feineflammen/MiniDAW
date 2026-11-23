@@ -398,18 +398,8 @@ bool Vst3Plugin::setup(IPluginFactory* factory, const TUID classId, bool instrum
         }
 
         // MIDI-Controller (Haltepedal, Modulationsrad, Pitchbend ...) laufen in
-        // VST3 ueber Parameter. Die Zuordnung einmal abfragen.
-        if (FUnknownPtr<IMidiMapping> mapping{controller_}) {
-            midiMap_.assign(static_cast<std::size_t>(16 * kControllers), kNoParamId);
-            for (int channel = 0; channel < 16; ++channel) {
-                for (int cc = 0; cc < kControllers; ++cc) {
-                    ParamID id = kNoParamId;
-                    if (mapping->getMidiControllerAssignment(0, static_cast<int16>(channel),
-                                                             static_cast<CtrlNumber>(cc), id) == kResultOk)
-                        midiMap_[static_cast<std::size_t>(channel * kControllers + cc)] = id;
-                }
-            }
-        }
+        // VST3 ueber Parameter. Die Zuordnung abfragen (und neu, wenn das Plugin sie aendert).
+        queryMidiMapping();
     }
 
     // 3. Busse: Hauptbus in Stereo, alle weiteren bleiben aus.
@@ -516,10 +506,16 @@ bool Vst3Plugin::saveState(std::vector<char>& state) {
     for (int i = 0; i < 4; ++i) state.push_back(static_cast<char>((size >> (8 * i)) & 0xFF));
     state.insert(state.end(), componentState.data().begin(), componentState.data().end());
     state.insert(state.end(), controllerState.data().begin(), controllerState.data().end());
+    midilearn::append(state, assignments());  // gelernte Zuweisungen hinten dran
     return true;
 }
 
-bool Vst3Plugin::loadState(const std::vector<char>& state) {
+bool Vst3Plugin::loadState(const std::vector<char>& stored) {
+    std::vector<char> state = stored;
+    const auto learned = midilearn::extract(state);
+    clearAssignments();
+    for (std::size_t i = 0; i < learned.size() && i < learned_.size(); ++i)
+        learned_[i].store((std::uint64_t{1} << 63) | (static_cast<std::uint64_t>(learned[i].controller) << 32) | learned[i].param);
     if (!component_ || state.size() < 4) return false;
     std::uint32_t size = 0;
     for (int i = 0; i < 4; ++i)
@@ -549,6 +545,84 @@ void Vst3Plugin::idle() {
         if (controller_) controller_->setParamNormalized(edit.id, edit.value);
 }
 
+void Vst3Plugin::queryMidiMapping() {
+    if (!midiMap_) {
+        midiMap_ = std::make_unique<std::atomic<ParamID>[]>(static_cast<std::size_t>(16 * kControllers));
+        for (int i = 0; i < 16 * kControllers; ++i) midiMap_[static_cast<std::size_t>(i)].store(kNoParamId);
+    }
+    FUnknownPtr<IMidiMapping> mapping{controller_};
+    bool any = false;
+    for (int channel = 0; channel < 16; ++channel) {
+        for (int cc = 0; cc < kControllers; ++cc) {
+            ParamID id = kNoParamId;
+            if (!mapping || mapping->getMidiControllerAssignment(0, static_cast<int16>(channel),
+                                                                 static_cast<CtrlNumber>(cc), id) != kResultOk)
+                id = kNoParamId;
+            midiMap_[static_cast<std::size_t>(channel * kControllers + cc)].store(id, std::memory_order_relaxed);
+            any = any || id != kNoParamId;
+        }
+    }
+    hasMidiMap_.store(any, std::memory_order_release);
+}
+
+// --- Vst3Plugin: MIDI-Zuweisung durch den Benutzer (UI-Thread) ---------------
+
+void Vst3Plugin::startLearning() {
+    learnParam_.store(-1);
+    learnController_.store(-1);
+    learning_.store(true);
+}
+
+void Vst3Plugin::stopLearning() { learning_.store(false); }
+
+bool Vst3Plugin::finishLearning(midilearn::Assignment* created) {
+    if (!learning_.load()) return false;
+    const std::int64_t param = learnParam_.load();
+    const int controller = learnController_.load();
+    if (param < 0 || controller < 0) return false;
+    learning_.store(false);
+    // Ein Controller steuert einen Parameter: alte Zuweisungen fuer beide ersetzen.
+    for (auto& slot : learned_) {
+        const std::uint64_t v = slot.load();
+        if (!v) continue;
+        if (static_cast<int>((v >> 32) & 0xFFFF) == controller || static_cast<std::uint32_t>(v) == param) slot.store(0);
+    }
+    for (auto& slot : learned_) {
+        if (slot.load()) continue;
+        slot.store((std::uint64_t{1} << 63) | (static_cast<std::uint64_t>(controller) << 32) |
+                   static_cast<std::uint32_t>(param));
+        if (created) *created = {controller, static_cast<std::uint32_t>(param)};
+        return true;
+    }
+    return false;  // alle Plaetze belegt
+}
+
+std::vector<midilearn::Assignment> Vst3Plugin::assignments() const {
+    std::vector<midilearn::Assignment> out;
+    for (const auto& slot : learned_) {
+        const std::uint64_t v = slot.load();
+        if (v) out.push_back({static_cast<int>((v >> 32) & 0xFFFF), static_cast<std::uint32_t>(v)});
+    }
+    return out;
+}
+
+void Vst3Plugin::clearAssignments() {
+    for (auto& slot : learned_) slot.store(0);
+}
+
+std::wstring Vst3Plugin::parameterName(ParamID id) const {
+    if (!controller_) return {};
+    const int32 count = controller_->getParameterCount();
+    for (int32 i = 0; i < count; ++i) {
+        ParameterInfo info{};
+        if (controller_->getParameterInfo(i, info) != kResultOk || info.id != id) continue;
+        std::wstring name;
+        for (int k = 0; k < 128 && info.title[k]; ++k) name += static_cast<wchar_t>(info.title[k]);
+        return name;
+    }
+    return {};
+}
+
 // --- Vst3Plugin: IComponentHandler (UI-Thread) -------------------------------
 
 tresult PLUGIN_API Vst3Plugin::queryInterface(const TUID interfaceId, void** obj) {
@@ -565,12 +639,17 @@ tresult PLUGIN_API Vst3Plugin::beginEdit(ParamID) { return kResultOk; }
 tresult PLUGIN_API Vst3Plugin::performEdit(ParamID id, ParamValue valueNormalized) {
     // Der Benutzer dreht an der Oberflaeche: an den Audio-Thread weiterreichen.
     editsToAudio_.push({id, valueNormalized});
+    if (learning_.load(std::memory_order_relaxed)) learnParam_.store(static_cast<std::int64_t>(id));
     return kResultOk;
 }
 
 tresult PLUGIN_API Vst3Plugin::endEdit(ParamID) { return kResultOk; }
 
-tresult PLUGIN_API Vst3Plugin::restartComponent(int32) { return kResultOk; }
+tresult PLUGIN_API Vst3Plugin::restartComponent(int32 flags) {
+    // Das Plugin hat seine eigene Controller-Zuordnung geaendert (z. B. durch sein MIDI-Lernen).
+    if (flags & kMidiCCAssignmentChanged) queryMidiMapping();
+    return kResultOk;
+}
 
 // --- Vst3Plugin: Rechnen (Audio-Thread) --------------------------------------
 
@@ -621,10 +700,10 @@ void Vst3Plugin::process(float* left, float* right, int numFrames, const PluginM
             e.noteOff.velocity = 0.0f;
             e.noteOff.noteId = -1;
             inputEvents_.addEvent(e);
-        } else if (!midiMap_.empty()) {
+        } else {
             int controller = -1;
             double value = 0.0;
-            if (m.type() == 0xB0) {
+            if (m.type() == 0xB0 && m.data1 < 120) {  // 120..127 sind Kanalbefehle, keine Regler
                 controller = m.data1;
                 value = static_cast<double>(m.data2) / 127.0;
             } else if (m.type() == 0xE0) {
@@ -634,9 +713,21 @@ void Vst3Plugin::process(float* left, float* right, int numFrames, const PluginM
                 controller = kAfterTouch;
                 value = static_cast<double>(m.data1) / 127.0;
             }
-            if (controller >= 0 && controller < kControllers) {
-                const ParamID id = midiMap_[static_cast<std::size_t>(channel * kControllers + controller)];
-                if (id != kNoParamId) inputParams_.add(id, offset, value);
+            if (controller < 0 || controller >= kControllers) continue;
+            if (learning_.load(std::memory_order_relaxed)) learnController_.store(controller, std::memory_order_relaxed);
+            // Der Wert geht an den Parameter und an die Oberflaeche, damit sich der Regler dort mitbewegt.
+            const auto send = [&](ParamID id) {
+                inputParams_.add(id, offset, value);
+                editsToUi_.push({id, value});
+            };
+            if (hasMidiMap_.load(std::memory_order_acquire)) {
+                const ParamID id = midiMap_[static_cast<std::size_t>(channel * kControllers + controller)].load(
+                    std::memory_order_relaxed);
+                if (id != kNoParamId) send(id);
+            }
+            for (const auto& slot : learned_) {
+                const std::uint64_t v = slot.load(std::memory_order_relaxed);
+                if (v && static_cast<int>((v >> 32) & 0xFFFF) == controller) send(static_cast<ParamID>(v));
             }
         }
     }

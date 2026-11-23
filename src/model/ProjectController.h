@@ -94,6 +94,8 @@ public:
     // wenn at nicht im Clip liegt. Der hintere Teil kommt ans Ende der Liste.
     bool splitClip(int track, int index, std::int64_t at);
     bool splitMidiClip(int track, int index, std::int64_t at);
+    // Ersetzt die Controller eines MIDI-Clips (Controller-Spur im Noten-Editor).
+    bool updateMidiControls(int track, int index, std::vector<MidiControl> controls);
     // Setzt Anfang und Ende eines Audio-Clips auf der Zeitachse neu (Kanten
     // ziehen). Das Material bleibt an seinem Platz, nur der sichtbare Ausschnitt
     // aendert sich; begrenzt auf die Datei.
@@ -311,6 +313,7 @@ private:
     struct MidiTake {
         bool active = false;
         std::vector<MidiNote> notes;
+        std::vector<MidiControl> controls;
         std::array<OpenNote, 128> open{};
     };
     std::array<MidiTake, kProjectTracks> midiTakes_{};

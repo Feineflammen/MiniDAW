@@ -19,6 +19,13 @@ struct MidiFileNote {
     std::uint8_t velocity = 100;
 };
 
+// Controller (wie in model/Project.h: 0..127 CC, 128 Aftertouch, 129 Pitchbend).
+struct MidiFileControl {
+    double time = 0.0;  // Sekunden ab Dateianfang
+    int controller = 0;
+    int value = 0;
+};
+
 // Noten eines Kanals aus einer Spur der Datei. Benutzt eine Spur mehrere
 // Kanaele, wird sie in mehrere Teile aufgeteilt.
 struct MidiFilePart {
@@ -26,11 +33,12 @@ struct MidiFilePart {
     int channel = 0;    // 0..15
     bool splitFromTrack = false;  // die Spur der Datei hatte mehrere Kanaele
     std::vector<MidiFileNote> notes;  // nach Start sortiert
+    std::vector<MidiFileControl> controls;  // nach Zeit sortiert
 };
 
 struct MidiFileData {
     int format = 1;
-    std::vector<MidiFilePart> parts;  // nur Teile mit Noten, in Dateireihenfolge
+    std::vector<MidiFilePart> parts;  // nur Teile mit Noten oder Controllern, in Dateireihenfolge
     double firstBpm = 0.0;            // erstes Tempo der Datei, 0 = keine Angabe
     double end = 0.0;                 // Ende der letzten Note in Sekunden
 };
@@ -49,10 +57,17 @@ struct MidiExportNote {
     std::uint8_t velocity = 100;
 };
 
+struct MidiExportControl {
+    std::int64_t tick = 0;
+    int controller = 0;  // 0..127 CC, 128 Aftertouch, 129 Pitchbend
+    int value = 0;
+};
+
 struct MidiExportTrack {
     std::wstring name;
     int channel = 0;
     std::vector<MidiExportNote> notes;
+    std::vector<MidiExportControl> controls;
 };
 
 constexpr int kMidiExportPpq = 480;  // Ticks pro Viertel

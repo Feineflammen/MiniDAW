@@ -155,7 +155,7 @@ struct DemoPlugin final : AudioPlugin {
 };
 
 // mode: leer = Spuren mit Plugin-Auswahl, "mixer" = Mischpult, "eingang" = Eingangsliste,
-// "auswahl" = Effekt-Auswahl am Master, "mastering", "eq", "kompressor", "hall",
+// "controller" = Noten-Editor mit Modulations-Spur, "auswahl" = Effekt-Auswahl am Master, "mastering", "eq", "kompressor", "hall",
 // "echo", "gate", "chorus" = Fenster der eingebauten Effekte,
 // "ladebild" und "ueber" = Ladebild bzw. Fenster "Ueber MiniDAW".
 int runScreenshot(const std::filesystem::path& output, const std::wstring& mode) {
@@ -208,6 +208,16 @@ int runScreenshot(const std::filesystem::path& output, const std::wstring& mode)
     for (int i = 0; i < 12; ++i)
         midiClip.notes.push_back({static_cast<std::int64_t>(i) * kRate / 2, kRate * 2 / 5,
                                   static_cast<std::uint8_t>(pitches[i]), 100});
+    // Modulationsrad in einer Welle, Sustain-Pedal zweimal gedrueckt
+    for (int i = 0; i < 96; ++i)
+        midiClip.controls.push_back({static_cast<std::int64_t>(i) * kRate / 16, 1,
+                                     static_cast<std::uint16_t>(64 + 60 * std::sin(i * 0.2))});
+    midiClip.controls.push_back({0, 64, 127});
+    midiClip.controls.push_back({kRate * 2, 64, 0});
+    midiClip.controls.push_back({kRate * 3, 64, 127});
+    midiClip.controls.push_back({kRate * 5, 64, 0});
+    std::stable_sort(midiClip.controls.begin(), midiClip.controls.end(),
+                     [](const MidiControl& a, const MidiControl& b) { return a.position < b.position; });
     controller.addMidiClip(5, midiClip);
     controller.setTrackInput(5, kTrackInputMidiAll);
     controller.setTrackInput(6, 2);
@@ -260,6 +270,7 @@ int runScreenshot(const std::filesystem::path& output, const std::wstring& mode)
     view.setPluginHost(&demoPlugins);
     if (mode == L"mixer") view.setMixerMode(true);
     else if (mode == L"eingang") view.openInputMenu(2);
+    else if (mode == L"controller") view.showPianoRollLane(1);
     else if (mode == L"auswahl") {
         view.setMixerMode(true);
         view.openEffectPicker(kMasterStripIndex, 2, 860.0f, 300.0f);

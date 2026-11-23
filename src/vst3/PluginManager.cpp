@@ -212,7 +212,12 @@ bool PluginManager::openEditor(int strip, int slot, std::wstring& error) {
         error = L"Auf diesem Platz ist kein Plugin geladen.";
         return false;
     }
-    if (!target->window) target->window = std::make_unique<PluginWindow>(*target->plugin, owner_);
+    if (!target->window) {
+        target->window = std::make_unique<PluginWindow>(*target->plugin, owner_);
+        target->window->onChange = [this] {
+            if (onBuiltinChange) onBuiltinChange();  // Projekt gilt als geaendert
+        };
+    }
     std::string reason;
     if (!target->window->open(reason)) {
         error = widen(reason);

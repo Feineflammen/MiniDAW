@@ -269,6 +269,28 @@ bool ProjectController::splitMidiClip(int track, int index, std::int64_t at) {
         }
     }
     first.notes = std::move(keep);
+    // Controller: der hintere Teil beginnt mit den Werten, die am Schnitt gelten
+    // (z. B. Pedal gedrueckt), damit er auch allein richtig klingt.
+    std::array<int, kCtrlCount> current;
+    current.fill(-1);
+    std::vector<MidiControl> keepControls;
+    for (const MidiControl& control : first.controls) {
+        if (control.position < cut) {
+            current[control.controller] = control.value;
+            keepControls.push_back(control);
+        }
+    }
+    for (int c = 0; c < kCtrlCount; ++c)
+        if (current[static_cast<std::size_t>(c)] >= 0)
+            second.controls.push_back({0, static_cast<std::uint8_t>(c), static_cast<std::uint16_t>(current[static_cast<std::size_t>(c)])});
+    for (MidiControl control : first.controls) {
+        if (control.position < cut) continue;
+        control.position -= cut;
+        second.controls.push_back(control);
+    }
+    std::stable_sort(second.controls.begin(), second.controls.end(),
+                     [](const MidiControl& a, const MidiControl& b) { return a.position < b.position; });
+    first.controls = std::move(keepControls);
     first.length = cut;
     clips.push_back(std::move(second));
     syncMidi(track);
@@ -696,6 +718,19 @@ bool ProjectController::updateMidiClip(int track, int index, std::vector<MidiNot
     return true;
 }
 
+bool ProjectController::updateMidiControls(int track, int index, std::vector<MidiControl> controls) {
+    if (!validTrack(track)) return false;
+    auto& clips = project_.tracks[static_cast<std::size_t>(track)].midiClips;
+    if (index < 0 || index >= static_cast<int>(clips.size())) return false;
+    std::stable_sort(controls.begin(), controls.end(),
+                     [](const MidiControl& a, const MidiControl& b) { return a.position < b.position; });
+    if (clips[static_cast<std::size_t>(index)].controls == controls) return true;
+    noteChange(L"Controller bearbeiten");
+    clips[static_cast<std::size_t>(index)].controls = std::move(controls);
+    syncMidi(track);
+    return true;
+}
+
 int ProjectController::addMidiClip(int track, MidiClipModel clip) {
     if (!validTrack(track) || clip.length <= 0) return -1;
     clip.start = std::max<std::int64_t>(0, clip.start);
@@ -757,12 +792,28 @@ void ProjectController::syncMidi(int track) {
             sequence->events.push_back({on, MidiMessage::noteOn(note.pitch, std::max<int>(1, note.velocity))});
             sequence->events.push_back({off, MidiMessage::noteOff(note.pitch)});
         }
+        // Controller; am Clip-Ende Pedale, Modulation, Pitchbend und Kanaldruck
+        // zuruecksetzen, damit nichts haengen bleibt.
+        std::array<int, kCtrlCount> last;
+        last.fill(-1);
+        for (const auto& control : clip.controls) {
+            if (control.position < 0 || control.position >= clip.length) continue;
+            sequence->events.push_back({clip.start + control.position, controlMessage(control.controller, control.value)});
+            last[control.controller] = control.value;
+        }
+        for (int c = 0; c < kCtrlCount; ++c) {
+            const int rest = controlRestValue(c);
+            if (last[static_cast<std::size_t>(c)] >= 0 && rest >= 0 && last[static_cast<std::size_t>(c)] != rest)
+                sequence->events.push_back({clip.start + clip.length, controlMessage(c, rest)});
+        }
     }
-    // Nach Zeit; bei gleicher Zeit erst "Note aus", damit Tonwiederholungen neu anschlagen.
+    // Nach Zeit; bei gleicher Zeit erst "Note aus" (damit Tonwiederholungen neu
+    // anschlagen), dann Controller (gelten schon fuer die neue Note), dann "Note an".
+    const auto rank = [](const MidiMessage& m) { return m.isNoteOff() ? 0 : m.isNoteOn() ? 2 : 1; };
     std::stable_sort(sequence->events.begin(), sequence->events.end(),
-                     [](const MidiSequence::Event& a, const MidiSequence::Event& b) {
+                     [&](const MidiSequence::Event& a, const MidiSequence::Event& b) {
                          if (a.frame != b.frame) return a.frame < b.frame;
-                         return a.message.isNoteOff() && !b.message.isNoteOff();
+                         return rank(a.message) < rank(b.message);
                      });
     engine_.setTrackMidiSequence(track, std::move(sequence));
 }
@@ -814,6 +865,11 @@ ProjectController::MidiImport ProjectController::importMidi(int track, std::int6
             note.velocity = n.velocity;
             clip.notes.push_back(note);
         }
+        for (const MidiFileControl& c : part.controls) {
+            const std::int64_t at = std::clamp<std::int64_t>(frames(c.time), 0, length - 1);
+            clip.controls.push_back({at, static_cast<std::uint8_t>(c.controller),
+                                     static_cast<std::uint16_t>(std::clamp(c.value, 0, controlMax(c.controller)))});
+        }
         const int index = addMidiClip(target, std::move(clip));
         if (index >= 0 && result.tracksUsed == 0) result.firstIndex = index;
         ++result.tracksUsed;
@@ -848,10 +904,25 @@ std::vector<MidiExportTrack> ProjectController::midiExportTracks() const {
                 n.velocity = note.velocity;
                 track.notes.push_back(n);
             }
+            // Controller wie beim Abspielen, mit Ruhestellung am Clip-Ende
+            std::array<int, kCtrlCount> last;
+            last.fill(-1);
+            for (const MidiControl& control : clip.controls) {
+                if (control.position < 0 || control.position >= clip.length) continue;
+                track.controls.push_back({ticks(clip.start + control.position), control.controller, control.value});
+                last[control.controller] = control.value;
+            }
+            for (int c = 0; c < kCtrlCount; ++c) {
+                const int rest = controlRestValue(c);
+                if (last[static_cast<std::size_t>(c)] >= 0 && rest >= 0 && last[static_cast<std::size_t>(c)] != rest)
+                    track.controls.push_back({ticks(clip.start + clip.length), c, rest});
+            }
         }
-        if (track.notes.empty()) continue;
+        if (track.notes.empty() && track.controls.empty()) continue;
         std::stable_sort(track.notes.begin(), track.notes.end(),
                          [](const MidiExportNote& a, const MidiExportNote& b) { return a.tick < b.tick; });
+        std::stable_sort(track.controls.begin(), track.controls.end(),
+                         [](const MidiExportControl& a, const MidiExportControl& b) { return a.tick < b.tick; });
         out.push_back(std::move(track));
     }
     return out;
@@ -1005,6 +1076,8 @@ void ProjectController::finishMidiRecording(std::int64_t end) {
         take.active = false;
         std::vector<MidiNote> notes = std::move(take.notes);
         take.notes.clear();
+        std::vector<MidiControl> controls = std::move(take.controls);
+        take.controls.clear();
         for (int pitch = 0; pitch < 128; ++pitch) {
             OpenNote& open = take.open[static_cast<std::size_t>(pitch)];
             if (open.open && begun)
@@ -1012,13 +1085,16 @@ void ProjectController::finishMidiRecording(std::int64_t end) {
                                  static_cast<std::uint8_t>(pitch), open.velocity});
             open.open = false;
         }
-        if (!begun || notes.empty()) continue;
+        if (!begun || (notes.empty() && controls.empty())) continue;
 
         MidiClipModel clip;
         clip.name = L"MIDI";
         clip.start = midiRecordStart_;
         clip.length = length;
         clip.notes = std::move(notes);
+        clip.controls = std::move(controls);
+        std::stable_sort(clip.controls.begin(), clip.controls.end(),
+                         [](const MidiControl& a, const MidiControl& b) { return a.position < b.position; });
         noteChange(L"Aufnahme");  // in poll() gruppiert: alle Spuren ein Schritt
         std::sort(clip.notes.begin(), clip.notes.end(),
                   [](const MidiNote& a, const MidiNote& b) { return a.start < b.start; });
@@ -1210,7 +1286,16 @@ bool ProjectController::poll(std::string& message) {
             } else if (midiRecordBegun_ && validTrack(e.track) && midiTakes_[static_cast<std::size_t>(e.track)].active) {
                 MidiTake& take = midiTakes_[static_cast<std::size_t>(e.track)];
                 const std::int64_t at = std::max<std::int64_t>(0, e.position - midiRecordStart_);
-                OpenNote& open = take.open[e.message.data1];
+                const MidiMessage& m = e.message;
+                // Controller mitschreiben: Regler (ohne Kanalbefehle 120..127), Pitchbend, Kanaldruck
+                if (m.type() == 0xB0 && m.data1 < 120)
+                    take.controls.push_back({at, m.data1, m.data2});
+                else if (m.type() == 0xE0)
+                    take.controls.push_back({at, static_cast<std::uint8_t>(kCtrlPitchBend),
+                                             static_cast<std::uint16_t>((m.data2 << 7) | m.data1)});
+                else if (m.type() == 0xD0)
+                    take.controls.push_back({at, static_cast<std::uint8_t>(kCtrlAftertouch), m.data1});
+                OpenNote& open = take.open[e.message.data1 & 0x7F];
                 if (e.message.isNoteOn() || e.message.isNoteOff()) {
                     if (open.open) {  // vorherige Note auf dieser Taste abschliessen
                         take.notes.push_back({open.start, std::max<std::int64_t>(1, at - open.start),

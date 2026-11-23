@@ -57,11 +57,29 @@ struct MidiNote {
     bool operator==(const MidiNote&) const = default;
 };
 
+// Controller in einem MIDI-Clip: Regler (CC), Kanaldruck oder Pitchbend.
+// Nummern wie bei VST3: 0..127 CC, 128 Aftertouch (Kanaldruck), 129 Pitchbend.
+constexpr int kCtrlAftertouch = 128;
+constexpr int kCtrlPitchBend = 129;
+constexpr int kCtrlCount = 130;
+constexpr int kPitchBendCenter = 8192;
+
+struct MidiControl {
+    std::int64_t position = 0;    // relativ zum Clip-Anfang, in Frames
+    std::uint8_t controller = 0;  // siehe oben
+    std::uint16_t value = 0;      // CC und Aftertouch 0..127, Pitchbend 0..16383 (Mitte 8192)
+    bool operator==(const MidiControl&) const = default;
+};
+
+// Groesster Wert eines Controllers.
+constexpr int controlMax(int controller) { return controller == kCtrlPitchBend ? 16383 : 127; }
+
 struct MidiClipModel {
     std::wstring name;
     std::int64_t start = 0;   // Position auf der Zeitachse, in Frames
     std::int64_t length = 0;
     std::vector<MidiNote> notes;
+    std::vector<MidiControl> controls;  // nach position geordnet
     bool operator==(const MidiClipModel&) const = default;
 };
 

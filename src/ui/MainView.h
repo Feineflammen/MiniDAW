@@ -72,6 +72,7 @@ public:
     void wheel(float x, float y, float notches, bool ctrl, bool shift = false);
     // Oeffnet den Noten-Editor fuer einen MIDI-Clip.
     void openPianoRoll(int track, int index) { pianoRoll_.open(track, index); }
+    void showPianoRollLane(int controller) { pianoRoll_.showLane(controller); }
     void key(Key k);
     // Rechnertastatur als Klaviatur: semitone 0 = C. Wirkt nur mit scharfgeschalteter Spur.
     void noteKey(int semitone, bool down);

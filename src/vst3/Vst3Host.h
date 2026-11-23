@@ -2,6 +2,11 @@
 
 #include "engine/AudioPlugin.h"
 #include "util/SpscQueue.h"
+#include "vst3/MidiLearn.h"
+
+#include <array>
+#include <atomic>
+#include <memory>
 
 #include "pluginterfaces/base/funknown.h"
 #include "pluginterfaces/base/ibstream.h"
@@ -144,6 +149,24 @@ public:
     // Rechnen entstanden sind, an die Bedienoberflaeche weiter.
     void idle();
 
+    // --- MIDI-Zuweisung durch den Benutzer (UI-Thread) ---
+    // Lernen: Der naechste Regler, der im Plugin-Fenster bewegt wird, und der
+    // naechste Controller vom MIDI-Eingang gehoeren dann zusammen.
+    void startLearning();
+    void stopLearning();
+    bool learning() const noexcept { return learning_.load(std::memory_order_relaxed); }
+    bool learnHasParam() const noexcept { return learnParam_.load(std::memory_order_relaxed) >= 0; }
+    bool learnHasController() const noexcept { return learnController_.load(std::memory_order_relaxed) >= 0; }
+    // Schliesst das Lernen ab, sobald beides da ist. true, wenn eine Zuweisung
+    // entstanden ist; sie steht dann in created.
+    bool finishLearning(midilearn::Assignment* created = nullptr);
+    std::vector<midilearn::Assignment> assignments() const;
+    void clearAssignments();
+    // Anzeigename eines Parameters (leer, wenn unbekannt).
+    std::wstring parameterName(Steinberg::Vst::ParamID id) const;
+    // Ob das Plugin selbst Controller zuordnet (VST3 IMidiMapping).
+    bool hasOwnMidiMapping() const noexcept { return hasMidiMap_.load(std::memory_order_relaxed); }
+
     // --- AudioPlugin (Audio-Thread) ---
     bool isInstrument() const noexcept override { return instrument_; }
     void process(float* left, float* right, int numFrames, const PluginMidiEvent* events, int numEvents,
@@ -192,9 +215,20 @@ private:
     Steinberg::IPtr<Steinberg::Vst::IConnectionPoint> componentConnection_;
     Steinberg::IPtr<Steinberg::Vst::IConnectionPoint> controllerConnection_;
 
-    // Zuordnung MIDI-Controller -> Parameter, je Kanal (VST3 kennt keine Controller-Ereignisse).
-    static constexpr int kControllers = 130;
-    std::vector<Steinberg::Vst::ParamID> midiMap_;  // 16 * kControllers Eintraege oder leer
+    // Zuordnung MIDI-Controller -> Parameter, je Kanal (VST3 kennt keine
+    // Controller-Ereignisse). Vom Plugin selbst (IMidiMapping); das Plugin darf
+    // sie jederzeit aendern, deshalb atomar.
+    static constexpr int kControllers = midilearn::kControllers;
+    void queryMidiMapping();
+    std::unique_ptr<std::atomic<Steinberg::Vst::ParamID>[]> midiMap_;  // 16 * kControllers
+    std::atomic<bool> hasMidiMap_{false};
+
+    // Vom Benutzer gelernte Zuweisungen: 0 = frei, sonst (1 << 63) | (Controller << 32) | Parameter.
+    // Nur der UI-Thread schreibt, der Audio-Thread liest.
+    std::array<std::atomic<std::uint64_t>, midilearn::kMaxAssignments> learned_{};
+    std::atomic<bool> learning_{false};
+    std::atomic<int> learnController_{-1};
+    std::atomic<std::int64_t> learnParam_{-1};
 
     // Audio-Thread
     std::vector<Bus> inputs_, outputs_;

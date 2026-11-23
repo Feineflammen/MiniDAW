@@ -10,7 +10,7 @@ namespace {
 
 constexpr float kHeaderH = 24.0f;
 constexpr float kKeysW = 52.0f;
-constexpr float kVelocityH = 46.0f;
+constexpr float kVelocityH = 64.0f;
 constexpr float kRowH = 10.0f;
 
 constexpr Color kPanel = rgb(0x24262B);
@@ -249,19 +249,32 @@ void PianoRoll::draw(Canvas& c, const Rect& panel) {
     }
     c.popClip();
 
-    // Anschlagstaerken
+    // Untere Spur: Anschlag oder Controller
     c.fill({panel.x, velocity_.y, panel.w, kVelocityH}, kOutside);
     c.line(panel.x, velocity_.y + 0.5f, panel.right(), velocity_.y + 0.5f, kLine);
-    c.text(L"Anschlag", {panel.x + 4.0f, velocity_.y, kKeysW, kVelocityH}, kTextDim, Font::Small);
-    c.pushClip(velocity_);
-    for (int i = 0; i < static_cast<int>(list.size()); ++i) {
-        const MidiNote& n = list[static_cast<std::size_t>(i)];
-        const float x = xOf(static_cast<double>(n.start));
-        if (x < velocity_.x - 4.0f || x > velocity_.right()) continue;
-        const float h = (kVelocityH - 6.0f) * static_cast<float>(n.velocity) / 127.0f;
-        c.fill({x, velocity_.bottom() - h, 4.0f, h}, i == selected_ ? rgb(0xFFFFFF) : kNote);
+    laneLabel_ = {panel.x, velocity_.y, kKeysW, kVelocityH};
+    {
+        const wchar_t* name = lane_ < 0 ? L"Anschlag" : controllerName(lane_);
+        const std::wstring title = name ? std::wstring(name) : L"CC " + std::to_wstring(lane_);
+        c.fillRounded({laneLabel_.x + 2.0f, laneLabel_.y + 4.0f, laneLabel_.w - 4.0f, laneLabel_.h - 8.0f}, 3.0f, kButton);
+        c.text(title, {laneLabel_.x + 4.0f, laneLabel_.y + 8.0f, laneLabel_.w - 8.0f, 18.0f}, kText, Font::Small, Align::Center);
+        const std::wstring sub = lane_ < 0 ? std::wstring(L"Noten") : lane_ < 128 ? L"CC " + std::to_wstring(lane_) : std::wstring(L"");
+        c.text(sub + L" \u25BE", {laneLabel_.x + 4.0f, laneLabel_.y + 26.0f, laneLabel_.w - 8.0f, 18.0f}, kTextDim,
+               Font::Small, Align::Center);
     }
-    c.popClip();
+    if (lane_ < 0) {
+        c.pushClip(velocity_);
+        for (int i = 0; i < static_cast<int>(list.size()); ++i) {
+            const MidiNote& n = list[static_cast<std::size_t>(i)];
+            const float x = xOf(static_cast<double>(n.start));
+            if (x < velocity_.x - 4.0f || x > velocity_.right()) continue;
+            const float h = (kVelocityH - 6.0f) * static_cast<float>(n.velocity) / 127.0f;
+            c.fill({x, velocity_.bottom() - h, 4.0f, h}, i == selected_ ? rgb(0xFFFFFF) : kNote);
+        }
+        c.popClip();
+    } else {
+        drawLane(c, midi);
+    }
 
     // Kopfzeile
     c.fill(header_, kHeader);
@@ -270,7 +283,8 @@ void PianoRoll::draw(Canvas& c, const Rect& panel) {
            {panel.x + 10.0f, panel.y, 280.0f, kHeaderH}, kText);
     c.fillRounded(divisionRect_, 3.0f, kButton);
     c.text(L"Raster 1/" + std::to_wstring(division_), divisionRect_, kText, Font::Small, Align::Center);
-    c.text(L"Klick: Note setzen   Ziehen: verschieben, am rechten Rand verlängern   Rechtsklick: löschen",
+    c.text(L"Klick: Note setzen   Ziehen: verschieben, am rechten Rand verlängern   Rechtsklick: löschen   "
+           L"Unten links: Anschlag oder Controller wählen",
            {divisionRect_.right() + 16.0f, panel.y, std::max(0.0f, closeRect_.x - divisionRect_.right() - 24.0f), kHeaderH},
            kTextDim, Font::Small);
     c.fillRounded(closeRect_, 3.0f, kButton);
@@ -294,6 +308,112 @@ void PianoRoll::applyVelocity(float x, float y) {
     changed_ = true;
 }
 
+// --- Controller-Spur ------------------------------------------------------------
+
+// Spuren zum Umschalten: Anschlag, die ueblichen Controller, dann alle weiteren,
+// die der Clip enthaelt.
+std::vector<int> PianoRoll::laneChoices() const {
+    std::vector<int> lanes = {-1, 1, kCtrlPitchBend, 64, 11, kCtrlAftertouch, 7, 10};
+    if (const MidiClipModel* c = clip()) {
+        std::vector<int> extra;
+        for (const MidiControl& control : c->controls)
+            if (std::find(lanes.begin(), lanes.end(), control.controller) == lanes.end() &&
+                std::find(extra.begin(), extra.end(), control.controller) == extra.end())
+                extra.push_back(control.controller);
+        std::sort(extra.begin(), extra.end());
+        lanes.insert(lanes.end(), extra.begin(), extra.end());
+    }
+    return lanes;
+}
+
+void PianoRoll::stepLane(int direction) {
+    const auto lanes = laneChoices();
+    auto it = std::find(lanes.begin(), lanes.end(), lane_);
+    int index = it == lanes.end() ? 0 : static_cast<int>(it - lanes.begin());
+    index = (index + direction + static_cast<int>(lanes.size())) % static_cast<int>(lanes.size());
+    lane_ = lanes[static_cast<std::size_t>(index)];
+}
+
+int PianoRoll::laneValueAt(float y) const {
+    const int max = controlMax(lane_);
+    const float t = (velocity_.bottom() - 3.0f - y) / (kVelocityH - 6.0f);
+    int value = static_cast<int>(std::lround(static_cast<float>(max) * std::clamp(t, 0.0f, 1.0f)));
+    if (lane_ >= 64 && lane_ <= 69) value = value >= 64 ? 127 : 0;  // Pedale: an oder aus
+    return value;
+}
+
+float PianoRoll::laneYOf(int value) const {
+    return velocity_.bottom() - 3.0f - (kVelocityH - 6.0f) * static_cast<float>(value) / static_cast<float>(controlMax(lane_));
+}
+
+void PianoRoll::drawLane(Canvas& c, const MidiClipModel& clip) {
+    const std::vector<MidiControl>& all = controlEditing_ ? controlEdit_ : clip.controls;
+    c.pushClip(velocity_);
+    if (lane_ == kCtrlPitchBend) {  // Mittellinie
+        const float mid = laneYOf(kPitchBendCenter);
+        c.line(velocity_.x, mid, velocity_.right(), mid, kGridBeat);
+    }
+    // Werte halten bis zum naechsten Ereignis: Treppe mit Flaeche darunter.
+    const float base = lane_ == kCtrlPitchBend ? laneYOf(kPitchBendCenter) : velocity_.bottom() - 3.0f;
+    int count = 0;
+    for (std::size_t i = 0; i < all.size(); ++i) {
+        if (all[i].controller != lane_) continue;
+        std::size_t next = i + 1;
+        while (next < all.size() && all[next].controller != lane_) ++next;
+        const double endFrame = next < all.size() ? static_cast<double>(all[next].position) : static_cast<double>(clip.length);
+        const float x0 = xOf(static_cast<double>(all[i].position)), x1 = xOf(endFrame);
+        const float y = laneYOf(all[i].value);
+        if (x1 >= velocity_.x && x0 <= velocity_.right()) {
+            c.fill({x0, std::min(y, base), std::max(1.0f, x1 - x0), std::fabs(base - y)}, rgb(0x4C9AFF, 0.25f));
+            c.line(x0, y, x1, y, kNote, 1.5f);
+            if (next < all.size()) c.line(x1, y, x1, laneYOf(all[next].value), kNote, 1.0f);
+            c.fill({x0 - 2.0f, y - 2.0f, 4.0f, 4.0f}, rgb(0xFFFFFF));
+        }
+        ++count;
+    }
+    if (count == 0)
+        c.text(L"Keine Daten: mit der Maus einzeichnen (rechts: löschen)", {velocity_.x + 8.0f, velocity_.y, velocity_.w, kVelocityH},
+               kTextDim, Font::Small);
+    c.popClip();
+}
+
+// Zeichnen: Werte dieses Controllers zwischen der letzten und der aktuellen
+// Mausposition ersetzen, mit Punkten im Abstand eines Viertels des Rasters.
+void PianoRoll::applyControl(float x, float y) {
+    const MidiClipModel* c = clip();
+    if (!c) return;
+    const std::int64_t step = std::max<std::int64_t>(1, gridStep() / 4);
+    const std::int64_t frame = std::clamp<std::int64_t>(
+        static_cast<std::int64_t>(std::floor(frameAt(x) / static_cast<double>(step))) * step, 0, std::max<std::int64_t>(0, c->length - 1));
+    const std::int64_t from = lastControlFrame_ < 0 ? frame : std::min(frame, lastControlFrame_);
+    const std::int64_t to = lastControlFrame_ < 0 ? frame : std::max(frame, lastControlFrame_);
+    const int lane = lane_;
+    controlEdit_.erase(std::remove_if(controlEdit_.begin(), controlEdit_.end(),
+                                      [&](const MidiControl& m) { return m.controller == lane && m.position >= from && m.position <= to; }),
+                       controlEdit_.end());
+    controlEdit_.push_back({frame, static_cast<std::uint8_t>(lane), static_cast<std::uint16_t>(laneValueAt(y))});
+    std::stable_sort(controlEdit_.begin(), controlEdit_.end(),
+                     [](const MidiControl& a, const MidiControl& b) { return a.position < b.position; });
+    lastControlFrame_ = frame;
+}
+
+// Loeschen: Punkte dieses Controllers bis 6 Pixel um die Maus.
+void PianoRoll::eraseControl(float x) {
+    const int lane = lane_;
+    controlEdit_.erase(std::remove_if(controlEdit_.begin(), controlEdit_.end(),
+                                      [&](const MidiControl& m) {
+                                          return m.controller == lane && std::fabs(xOf(static_cast<double>(m.position)) - x) <= 6.0f;
+                                      }),
+                       controlEdit_.end());
+}
+
+void PianoRoll::commitControls() {
+    if (!controlEditing_) return;
+    controlEditing_ = false;
+    controller_.updateMidiControls(track_, index_, controlEdit_);
+    lastControlFrame_ = -1;
+}
+
 void PianoRoll::mouseDown(float x, float y, bool rightButton) {
     if (!clip()) return;
 
@@ -306,6 +426,19 @@ void PianoRoll::mouseDown(float x, float y, bool rightButton) {
         return;
     }
 
+    if (laneLabel_.contains(x, y)) {
+        stepLane(rightButton ? -1 : 1);
+        return;
+    }
+    if (velocity_.contains(x, y) && lane_ >= 0) {
+        controlEdit_ = clip()->controls;
+        controlEditing_ = true;
+        lastControlFrame_ = -1;
+        drag_ = rightButton ? Drag::ControlErase : Drag::Control;
+        if (rightButton) eraseControl(x);
+        else applyControl(x, y);
+        return;
+    }
     if (velocity_.contains(x, y) && !rightButton) {
         beginEdit();
         drag_ = Drag::Velocity;
@@ -356,6 +489,8 @@ void PianoRoll::mouseDown(float x, float y, bool rightButton) {
 }
 
 void PianoRoll::mouseMove(float x, float y) {
+    if (drag_ == Drag::Control) { applyControl(x, y); return; }
+    if (drag_ == Drag::ControlErase) { eraseControl(x); return; }
     if (drag_ == Drag::None || !editing_) return;
     if (drag_ == Drag::Velocity) { applyVelocity(x, y); return; }
     if (selected_ < 0 || selected_ >= static_cast<int>(edit_.size())) return;
@@ -377,6 +512,12 @@ void PianoRoll::mouseMove(float x, float y) {
 }
 
 void PianoRoll::mouseUp(float x, float y) {
+    if (drag_ == Drag::Control || drag_ == Drag::ControlErase) {
+        mouseMove(x, y);
+        drag_ = Drag::None;
+        commitControls();
+        return;
+    }
     if (drag_ != Drag::None) mouseMove(x, y);
     drag_ = Drag::None;
     commit();

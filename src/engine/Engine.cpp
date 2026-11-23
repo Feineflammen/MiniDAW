@@ -667,6 +667,19 @@ int Engine::gatherMidi(std::size_t ti, int numFrames, std::int64_t blockMicros) 
         t.held = {};
     };
     const bool anyHeld = (t.held[0] | t.held[1]) != 0;
+    const auto sendControl = [&](int controller, int value) {
+        if (!add(0, controlMessage(controller, value))) return;
+        t.ctrl[static_cast<std::size_t>(controller)] = static_cast<std::int16_t>(value);
+    };
+    // Pedale, Modulation, Pitchbend: zurueck in Ruhe (beim Anhalten).
+    const auto restControllers = [&] {
+        for (int c = 0; c < 130; ++c) {
+            const int rest = controlRestValue(c);
+            const int now = t.ctrl[static_cast<std::size_t>(c)];
+            if (rest >= 0 && now >= 0 && now != rest) sendControl(c, rest);
+        }
+        t.ctrlAway = false;
+    };
 
     // Live-MIDI: nur fuer scharfgeschaltete MIDI-Spuren und nur, wenn der Kanal passt.
     if (t.armed && t.midiInput != kInputAudio) {
@@ -702,19 +715,44 @@ int Engine::gatherMidi(std::size_t ti, int numFrames, std::int64_t blockMicros) 
                 [](const MidiSequence::Event& e, std::int64_t pos) { return e.frame < pos; });
             t.seqIndex = static_cast<std::size_t>(it - events.begin());
             t.seqDirty = false;
+            // Controller nachfuehren: der letzte Wert vor der neuen Position gilt
+            // (z. B. Pedal gedrueckt, Modulationsrad oben). Was davor nichts mehr
+            // gilt, geht in Ruhe.
+            std::array<std::int16_t, 130> last = makeUnset();
+            for (std::size_t i = 0; i < t.seqIndex; ++i) {
+                const int c = controllerOf(events[i].message);
+                if (c >= 0) last[static_cast<std::size_t>(c)] = static_cast<std::int16_t>(controlValueOf(events[i].message));
+            }
+            t.ctrlAway = false;
+            for (int c = 0; c < 130; ++c) {
+                int want = last[static_cast<std::size_t>(c)];
+                if (want < 0 && t.ctrl[static_cast<std::size_t>(c)] >= 0) want = controlRestValue(c);
+                if (want >= 0 && want != t.ctrl[static_cast<std::size_t>(c)]) sendControl(c, want);
+                const int rest = controlRestValue(c);
+                if (rest >= 0 && t.ctrl[static_cast<std::size_t>(c)] >= 0 && t.ctrl[static_cast<std::size_t>(c)] != rest)
+                    t.ctrlAway = true;
+            }
         }
         const std::int64_t end = sourcePos + numFrames;
         while (t.seqIndex < events.size() && events[t.seqIndex].frame < end) {
             const MidiSequence::Event& e = events[t.seqIndex++];
             if (!add(static_cast<int>(e.frame - sourcePos), e.message)) continue;
+            if (const int c = controllerOf(e.message); c >= 0) {
+                const int value = controlValueOf(e.message);
+                t.ctrl[static_cast<std::size_t>(c)] = static_cast<std::int16_t>(value);
+                const int rest = controlRestValue(c);
+                if (rest >= 0 && value != rest) t.ctrlAway = true;
+                continue;
+            }
             const auto word = static_cast<std::size_t>(e.message.data1 >> 6);
             const std::uint64_t bit = std::uint64_t{1} << (e.message.data1 & 63);
             if (e.message.isNoteOn()) t.held[word] |= bit;
             else if (e.message.isNoteOff()) t.held[word] &= ~bit;
         }
         t.seqNextPos = end;
-    } else if (anyHeld) {
+    } else if (anyHeld || t.ctrlAway) {
         releaseHeld();  // Stopp oder keine Daten mehr
+        restControllers();
     }
     return count;
 }

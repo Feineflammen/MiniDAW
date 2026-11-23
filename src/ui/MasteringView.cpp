@@ -42,7 +42,7 @@ std::wstring valueText(int param, float value) {
     int decimals = 1;
     if (unit == L"Hz" || unit == L"%" || unit == L"ms") decimals = 0;
     std::wstring text = number(value, decimals);
-    if ((unit == L"dB") && value > 0.04f) text = L"+" + text;
+    if (unit == L"dB" && value > 0.04f && p.min < 0.0f) text = L"+" + text;
     return text + L" " + unit;
 }
 

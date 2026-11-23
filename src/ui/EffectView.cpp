@@ -47,7 +47,7 @@ std::wstring number(double value, int decimals) {
 
 std::wstring hzText(double hz) {
     if (hz >= 1000.0) return number(hz / 1000.0, hz >= 10000.0 ? 1 : 2) + L" kHz";
-    return number(hz, 0) + L" Hz";
+    return number(hz, hz < 10.0 ? 2 : hz < 100.0 ? 1 : 0) + L" Hz";
 }
 
 std::wstring valueText(const fx::ParamInfo& p, float value) {
@@ -59,7 +59,8 @@ std::wstring valueText(const fx::ParamInfo& p, float value) {
     if (unit == L"ms") return number(value, value < 10.0f ? 1 : 0) + L" ms";
     if (unit == L"s") return number(value, 1) + L" s";
     if (unit == L"%") return number(value, 0) + L" %";
-    if (unit == L"dB") return (value > 0.04f ? L"+" : L"") + number(value, 1) + L" dB";
+    // Plus nur bei Reglern, die in beide Richtungen gehen
+    if (unit == L"dB") return (value > 0.04f && p.min < 0.0f ? L"+" : L"") + number(value, 1) + L" dB";
     return number(value, 2);
 }
 

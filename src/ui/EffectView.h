@@ -32,7 +32,7 @@ private:
         std::vector<int> sliders;
         std::vector<int> checks;    // Haekchen unter den Reglern
     };
-    enum class Kind { Eq, Compressor, Reverb, Delay, Other };
+    enum class Kind { Eq, Compressor, Reverb, Delay, Gate, Chorus, Other };
     enum class HitKind { Slider, Toggle };
     struct Hit {
         Rect rect;
@@ -53,6 +53,8 @@ private:
     void drawCompressorGraph(Canvas& c, const Rect& area);
     void drawReverbGraph(Canvas& c, const Rect& area);
     void drawDelayGraph(Canvas& c, const Rect& area);
+    void drawGateGraph(Canvas& c, const Rect& area);
+    void drawChorusGraph(Canvas& c, const Rect& area);
     // EQ: Umrechnung Frequenz/Pegel <-> Grafik
     float freqToX(double hz) const;
     double xToFreq(float x) const;

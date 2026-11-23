@@ -5,8 +5,8 @@ C++20 ohne Fremdbibliotheken. Freie Software unter der GPLv3, kostenlos für all
 
 Was es kann: Aufnahme mehrerer Spuren gleichzeitig (WASAPI oder ASIO) mit
 gemessener Latenz, MIDI mit Noten-Editor und Metronom, VST3-Instrumente und
--Effekte, eingebaute Effekte (EQ, Kompressor, Hall, Echo und Mastering mit
-Limiter und Lautheitsmessung in LUFS),
+-Effekte, eingebaute Effekte (EQ, Kompressor, Hall, Echo, Gate, Chorus und
+Mastering mit Limiter und Lautheitsmessung in LUFS),
 Mischpult mit Bussen und Latenzausgleich, Automation von Lautstärke
 und Panorama, Rückgängig/Wiederholen, Projekte speichern und als WAV exportieren,
 MIDI-Dateien importieren und exportieren.
@@ -128,12 +128,14 @@ Mischpult: F3, Menü "Ansicht" oder der Knopf "Mixer" links über den Spuren. Je
 
 Busse sind für Hall, Delay oder eine gemeinsame Gruppe gedacht: Effekt auf den Bus, Sends der Spuren aufdrehen. Die Verzögerung der Plugins gleicht die DAW automatisch aus; "Plugin-Latenz" oben zeigt, um wie viel.
 
-Eingebaute Effekte: In der Effekt-Liste jedes FX-Platzes stehen oben EQ, Kompressor, Hall, Echo und Mastering, markiert mit "eingebaut". Sie brauchen keine Plugins, öffnen ein eigenes Fenster und werden mit dem Projekt gespeichert. Überall gilt: Regler ziehen (mit Umschalt fein), Mausrad, Doppelklick setzt zurück.
+Eingebaute Effekte: In der Effekt-Liste jedes FX-Platzes stehen oben EQ, Kompressor, Hall, Echo, Gate, Chorus und Mastering, markiert mit "eingebaut". Sie brauchen keine Plugins, öffnen ein eigenes Fenster und werden mit dem Projekt gespeichert. Überall gilt: Regler ziehen (mit Umschalt fein), Mausrad, Doppelklick setzt zurück.
 
 - EQ: Hochpass, Tiefen (Kuhschwanz), zwei Mitten mit Güte, Höhen (Kuhschwanz), Tiefpass und Ausgangspegel. In der Kurve lassen sich die Griffe ziehen (waagerecht Frequenz, senkrecht Pegel), das Mausrad auf einem Griff ändert die Güte, Doppelklick setzt das Band auf 0 dB. Hoch- und Tiefpass schalten sich beim Anfassen ein.
 - Kompressor: Schwelle, Verhältnis, Knie, Attack, Release, Aufholen (auf Wunsch automatisch) und Mischung für parallele Kompression. Das Fenster zeigt die Kennlinie, einen Punkt für den aktuellen Pegel und wie viel gerade abgesenkt wird.
 - Hall: Größe, Nachhall (Zeit bis −60 dB), Vorverzögerung, Höhen bis (Dämpfung), Tiefen weg bis, Breite und Mischung. Am besten auf einen Bus legen, Mischung auf 100 % und die Spuren über die Sends dazugeben.
 - Echo: im Takt (Notenwert vom 1/1 bis 1/16, auch punktiert und Triole, folgt dem Projekttempo) oder frei in Millisekunden, Rückkopplung, Ping-Pong zwischen links und rechts, Filter für die Wiederholungen (jede wird etwas dumpfer) und Mischung. Wechselt die Zeit, gleitet das Echo wie ein Bandecho.
+- Gate: schaltet leise Stellen stumm, etwa das Rauschen des Mikrofons in Gesangspausen. Es öffnet über der Schwelle und schließt erst, wenn der Pegel um die Hysterese darunter fällt und die Haltezeit vorbei ist. "Öffnen" und "Schließen" sind die Zeiten für die ganze Blende, "Absenkung" wie viel leiser es geschlossen wird (80 dB = stumm), "Erkennung ab" lässt Rumpeln unter dieser Frequenz das Gate nicht öffnen. Das Fenster zeigt Pegel, Schwelle und ob das Gate offen ist.
+- Chorus: zwei Stimmen je Seite mit langsam schwankender Verzögerung (Tempo, Tiefe, Verzögerung), rechts versetzt, so wird auch ein Mono-Signal breit. "Höhen bis" macht die Stimmen weicher; die Mischung hält die Lautstärke etwa gleich.
 
 Mastering, gedacht für den Master: Das Fenster zeigt die Stufen in Signalreihenfolge, jede mit eigenem Schalter: Eingang, Korrektur (Tiefenfilter, Mulm bei 320 Hz), Kompressor (Pegel wird automatisch ausgeglichen), Sättigung (doppelt überabgetastet, ändert die Lautstärke leiser Stellen nicht), Klang (Bass 110 Hz, Höhen 8 kHz), Stereo (Breite, "Bass mono" unter 120 Hz), Clipper und Limiter. Der Limiter schaut 5 ms voraus, senkt vor einer Spitze gleitend ab und erkennt auch Spitzen zwischen den Samples (True Peak, 8-fach interpoliert). "Lautheit" ist die Verstärkung vor Clipper und Limiter, "Grenze" der höchste erlaubte True Peak.
 

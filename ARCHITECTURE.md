@@ -241,7 +241,7 @@ liegen in `%APPDATA%\MiniDAW\einstellungen.txt`.
 
 ## Eingebaute Effekte
 
-- EQ, Kompressor, Hall, Echo und Mastering sind `AudioPlugin`s wie VST3-Plugins
+- EQ, Kompressor, Hall, Echo, Gate, Chorus und Mastering sind `AudioPlugin`s wie VST3-Plugins
   und belegen dieselben Plätze. Grundlage ist `engine/BuiltinEffect`: Die
   Parameter stehen in einer festen Tabelle (Schlüssel für die Projektdatei,
   Anzeige, Bereich, logarithmisch, Auswahlwerte). Die Oberfläche setzt sie
@@ -364,7 +364,8 @@ Windows-Code. Sie bilden die Bibliothek `dawcore`, die auch die Tests benutzen.
 | 12 | Lizenz (GPLv3), ASIO SDK, Programmsymbol, Ladebild, Über-Fenster | fertig, per Screenshot geprüft |
 | 13 | MIDI-Dateien importieren (Menü, Ziehen auf eine Spur) und exportieren (`model/MidiFile`) | Code und Offline-Tests fertig (auch mit zufällig beschädigten Dateien), Bedientest offen |
 | 14 | Eingebauter Mastering-Effekt (`engine/Mastering`, `ui/MasteringView`): Limiter mit True Peak, Lautheit nach BS.1770 | Code und Offline-Tests fertig (EBU Tech 3341, True Peak gegen 32-fache Referenz), Bedientest offen |
-| 15 | Eingebaute Effekte EQ, Kompressor, Hall, Echo (`engine/BuiltinEffect`, `engine/Effects`, `ui/EffectView`) | Code und Offline-Tests fertig (Frequenzgang, Kennlinie, Nachhallzeit, Echo-Zeiten), per Screenshot geprüft, Bedientest offen |
+| 15 | Eingebaute Effekte EQ, Kompressor, Hall, Echo (`engine/BuiltinEffect`, `engine/Effects`, `ui/EffectView`) | fertig; EQ-Kurve am Gerät bedient |
+| 16 | Gate und Chorus | Code und Offline-Tests fertig (Öffnen/Schließen mit Hysterese, Verzögerung, Breite, Pegel), Bedientest offen |
 
 Jeder Schritt gilt erst als fertig, wenn er auf echter Hardware läuft und
 ohne Knackser klingt.

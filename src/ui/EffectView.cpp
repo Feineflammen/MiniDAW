@@ -13,7 +13,9 @@ namespace ui {
 using namespace theme;
 using fx::CompressorEffect;
 using fx::DelayEffect;
+using fx::ChorusEffect;
 using fx::EqEffect;
+using fx::GateEffect;
 using fx::ReverbEffect;
 
 namespace {
@@ -105,6 +107,20 @@ EffectView::EffectView(fx::BuiltinEffect& effect) : fx_(effect) {
                      {L"Ausgabe", -1, {DelayEffect::kMix}, {}}};
         boxW = 150.0f;
         graphH_ = 130.0f;
+    } else if (id == "Gate") {
+        kind_ = Kind::Gate;
+        sections_ = {{L"Schwelle", -1, {GateEffect::kThreshold, GateEffect::kHysteresis}, {}},
+                     {L"Zeiten", -1, {GateEffect::kAttack, GateEffect::kHold, GateEffect::kRelease}, {}},
+                     {L"Wirkung", -1, {GateEffect::kRange, GateEffect::kDetectLowCut}, {}}};
+        boxW = 190.0f;
+        graphH_ = 110.0f;
+    } else if (id == "Chorus") {
+        kind_ = Kind::Chorus;
+        sections_ = {{L"Bewegung", -1, {ChorusEffect::kRate, ChorusEffect::kDepth}, {}},
+                     {L"Klang", -1, {ChorusEffect::kDelay, ChorusEffect::kHighCut}, {}},
+                     {L"Ausgabe", -1, {ChorusEffect::kWidth, ChorusEffect::kMix}, {}}};
+        boxW = 190.0f;
+        graphH_ = 110.0f;
     } else {
         std::vector<int> all;
         for (int i = 0; i < effect.paramCount(); ++i) all.push_back(i);
@@ -381,6 +397,66 @@ void EffectView::drawDelayGraph(Canvas& c, const Rect& area) {
            Align::Right);
 }
 
+// --- Gate: Pegel, Schwelle und Zustand -----------------------------------------------
+
+void EffectView::drawGateGraph(Canvas& c, const Rect& area) {
+    c.fillRounded(area, 6.0f, kPanel);
+    const auto& gate = static_cast<const GateEffect&>(fx_);
+    const Rect bar{area.x + 16.0f, area.y + 40.0f, area.w - 150.0f, 22.0f};
+    const auto toX = [&](double db) { return bar.x + static_cast<float>((std::clamp(db, -80.0, 0.0) + 80.0) / 80.0) * bar.w; };
+    c.fill(bar, kDark);
+    const double threshold = fx_.param(GateEffect::kThreshold), hysteresis = fx_.param(GateEffect::kHysteresis);
+    // Bereich der Hysterese: hier bleibt ein offenes Gate offen
+    c.fill({toX(threshold - hysteresis), bar.y, toX(threshold) - toX(threshold - hysteresis), bar.h}, rgb(0x4C9AFF, 0.25f));
+    const double input = gate.inputDb();
+    if (input > -80.0) c.fill({bar.x, bar.y + 6.0f, toX(input) - bar.x, bar.h - 12.0f}, gate.isOpen() ? kMeter : kTextDim);
+    c.line(toX(threshold), bar.y - 6.0f, toX(threshold), bar.bottom() + 6.0f, kText, 2.0f);
+    for (double db : {-60.0, -40.0, -20.0, 0.0})
+        c.text(number(db, 0), {toX(db) - 20.0f, bar.bottom() + 6.0f, 40.0f, 16.0f}, kTextDim, Font::Small, Align::Center);
+    c.text(L"Eingang", {bar.x, area.y + 12.0f, 200.0f, 18.0f}, kTextDim, Font::Small);
+    c.text(L"Schwelle " + number(threshold, 0) + L" dB", {toX(threshold) - 100.0f, area.y + 12.0f, 200.0f, 18.0f}, kText,
+           Font::Small, Align::Center);
+
+    // Zustand rechts
+    const float infoX = bar.right() + 24.0f, infoW = area.right() - infoX - 16.0f;
+    const bool open = gate.isOpen();
+    c.fillRounded({infoX, area.y + 16.0f, 14.0f, 14.0f}, 7.0f, open ? kMeter : kRecord);
+    c.text(open ? L"offen" : L"zu", {infoX + 22.0f, area.y + 12.0f, infoW - 22.0f, 22.0f}, kText);
+    const double gain = gate.gainDb();
+    c.text(L"Verstärkung", {infoX, area.y + 44.0f, infoW, 18.0f}, kTextDim, Font::Small);
+    c.text(gain <= -79.9 ? std::wstring(L"stumm") : number(gain, 1) + L" dB", {infoX, area.y + 62.0f, infoW, 18.0f}, kText,
+           Font::Small);
+}
+
+// --- Chorus: Verlauf der Verzoegerung links und rechts -------------------------------
+
+void EffectView::drawChorusGraph(Canvas& c, const Rect& area) {
+    c.fillRounded(area, 6.0f, kPanel);
+    const Rect g{area.x + 16.0f, area.y + 30.0f, area.w - 32.0f, area.h - 44.0f};
+    c.fill(g, kDark);
+    const double rate = fx_.param(ChorusEffect::kRate), depth = fx_.param(ChorusEffect::kDepth) * 0.01,
+                 width = fx_.param(ChorusEffect::kWidth) * 0.01;
+    c.text(L"Verzögerung schwankt " + number(fx_.param(ChorusEffect::kDelay), 0) + L" bis " +
+               number(fx_.param(ChorusEffect::kDelay) + depth * ChorusEffect::kMaxModulationMs, 1) + L" ms, einmal in " +
+               number(1.0 / rate, rate > 1.0 ? 2 : 1) + L" s",
+           {area.x + 16.0f, area.y + 6.0f, area.w - 32.0f, 20.0f}, kText, Font::Small);
+    c.text(L"blau links, gelb rechts", {area.x + 16.0f, area.y + 6.0f, area.w - 32.0f, 20.0f}, kTextDim, Font::Small,
+           Align::Right);
+    // Zwei Perioden, Ausschlag nach "Tiefe"
+    for (int ch = 0; ch < 2; ++ch) {
+        const double offset = ch == 0 ? 0.0 : width * 0.25;
+        float lastX = 0.0f, lastY = 0.0f;
+        for (int px = 0; px <= static_cast<int>(g.w); px += 3) {
+            const double p = 2.0 * static_cast<double>(px) / g.w + offset;
+            const float x = g.x + static_cast<float>(px);
+            const float y = g.y + g.h * 0.5f - static_cast<float>(std::sin(2.0 * 3.14159265358979 * p) * depth) * (g.h * 0.42f);
+            if (px > 0) c.line(lastX, lastY, x, y, ch == 0 ? kAccent : kSoloOn, 2.0f);
+            lastX = x;
+            lastY = y;
+        }
+    }
+}
+
 // --- Ganzes Feld -------------------------------------------------------------------
 
 void EffectView::draw(Canvas& c, float width, float height) {
@@ -395,6 +471,8 @@ void EffectView::draw(Canvas& c, float width, float height) {
         case Kind::Compressor: hint = L"Hält den Pegel gleichmäßig: Was über der Schwelle liegt, wird abgesenkt."; break;
         case Kind::Reverb: hint = L"Tipp: auf einen Bus legen, Mischung 100 %, Spuren über die Sends dazugeben."; break;
         case Kind::Delay: hint = L"Im Takt folgt das Echo dem Tempo des Projekts."; break;
+        case Kind::Gate: hint = L"Schaltet leise Stellen stumm, z. B. Rauschen des Mikrofons in Gesangspausen."; break;
+        case Kind::Chorus: hint = L"Macht Synths, Gitarren und Stimmen breiter und lebendiger."; break;
         case Kind::Other: break;
     }
     c.text(hint, {kMargin + 120.0f, 13.0f, width - kMargin * 2.0f - 120.0f, 22.0f}, kTextDim, Font::Small);
@@ -407,6 +485,8 @@ void EffectView::draw(Canvas& c, float width, float height) {
             case Kind::Compressor: drawCompressorGraph(c, area); break;
             case Kind::Reverb: drawReverbGraph(c, area); break;
             case Kind::Delay: drawDelayGraph(c, area); break;
+            case Kind::Gate: drawGateGraph(c, area); break;
+            case Kind::Chorus: drawChorusGraph(c, area); break;
             case Kind::Other: break;
         }
         y += graphH_ + kGap;

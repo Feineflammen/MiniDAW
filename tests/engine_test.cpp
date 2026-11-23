@@ -2967,7 +2967,7 @@ void testBuiltinEffects() {
     const double rate = 48000.0;
 
     // Liste und Fabrik: jede id liefert ihren Effekt, Einstellungen ueberstehen Speichern und Laden.
-    CHECK(builtinTypes().size() == 5);
+    CHECK(builtinTypes().size() == 7);
     for (const BuiltinType& type : builtinTypes()) {
         auto a = createBuiltin(type.id, rate);
         CHECK(a && std::string(a->id()) == type.id && !a->isInstrument());
@@ -3126,6 +3126,78 @@ void testBuiltinEffects() {
         for (std::size_t i = 23500; i < 24500; ++i) { l1 += std::fabs(pl[i]); r1 += std::fabs(pr[i]); }
         for (std::size_t i = 47500; i < 48500; ++i) { l2 += std::fabs(pl[i]); r2 += std::fabs(pr[i]); }
         CHECK(l1 > 10.0 * r1 && r2 > 10.0 * l2);  // erst links, dann rechts
+    }
+
+    // Gate: laut unveraendert durch, leise Pause praktisch stumm, Hysterese haelt offen.
+    {
+        GateEffect g(rate);
+        std::vector<float> l(96000), r(96000);
+        for (std::size_t i = 0; i < l.size(); ++i) {
+            const double a = i < 24000 ? 0.1 : (i < 48000 ? 0.0003 : 0.1);
+            l[i] = r[i] = static_cast<float>(a * std::sin(2.0 * 3.141592653589793 * 440.0 * static_cast<double>(i) / rate));
+        }
+        const auto in = l;
+        runEffect(g, l, r);
+        CHECK(std::fabs(rmsDb(l, 12000, 24000) - rmsDb(in, 12000, 24000)) < 0.01);
+        CHECK(rmsDb(l, 42000, 48000) < rmsDb(in, 42000, 48000) - 60.0);
+        CHECK(std::fabs(rmsDb(l, 60000, 72000) - rmsDb(in, 60000, 72000)) < 0.01);
+        CHECK(g.isOpen() && g.gainDb() > -0.01);
+
+        // -48 dB oeffnet (Schwelle -50), danach -52 dB bleibt offen (Hysterese 4 dB), -60 dB schliesst.
+        GateEffect h(rate);
+        const auto level = [](double db, int frames) { return sine(440.0, std::pow(10.0, db / 20.0), frames); };
+        std::vector<float> a = level(-48.0, 9600), b = a;
+        runEffect(h, a, b);
+        CHECK(h.isOpen());
+        a = level(-52.0, 48000);
+        b = a;
+        runEffect(h, a, b);
+        CHECK(h.isOpen());
+        a = level(-60.0, 48000);
+        b = a;
+        runEffect(h, a, b);
+        CHECK(!h.isOpen() && h.gainDb() < -60.0);
+    }
+
+    // Chorus: Mischung 0 ist trocken, ohne Tiefe nur verzoegert, Mono wird breit.
+    {
+        ChorusEffect dry(rate);
+        dry.setParam(ChorusEffect::kMix, 0.0f);
+        std::vector<float> l = sine(440.0, 0.5, 9600), r = l;
+        const auto before = l;
+        runEffect(dry, l, r);
+        double err = 0.0;
+        for (std::size_t i = 0; i < l.size(); ++i) err = std::max(err, std::fabs(static_cast<double>(l[i] - before[i])));
+        CHECK(err < 1e-6);
+
+        ChorusEffect still(rate);
+        still.setParam(ChorusEffect::kDepth, 0.0f);
+        still.setParam(ChorusEffect::kMix, 100.0f);
+        still.setParam(ChorusEffect::kDelay, 10.0f);
+        still.setParam(ChorusEffect::kHighCut, 20000.0f);
+        std::vector<float> p(9600, 0.0f), q(9600, 0.0f);
+        p[100] = q[100] = 1.0f;
+        runEffect(still, p, q);
+        std::size_t peak = 0;
+        for (std::size_t i = 0; i < p.size(); ++i)
+            if (std::fabs(p[i]) > std::fabs(p[peak])) peak = i;
+        CHECK(peak >= 100 + 479 && peak <= 100 + 481);  // 10 ms
+
+        // Rauschen (breitbandig, damit Kammfilter-Effekte sich ausmitteln)
+        ChorusEffect wide(rate);
+        std::uint32_t seed = 3;
+        l.assign(48000, 0.0f);
+        for (float& v : l) {
+            seed = seed * 1664525u + 1013904223u;
+            v = (static_cast<float>(seed >> 8) / 16777216.0f - 0.5f) * 0.5f;
+        }
+        const auto noise = l;
+        r = l;
+        runEffect(wide, l, r);
+        double diff = 0.0;
+        for (std::size_t i = 24000; i < 48000; ++i) diff += std::fabs(static_cast<double>(l[i] - r[i]));
+        CHECK(diff / 24000.0 > 0.01);
+        CHECK(std::fabs(rmsDb(l, 24000, 48000) - rmsDb(noise, 24000, 48000)) < 3.0);
     }
 }
 

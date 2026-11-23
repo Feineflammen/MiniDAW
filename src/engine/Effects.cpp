@@ -530,4 +530,165 @@ void DelayEffect::process(float* left, float* right, int numFrames, const Plugin
     }
 }
 
+// --- Gate ----------------------------------------------------------------------
+//
+// Oeffnet, wenn der Pegel die Schwelle uebersteigt, und schliesst erst, wenn er
+// um die Hysterese darunter faellt und die Haltezeit abgelaufen ist. Geschlossen
+// wird um "Absenkung" leiser (80 dB = praktisch stumm). Die Erkennung kann die
+// Tiefen ignorieren, damit Rumpeln das Gate nicht oeffnet.
+
+const std::array<ParamInfo, GateEffect::kCount> GateEffect::kParams{{
+    {"schwelle", L"Schwelle", kDb, -80.0f, 0.0f, -50.0f, false, false},
+    {"hysterese", L"Hysterese", kDb, 0.0f, 12.0f, 4.0f, false, false},
+    {"absenkung", L"Absenkung", kDb, 0.0f, 80.0f, 80.0f, false, false},
+    {"attack", L"Öffnen", kMs, 0.1f, 50.0f, 1.0f, false, true},
+    {"halten", L"Halten", kMs, 0.0f, 500.0f, 50.0f, false, false},
+    {"release", L"Schließen", kMs, 5.0f, 2000.0f, 150.0f, false, true},
+    {"erkennung_ab", L"Erkennung ab", kHz, 20.0f, 2000.0f, 20.0f, false, true},
+}};
+
+GateEffect::GateEffect(double sampleRate) : BuiltinEffect("Gate", L"Gate", kParams.data(), kCount, sampleRate) {}
+
+void GateEffect::process(float* left, float* right, int numFrames, const PluginMidiEvent*, int,
+                         const PluginTransport&) noexcept {
+    pullParams();
+    const double fs = sampleRate_;
+    if (detectAt_ != value(kDetectLowCut)) {
+        detectFilter_.highpass(fs, value(kDetectLowCut), 0.7071067811865476);
+        detectAt_ = value(kDetectLowCut);
+    }
+    const bool filterDetection = value(kDetectLowCut) > 21.0f;
+    const double openAt = dbToGain(value(kThreshold));
+    const double closeAt = dbToGain(value(kThreshold) - value(kHysteresis));
+    // Blende in dB: "Oeffnen" und "Schliessen" sind die Zeiten fuer den ganzen Weg.
+    const double range = value(kRange);
+    const double attackStep = range / std::max(1.0, fs * value(kAttack) * 0.001);
+    const double releaseStep = range / std::max(1.0, fs * value(kRelease) * 0.001);
+    const double envelopeRelease = std::exp(-1.0 / (fs * 0.010));  // Erkennung faellt in 10 ms
+    const auto hold = static_cast<std::int64_t>(value(kHold) * 0.001 * fs);
+    double maxInput = 0.0;
+
+    for (int i = 0; i < numFrames; ++i) {
+        float& l = left[i];
+        float& r = right[i];
+        const double dl = sanitize(l), dr = sanitize(r);
+        double detect = std::max(std::abs(dl), std::abs(dr));
+        if (filterDetection) detect = std::abs(detectFilter_.step(0, (dl + dr) * 0.5)) * 1.4142135623730951;
+        envelope_ = detect > envelope_ ? detect : envelopeRelease * envelope_ + (1.0 - envelopeRelease) * detect;
+        maxInput = std::max(maxInput, envelope_);
+
+        if (envelope_ >= openAt) {
+            gateOpen_ = true;
+            holdLeft_ = hold;
+        } else if (gateOpen_ && envelope_ < closeAt) {
+            if (holdLeft_ > 0) --holdLeft_;
+            else gateOpen_ = false;
+        }
+        if (gateOpen_) gainDb_ = std::min(0.0, gainDb_ + attackStep);
+        else gainDb_ = std::max(-range, gainDb_ - releaseStep);
+        // Bei voller Absenkung (80 dB) ganz stumm; Potenz nur rechnen, wenn sich etwas bewegt.
+        if (gainDb_ != lastGainDb_) {
+            gain_ = (range >= 79.9 && gainDb_ <= -79.9) ? 0.0 : dbToGain(gainDb_);
+            lastGainDb_ = gainDb_;
+        }
+        l = static_cast<float>(dl * gain_);
+        r = static_cast<float>(dr * gain_);
+    }
+    detectFilter_.flush();
+    if (envelope_ < 1e-30) envelope_ = 0.0;
+    input_.store(maxInput > 0.0 ? 20.0 * std::log10(maxInput) : -120.0, std::memory_order_relaxed);
+    gainOut_.store(gainDb_, std::memory_order_relaxed);
+    open_.store(gateOpen_, std::memory_order_relaxed);
+}
+
+// --- Chorus --------------------------------------------------------------------
+//
+// Zwei Stimmen je Kanal lesen das Signal mit langsam schwankender Verzoegerung
+// (Sinus, gegeneinander um eine halbe Periode versetzt). Rechts laeuft die
+// Modulation um "Breite" verschoben, so wird auch ein Mono-Signal breit.
+
+const std::array<ParamInfo, ChorusEffect::kCount> ChorusEffect::kParams{{
+    {"tempo", L"Tempo", kHz, 0.05f, 5.0f, 0.8f, false, true},
+    {"tiefe", L"Tiefe", kPercent, 0.0f, 100.0f, 50.0f, false, false},
+    {"verzoegerung", L"Verzögerung", kMs, 5.0f, 30.0f, 12.0f, false, false},
+    {"breite", L"Breite", kPercent, 0.0f, 100.0f, 100.0f, false, false},
+    {"hoehen_bis", L"Höhen bis", kHz, 2000.0f, 20000.0f, 12000.0f, false, true},
+    {"mischung", L"Mischung", kPercent, 0.0f, 100.0f, 50.0f, false, false},
+}};
+
+ChorusEffect::ChorusEffect(double sampleRate)
+    : BuiltinEffect("Chorus", L"Chorus", kParams.data(), kCount, sampleRate) {
+    const auto size = static_cast<std::size_t>((kMaxDelayMs + kMaxModulationMs + 2.0) * 0.001 * sampleRate_) + 8;
+    buffer_[0].assign(size, 0.0f);
+    buffer_[1].assign(size, 0.0f);
+}
+
+void ChorusEffect::process(float* left, float* right, int numFrames, const PluginMidiEvent*, int,
+                           const PluginTransport&) noexcept {
+    const double fs = sampleRate_;
+    if (pullParams()) {
+        delayMs_ = value(kDelay);
+        depth_ = value(kDepth) * 0.01;
+        width_ = value(kWidth) * 0.01;
+        mix_ = value(kMix) * 0.01;
+    }
+    if (highCutAt_ != value(kHighCut)) {
+        highCut_.lowpass(fs, value(kHighCut), 0.7071067811865476);
+        highCutAt_ = value(kHighCut);
+    }
+    const int size = static_cast<int>(buffer_[0].size());
+    const double phaseStep = value(kRate) / fs;
+    // Hermite-Interpolation (4 Punkte): sauberer als linear bei langsam wandernder Verzoegerung.
+    const auto readAt = [&](const std::vector<float>& b, double delay) {
+        double position = pos_ - delay;
+        while (position < 1.0) position += size;
+        const int i1 = static_cast<int>(position);
+        const double f = position - i1;
+        const auto at = [&](int i) { return static_cast<double>(b[static_cast<std::size_t>((i % size + size) % size)]); };
+        const double y0 = at(i1 - 1), y1 = at(i1), y2 = at(i1 + 1), y3 = at(i1 + 2);
+        const double c1 = 0.5 * (y2 - y0), c2 = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3, c3 = 0.5 * (y3 - y0) + 1.5 * (y1 - y2);
+        return ((c3 * f + c2) * f + c1) * f + y1;
+    };
+
+    for (int start = 0; start < numFrames; start += kChunk) {
+        const int frames = std::min(kChunk, numFrames - start);
+        const double k = smoothing(frames, fs, 0.05);
+        const double mixFrom = mix_;
+        glide(delayMs_, value(kDelay), k);
+        glide(depth_, value(kDepth) * 0.01, k);
+        glide(width_, value(kWidth) * 0.01, k);
+        glide(mix_, value(kMix) * 0.01, smoothing(frames, fs, 0.02));
+        const double base = delayMs_ * 0.001 * fs;
+        const double swing = depth_ * kMaxModulationMs * 0.001 * fs;
+        for (int n = 0; n < frames; ++n) {
+            const double mix = mixFrom + (mix_ - mixFrom) * static_cast<double>(n + 1) / frames;
+            float& outL = left[start + n];
+            float& outR = right[start + n];
+            const double dl = sanitize(outL), dr = sanitize(outR);
+            buffer_[0][static_cast<std::size_t>(pos_)] = static_cast<float>(dl);
+            buffer_[1][static_cast<std::size_t>(pos_)] = static_cast<float>(dr);
+
+            double wet[2];
+            for (int ch = 0; ch < 2; ++ch) {
+                const double offset = ch == 0 ? 0.0 : width_ * 0.25;  // bis zu einer Viertelperiode versetzt
+                double sum = 0.0;
+                for (int voice = 0; voice < 2; ++voice) {
+                    const double p = phase_ + offset + voice * 0.5;
+                    const double delay = base + swing * 0.5 * (1.0 + std::sin(2.0 * kPi * p));
+                    sum += readAt(buffer_[ch], delay);
+                }
+                wet[ch] = highCut_.step(ch, sum * 0.7071067811865476);  // zwei Stimmen, gleiche Leistung
+            }
+            phase_ += phaseStep;
+            if (phase_ >= 1.0) phase_ -= 1.0;
+            pos_ = pos_ + 1 == size ? 0 : pos_ + 1;
+            // Ueberblendung mit gleicher Leistung: bei 50 % bleibt die Lautstaerke etwa gleich.
+            const double dryGain = std::cos(mix * kPi * 0.5), wetGain = std::sin(mix * kPi * 0.5);
+            outL = static_cast<float>(dl * dryGain + wet[0] * wetGain);
+            outR = static_cast<float>(dr * dryGain + wet[1] * wetGain);
+        }
+        highCut_.flush();
+    }
+}
+
 }  // namespace fx

@@ -99,7 +99,7 @@ void BuiltinEffect::loadState(const std::vector<char>& state) {
 
 const std::vector<BuiltinType>& builtinTypes() {
     static const std::vector<BuiltinType> types{
-        {"EQ", L"EQ"}, {"Kompressor", L"Kompressor"}, {"Hall", L"Hall"}, {"Echo", L"Echo"}, {"Mastering", L"Mastering"},
+        {"EQ", L"EQ"}, {"Kompressor", L"Kompressor"}, {"Hall", L"Hall"}, {"Echo", L"Echo"}, {"Gate", L"Gate"}, {"Chorus", L"Chorus"}, {"Mastering", L"Mastering"},
     };
     return types;
 }
@@ -109,6 +109,8 @@ std::shared_ptr<BuiltinEffect> createBuiltin(const std::string& id, double sampl
     if (id == "Kompressor") return std::make_shared<CompressorEffect>(sampleRate);
     if (id == "Hall") return std::make_shared<ReverbEffect>(sampleRate);
     if (id == "Echo") return std::make_shared<DelayEffect>(sampleRate);
+    if (id == "Gate") return std::make_shared<GateEffect>(sampleRate);
+    if (id == "Chorus") return std::make_shared<ChorusEffect>(sampleRate);
     if (id == "Mastering") return std::make_shared<mastering::MasteringEffect>(sampleRate);
     return nullptr;
 }

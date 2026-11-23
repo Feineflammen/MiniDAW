@@ -107,6 +107,8 @@ int renderEffectScreenshot(const std::filesystem::path& output, const std::strin
         effect->setParam(fx::EqEffect::kHighGain, 4.0f);
     } else if (id == "Kompressor") {
         effect->setParam(fx::CompressorEffect::kThreshold, -24.0f);
+    } else if (id == "Gate") {
+        effect->setParam(fx::GateEffect::kThreshold, -30.0f);
     } else if (id == "Echo") {
         effect->setParam(fx::DelayEffect::kNote, 4.0f);  // 1/8 punktiert
         effect->setParam(fx::DelayEffect::kPingPong, 1.0f);
@@ -154,7 +156,7 @@ struct DemoPlugin final : AudioPlugin {
 
 // mode: leer = Spuren mit Plugin-Auswahl, "mixer" = Mischpult, "eingang" = Eingangsliste,
 // "auswahl" = Effekt-Auswahl am Master, "mastering", "eq", "kompressor", "hall",
-// "echo" = Fenster der eingebauten Effekte,
+// "echo", "gate", "chorus" = Fenster der eingebauten Effekte,
 // "ladebild" und "ueber" = Ladebild bzw. Fenster "Ueber MiniDAW".
 int runScreenshot(const std::filesystem::path& output, const std::wstring& mode) {
     if (mode == L"ladebild" || mode == L"ueber")
@@ -164,6 +166,8 @@ int runScreenshot(const std::filesystem::path& output, const std::wstring& mode)
     if (mode == L"kompressor") return renderEffectScreenshot(output, "Kompressor");
     if (mode == L"hall") return renderEffectScreenshot(output, "Hall");
     if (mode == L"echo") return renderEffectScreenshot(output, "Echo");
+    if (mode == L"gate") return renderEffectScreenshot(output, "Gate");
+    if (mode == L"chorus") return renderEffectScreenshot(output, "Chorus");
     constexpr int kRate = 44100;
     constexpr int kBlock = 512;
 

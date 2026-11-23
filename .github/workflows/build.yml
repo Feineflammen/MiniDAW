@@ -18,7 +18,7 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "Mixer-Screenshot fehlgeschlagen, Code $($p.ExitCode)" }
           $p = Start-Process -FilePath build\Release\minidaw.exe -ArgumentList '--screenshot','eingang.png','eingang' -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "Eingangs-Screenshot fehlgeschlagen, Code $($p.ExitCode)" }
-          foreach ($m in @('ladebild', 'ueber', 'mastering', 'auswahl', 'eq', 'kompressor', 'hall', 'echo')) {
+          foreach ($m in @('ladebild', 'ueber', 'mastering', 'auswahl', 'eq', 'kompressor', 'hall', 'echo', 'gate', 'chorus')) {
             $p = Start-Process -FilePath build\Release\minidaw.exe -ArgumentList '--screenshot',"$m.png",$m -Wait -PassThru
             if ($p.ExitCode -ne 0) { throw "Screenshot $m fehlgeschlagen, Code $($p.ExitCode)" }
           }
@@ -43,7 +43,7 @@ jobs:
           for ($i = 0; $i -lt $b.Length; $i += 200) { Write-Output ("MST:" + $b.Substring($i, [Math]::Min(200, $b.Length - $i))) }
           $b = [Convert]::ToBase64String([IO.File]::ReadAllBytes('auswahl.png'))
           for ($i = 0; $i -lt $b.Length; $i += 200) { Write-Output ("AUS:" + $b.Substring($i, [Math]::Min(200, $b.Length - $i))) }
-          foreach ($pair in @(@('eq', 'FEQ'), @('kompressor', 'FKO'), @('hall', 'FHA'), @('echo', 'FEC'))) {
+          foreach ($pair in @(@('eq', 'FEQ'), @('kompressor', 'FKO'), @('hall', 'FHA'), @('echo', 'FEC'), @('gate', 'FGA'), @('chorus', 'FCH'))) {
             $b = [Convert]::ToBase64String([IO.File]::ReadAllBytes("$($pair[0]).png"))
             for ($i = 0; $i -lt $b.Length; $i += 200) { Write-Output ("$($pair[1]):" + $b.Substring($i, [Math]::Min(200, $b.Length - $i))) }
           }
@@ -78,3 +78,5 @@ jobs:
             kompressor.png
             hall.png
             echo.png
+            gate.png
+            chorus.png

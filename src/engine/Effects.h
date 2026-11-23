@@ -4,9 +4,10 @@
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <vector>
 
-// Eingebaute Effekte fuer die Kanaele: EQ, Kompressor, Hall, Echo.
+// Eingebaute Effekte fuer die Kanaele: EQ, Kompressor, Hall, Echo, Gate, Chorus.
 namespace fx {
 
 // Biquad (zweipoliges Filter) fuer zwei Kanaele, Koeffizienten nach dem RBJ-Kochbuch.
@@ -149,6 +150,57 @@ private:
     Biquad lowCut_, highCut_;
     double lowCutAt_ = -1, highCutAt_ = -1, mix_ = 0.3, feedback_ = 0.35, pingPong_ = 0;
     std::atomic<double> tempo_{120.0};
+};
+
+// --- Gate --------------------------------------------------------------------
+
+class GateEffect final : public BuiltinEffect {
+public:
+    enum Param : int { kThreshold, kHysteresis, kRange, kAttack, kHold, kRelease, kDetectLowCut, kCount };
+    static const std::array<ParamInfo, kCount> kParams;
+
+    explicit GateEffect(double sampleRate);
+    void process(float* left, float* right, int numFrames, const PluginMidiEvent*, int,
+                 const PluginTransport&) noexcept override;
+
+    // Messwerte fuer das Fenster
+    double inputDb() const noexcept { return input_.load(std::memory_order_relaxed); }
+    double gainDb() const noexcept { return gainOut_.load(std::memory_order_relaxed); }
+    bool isOpen() const noexcept { return open_.load(std::memory_order_relaxed); }
+
+private:
+    Biquad detectFilter_;
+    double detectAt_ = -1;
+    double envelope_ = 0;  // Pegel der Erkennung (linear)
+    double gainDb_ = -80;  // aktuelle Verstaerkung in dB (startet geschlossen)
+    double lastGainDb_ = 1;  // gibt es nicht: erzwingt die erste Berechnung
+    double gain_ = 0;
+    bool gateOpen_ = false;
+    std::int64_t holdLeft_ = 0;
+    std::atomic<double> input_{-120}, gainOut_{0};
+    std::atomic<bool> open_{false};
+};
+
+// --- Chorus ------------------------------------------------------------------
+
+class ChorusEffect final : public BuiltinEffect {
+public:
+    enum Param : int { kRate, kDepth, kDelay, kWidth, kHighCut, kMix, kCount };
+    static const std::array<ParamInfo, kCount> kParams;
+    static constexpr double kMaxModulationMs = 5.0;
+    static constexpr double kMaxDelayMs = 30.0;
+
+    explicit ChorusEffect(double sampleRate);
+    void process(float* left, float* right, int numFrames, const PluginMidiEvent*, int,
+                 const PluginTransport&) noexcept override;
+
+private:
+    std::vector<float> buffer_[2];
+    int pos_ = 0;
+    double phase_ = 0;  // Phase der Modulation (0..1)
+    double delayMs_ = 12, depth_ = 0.5, width_ = 1, mix_ = 0.5;
+    Biquad highCut_;
+    double highCutAt_ = -1;
 };
 
 }  // namespace fx

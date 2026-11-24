@@ -20,6 +20,12 @@ std::uint32_t readU32(const unsigned char* p) {
     return v;
 }
 
+std::uint64_t readU64(const unsigned char* p) {
+    std::uint64_t v;
+    std::memcpy(&v, p, sizeof v);
+    return v;
+}
+
 void putU16(std::vector<unsigned char>& out, std::uint16_t v) {
     out.push_back(static_cast<unsigned char>(v & 0xFF));
     out.push_back(static_cast<unsigned char>(v >> 8));
@@ -27,6 +33,10 @@ void putU16(std::vector<unsigned char>& out, std::uint16_t v) {
 
 void putU32(std::vector<unsigned char>& out, std::uint32_t v) {
     for (int i = 0; i < 4; ++i) out.push_back(static_cast<unsigned char>((v >> (8 * i)) & 0xFF));
+}
+
+void putU64(std::vector<unsigned char>& out, std::uint64_t v) {
+    for (int i = 0; i < 8; ++i) out.push_back(static_cast<unsigned char>((v >> (8 * i)) & 0xFF));
 }
 
 constexpr std::uint16_t kTagPcm = 1;
@@ -46,7 +56,8 @@ std::shared_ptr<WavFile> WavFile::open(const std::filesystem::path& path, std::s
 
     unsigned char header[12];
     wav->file_.read(reinterpret_cast<char*>(header), sizeof header);
-    if (!wav->file_ || std::memcmp(header, "RIFF", 4) != 0 || std::memcmp(header + 8, "WAVE", 4) != 0) {
+    const bool rf64 = wav->file_ && std::memcmp(header, "RF64", 4) == 0;
+    if (!wav->file_ || (std::memcmp(header, "RIFF", 4) != 0 && !rf64) || std::memcmp(header + 8, "WAVE", 4) != 0) {
         error = "Keine WAV-Datei (RIFF/WAVE-Kennung fehlt)";
         return nullptr;
     }
@@ -54,6 +65,7 @@ std::shared_ptr<WavFile> WavFile::open(const std::filesystem::path& path, std::s
     bool haveFormat = false;
     bool haveData = false;
     std::int64_t dataSize = 0;
+    std::int64_t ds64Data = -1;  // RF64: echte Laenge des Datenabschnitts
     std::int64_t pos = 12;
 
     while (pos + 8 <= fileSize) {
@@ -64,7 +76,11 @@ std::shared_ptr<WavFile> WavFile::open(const std::filesystem::path& path, std::s
         const std::int64_t size = readU32(chunk + 4);
         const std::int64_t body = pos + 8;
 
-        if (std::memcmp(chunk, "fmt ", 4) == 0) {
+        if (std::memcmp(chunk, "ds64", 4) == 0 && size >= 16) {
+            unsigned char ds[16];
+            wav->file_.read(reinterpret_cast<char*>(ds), sizeof ds);
+            if (wav->file_) ds64Data = static_cast<std::int64_t>(readU64(ds + 8));
+        } else if (std::memcmp(chunk, "fmt ", 4) == 0) {
             unsigned char fmt[40] = {};
             const auto toRead = static_cast<std::streamsize>(std::min<std::int64_t>(size, 40));
             wav->file_.read(reinterpret_cast<char*>(fmt), toRead);
@@ -92,12 +108,18 @@ std::shared_ptr<WavFile> WavFile::open(const std::filesystem::path& path, std::s
             haveFormat = true;
         } else if (std::memcmp(chunk, "data", 4) == 0) {
             wav->dataOffset_ = body;
+            std::int64_t claimed = size;
+            if (rf64 && size == 0xFFFFFFFF && ds64Data >= 0) claimed = ds64Data;
+            // Laenge 0: Die Aufnahme wurde nicht sauber beendet (Absturz, Stromausfall),
+            // der Kopf traegt noch den Anfangswert. Dann gilt alles bis zum Dateiende.
+            if (claimed == 0) claimed = fileSize - body;
             // Manche Programme schreiben eine falsche Laenge, deshalb an der Dateigroesse begrenzen.
-            dataSize = std::min<std::int64_t>(size, fileSize - body);
+            dataSize = std::min<std::int64_t>(claimed, fileSize - body);
             haveData = true;
         }
 
         if (haveFormat && haveData) break;
+        if (std::memcmp(chunk, "data", 4) == 0 && dataSize >= 0xFFFFFFFFll - 8) break;  // dahinter nichts lesbares
         pos = body + size + (size & 1);  // Abschnitte sind auf gerade Laengen aufgefuellt
     }
 
@@ -189,12 +211,20 @@ void encodeSamples(const float* samples, std::int64_t count, WavFormat format, s
     }
 }
 
+// Kopf: RIFF, ein JUNK-Platzhalter (wird bei mehr als 4 GB zum ds64-Abschnitt
+// von RF64, EBU Tech 3306), fmt und data. Der Datenabschnitt beginnt bei kHeaderBytes.
+constexpr std::int64_t kJunkBytes = 8 + 28;
+constexpr std::int64_t kHeaderBytes = 12 + kJunkBytes + 8 + 16 + 8;
+
 std::vector<unsigned char> wavHeader(int channels, int sampleRate, WavFormat format, std::int64_t dataSize) {
     const int bytes = bytesPerSample(format);
     std::vector<unsigned char> head;
     head.insert(head.end(), {'R', 'I', 'F', 'F'});
-    putU32(head, static_cast<std::uint32_t>(36 + dataSize));
-    head.insert(head.end(), {'W', 'A', 'V', 'E', 'f', 'm', 't', ' '});
+    putU32(head, static_cast<std::uint32_t>(kHeaderBytes - 8 + dataSize));
+    head.insert(head.end(), {'W', 'A', 'V', 'E', 'J', 'U', 'N', 'K'});
+    putU32(head, 28);
+    head.insert(head.end(), 28, 0);
+    head.insert(head.end(), {'f', 'm', 't', ' '});
     putU32(head, 16);
     putU16(head, format == WavFormat::Float32 ? kTagFloat : kTagPcm);
     putU16(head, static_cast<std::uint16_t>(channels));
@@ -240,16 +270,33 @@ bool WavWriter::write(const float* interleaved, std::int64_t frames) {
 
 bool WavWriter::finish() {
     if (!out_.is_open()) return false;
-    const std::int64_t dataSize =
-        std::min<std::int64_t>(frames_ * channels_ * bytesPerSample(format_), 0xFFFFFFFFll - 36);
-    std::vector<unsigned char> size;
-    putU32(size, static_cast<std::uint32_t>(36 + dataSize));
-    out_.seekp(4);
-    out_.write(reinterpret_cast<const char*>(size.data()), 4);
-    size.clear();
-    putU32(size, static_cast<std::uint32_t>(dataSize));
-    out_.seekp(40);
-    out_.write(reinterpret_cast<const char*>(size.data()), 4);
+    const std::int64_t dataSize = frames_ * channels_ * bytesPerSample(format_);
+    const std::int64_t riffSize = kHeaderBytes - 8 + dataSize + (dataSize & 1);
+    if (dataSize & 1) out_.put(0);  // Abschnitte haben gerade Laengen
+    std::vector<unsigned char> bytes;
+    if (riffSize <= riffLimit) {
+        putU32(bytes, static_cast<std::uint32_t>(riffSize));
+        out_.seekp(4);
+        out_.write(reinterpret_cast<const char*>(bytes.data()), 4);
+        bytes.clear();
+        putU32(bytes, static_cast<std::uint32_t>(dataSize));
+    } else {
+        // Groesser als 4 GB: RF64. Die 32-Bit-Felder zeigen auf ds64.
+        bytes.insert(bytes.end(), {'R', 'F', '6', '4'});
+        putU32(bytes, 0xFFFFFFFF);
+        bytes.insert(bytes.end(), {'W', 'A', 'V', 'E', 'd', 's', '6', '4'});
+        putU32(bytes, 28);
+        putU64(bytes, static_cast<std::uint64_t>(riffSize));
+        putU64(bytes, static_cast<std::uint64_t>(dataSize));
+        putU64(bytes, static_cast<std::uint64_t>(frames_));
+        putU32(bytes, 0);  // keine Tabelle
+        out_.seekp(0);
+        out_.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        bytes.clear();
+        putU32(bytes, 0xFFFFFFFF);
+    }
+    out_.seekp(kHeaderBytes - 4);
+    out_.write(reinterpret_cast<const char*>(bytes.data()), 4);
     out_.flush();
     const bool ok = static_cast<bool>(out_);
     out_.close();
@@ -260,10 +307,6 @@ bool WavWriter::finish() {
 bool writeWav(const std::filesystem::path& path, const float* interleaved, std::int64_t frames,
               int channels, int sampleRate, WavFormat format, std::string& error) {
     if (frames < 0 || channels < 1 || sampleRate < 1) { error = "Ungueltige Parameter"; return false; }
-    if (frames * channels * bytesPerSample(format) > 0xFFFFFFFFll - 44) {
-        error = "Datei waere groesser als 4 GB";
-        return false;
-    }
     WavWriter writer;
     if (!writer.open(path, channels, sampleRate, error, format)) return false;
     constexpr std::int64_t kChunkFrames = 8192;

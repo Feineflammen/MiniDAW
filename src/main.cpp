@@ -8,6 +8,7 @@
 #include "audio/AsioDevice.h"
 #include "audio/WasapiDevice.h"
 #include "disk/DiskThread.h"
+#include "disk/Resampler.h"
 #include "disk/WavFile.h"
 #include "engine/Engine.h"
 #include "engine/LatencyProbe.h"
@@ -17,6 +18,7 @@
 #include "midi/MidiInput.h"
 #include "midi/MidiOutput.h"
 #include "model/ProjectController.h"
+#include "model/ProjectFile.h"
 #include "ui/MainView.h"
 #include "ui/MainWindow.h"
 #include "ui/EffectView.h"
@@ -29,6 +31,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -305,6 +308,7 @@ struct Settings {
     bool noInput = false;
     bool asio = false;        // ASIO statt WASAPI
     std::wstring asioDriver;  // Name des ASIO-Treibers
+    double asioRate = 0.0;    // gewaehlte Samplerate, 0 = wie im Treiber
     // Aufnahme-Latenz (Zusatz in ms) je Kombination aus Wiedergabe- und Aufnahmegeraet.
     std::map<std::wstring, int> latencyByDevice;
 };
@@ -315,16 +319,19 @@ struct AudioChoice {
     std::wstring asioDriver;
     std::wstring output, input;  // WASAPI-Kennungen, leer = Windows-Standard
     bool noInput = false;
+    double rate = 0.0;           // ASIO: gewuenschte Samplerate, 0 = wie im Treiber
 };
 
 AudioChoice choiceFrom(const Settings& settings) {
-    return {settings.asio, settings.asioDriver, settings.audioOutput, settings.audioInput, settings.noInput};
+    return {settings.asio, settings.asioDriver, settings.audioOutput, settings.audioInput, settings.noInput,
+            settings.asioRate};
 }
 
 void storeChoice(Settings& settings, const AudioChoice& choice) {
     settings.asio = choice.asio;
     if (choice.asio) {
         settings.asioDriver = choice.asioDriver;
+        settings.asioRate = choice.rate;
     } else {
         settings.audioOutput = choice.output;
         settings.audioInput = choice.input;
@@ -336,7 +343,7 @@ void storeChoice(Settings& settings, const AudioChoice& choice) {
 std::unique_ptr<AudioDevice> openAudio(const AudioChoice& choice, HWND window, std::string& error) {
     if (choice.asio) {
         auto device = std::make_unique<AsioDevice>();
-        if (device->open(choice.asioDriver, window, error)) return device;
+        if (device->open(choice.asioDriver, window, error, choice.rate)) return device;
         return nullptr;
     }
     auto device = std::make_unique<WasapiDevice>();
@@ -363,6 +370,7 @@ Settings loadSettings() {
         else if (key == "kein_eingang") settings.noInput = value == "1";
         else if (key == "audio_art") settings.asio = value == "asio";
         else if (key == "asio_treiber") settings.asioDriver = fromUtf8(value);
+        else if (key == "asio_samplerate") settings.asioRate = std::strtod(value.c_str(), nullptr);
         else if (key == "latenz") {
             // latenz=<ms> <Geraeteschluessel>
             const auto space = value.find(' ');
@@ -385,7 +393,8 @@ void saveSettings(const Settings& settings) {
         << "audio_eingang=" << toUtf8(settings.audioInput) << "\n"
         << "kein_eingang=" << (settings.noInput ? 1 : 0) << "\n"
         << "audio_art=" << (settings.asio ? "asio" : "wasapi") << "\n"
-        << "asio_treiber=" << toUtf8(settings.asioDriver) << "\n";
+        << "asio_treiber=" << toUtf8(settings.asioDriver) << "\n"
+        << "asio_samplerate=" << static_cast<long long>(settings.asioRate) << "\n";
     for (const auto& [key, ms] : settings.latencyByDevice) out << "latenz=" << ms << ' ' << toUtf8(key) << "\n";
 }
 
@@ -393,8 +402,40 @@ void saveSettings(const Settings& settings) {
 const wchar_t* const kProjectFilter = L"MiniDAW-Projekt (*.mdaw)\0*.mdaw\0Alle Dateien (*.*)\0*.*\0";
 const wchar_t* const kMidiFilter = L"MIDI-Datei (*.mid, *.midi, *.kar, *.rmi)\0*.mid;*.midi;*.kar;*.rmi\0Alle Dateien (*.*)\0*.*\0";
 const wchar_t* const kMidiSaveFilter = L"MIDI-Datei (*.mid)\0*.mid\0";
-const wchar_t* const kExportFilter =
-    L"WAV, 24 Bit (*.wav)\0*.wav\0WAV, 16 Bit (*.wav)\0*.wav\0WAV, 32 Bit Float (*.wav)\0*.wav\0";
+// Auswahl im Export-Dialog: Format und Samplerate der Datei (0 = wie das Projekt).
+struct ExportOption {
+    std::wstring label;
+    WavFormat format;
+    int rate;
+};
+
+std::vector<ExportOption> exportOptions(int projectRate) {
+    std::vector<ExportOption> options{
+        {L"WAV, 24 Bit (*.wav)", WavFormat::Pcm24, 0},
+        {L"WAV, 16 Bit (*.wav)", WavFormat::Pcm16, 0},
+        {L"WAV, 32 Bit Float (*.wav)", WavFormat::Float32, 0},
+    };
+    // Andere Raten werden hochwertig umgerechnet.
+    if (projectRate != 44100) {
+        options.push_back({L"WAV, 16 Bit, 44,1 kHz \u2013 CD (*.wav)", WavFormat::Pcm16, 44100});
+        options.push_back({L"WAV, 24 Bit, 44,1 kHz (*.wav)", WavFormat::Pcm24, 44100});
+    }
+    if (projectRate != 48000) options.push_back({L"WAV, 24 Bit, 48 kHz (*.wav)", WavFormat::Pcm24, 48000});
+    return options;
+}
+
+// Filtertext fuer den Dateidialog: Paare aus Beschriftung und Muster, je mit \0.
+std::wstring exportFilter(const std::vector<ExportOption>& options) {
+    std::wstring filter;
+    for (const ExportOption& option : options) {
+        filter += option.label;
+        filter.push_back(L'\0');
+        filter += L"*.wav";
+        filter.push_back(L'\0');
+    }
+    filter.push_back(L'\0');
+    return filter;
+}
 
 // Zahl mit einer Nachkommastelle und deutschem Komma.
 std::wstring decimal(double value) {
@@ -458,6 +499,8 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
     PWSTR documents = nullptr;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &documents)) && documents) {
         controller.setRecordingFolder(std::filesystem::path(documents) / L"MiniDAW" / L"Aufnahmen");
+        // Kopien von Audiodateien mit anderer Samplerate
+        controller.setConversionFolder(std::filesystem::path(documents) / L"MiniDAW" / L"Umgerechnet");
     }
     if (documents) CoTaskMemFree(documents);
 
@@ -548,17 +591,15 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
         if (answer == IDYES) return save();
         return answer == IDNO;
     };
-    const auto openProject = [&](const std::filesystem::path& path) {
-        std::string message;
-        if (!controller.loadProject(path, message)) {
-            MessageBoxW(window.hwnd(), (L"\u00D6ffnen fehlgeschlagen.\n\n" + fromUtf8(message)).c_str(), L"MiniDAW",
-                        MB_OK | MB_ICONERROR);
-            return;
-        }
-        view.projectReplaced();
-        if (!message.empty())
-            MessageBoxW(window.hwnd(), fromUtf8(message).c_str(), L"MiniDAW", MB_OK | MB_ICONWARNING);
-    };
+    // Fortschritt beim Umrechnen von Audiodateien in der Titelleiste.
+    controller.setConversionProgress([&](const std::wstring& name, double fraction) {
+        wchar_t title[160];
+        std::swprintf(title, 160, L"Rechne um \u2026 %ls %d %%", name.c_str(), static_cast<int>(fraction * 100.0));
+        window.setTitle(title);
+        shownTitle.clear();
+        MSG peek;  // haelt das Fenster fuer Windows "ansprechbar"
+        PeekMessageW(&peek, nullptr, 0, 0, PM_NOREMOVE);
+    });
     // --- Latenzmessung ---
     std::unique_ptr<LatencyProbe> probe;
     std::chrono::steady_clock::time_point probeStarted;
@@ -646,6 +687,7 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
     // --- Audiogeraete waehlen ---
     std::vector<AudioEndpoint> menuOutputs, menuInputs;
     std::vector<std::wstring> menuAsio;
+    std::vector<double> menuRates;
     window.onAudioMenu = [&](HMENU menu) {
         while (GetMenuItemCount(menu) > 0) DeleteMenu(menu, 0, MF_BYPOSITION);
         menuOutputs = WasapiDevice::endpoints(false);
@@ -677,22 +719,46 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
         AppendMenuW(menu, MF_STRING | (device->hasControlPanel() ? 0 : MF_GRAYED), ui::kAudioAsioPanel,
                     L"ASIO-Einstellungen …");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        menuRates = device->supportedRates();
+        if (menuRates.size() > 20) menuRates.resize(20);
+        if (menuRates.empty()) {
+            const std::wstring text = L"Samplerate: " + std::to_wstring(static_cast<int>(device->sampleRate() + 0.5)) +
+                                      L" Hz (" + (current.asio ? L"vom Treiber" : L"Windows-Einstellung") + L")";
+            AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, text.c_str());
+        } else {
+            AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"Samplerate (ASIO)");
+            for (std::size_t i = 0; i < menuRates.size(); ++i) {
+                wchar_t text[32];
+                std::swprintf(text, 32, L"%.1f kHz", menuRates[i] / 1000.0);
+                std::wstring label = text;
+                for (auto& c : label)
+                    if (c == L'.') c = L',';
+                if (label.size() > 6 && label.compare(label.size() - 6, 6, L",0 kHz") == 0)
+                    label.replace(label.size() - 6, 2, L"");  // 48,0 -> 48
+                AppendMenuW(menu, MF_STRING | (std::fabs(menuRates[i] - device->sampleRate()) < 0.5 ? MF_CHECKED : 0),
+                            ui::kAudioRateBase + i, label.c_str());
+            }
+        }
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, ui::kToolsMeasureLatency, L"Latenz messen …");
     };
 
     // Wechselt das Geraet im laufenden Betrieb: anhalten, altes schliessen (ein
     // ASIO-Treiber darf nur einmal offen sein), neues oeffnen, Plugins bei Bedarf
     // neu laden, weiterlaufen. Schlaegt das Oeffnen fehl, bleibt es beim alten.
-    const auto switchAudio = [&](const AudioChoice& wanted) {
+    // Aendert sich die Samplerate, wird das Projekt umgerechnet; true, wenn
+    // dazu schon eine Meldung angezeigt wurde.
+    const auto switchAudio = [&](const AudioChoice& wanted) -> bool {
         if (controller.isRecording()) {
             view.showMessage(L"Während einer Aufnahme lässt sich das Gerät nicht wechseln.");
-            return;
+            return true;
         }
         if (probe) {
             view.showMessage(L"Erst die Latenzmessung abwarten.");
-            return;
+            return true;
         }
         const double oldRate = device->sampleRate();
+        const std::int64_t oldPosition = engine->position();
         const AudioChoice previous = current;
         if (oldRate > 0.0) settings.latencyByDevice[device->settingsKey()] = controller.recordOffsetMs();
 
@@ -706,6 +772,7 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
         device = openAudio(wanted, window.hwnd(), openError);
         if (device) {
             current = wanted;
+            if (current.asio) current.rate = device->sampleRate();  // was der Treiber wirklich macht
             storeChoice(settings, current);
         } else {
             std::string ignored;
@@ -723,8 +790,11 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
                         L"MiniDAW", MB_OK | MB_ICONWARNING);
         }
 
+        bool reported = false;
         if (device->sampleRate() > 0.0) {
-            controller.setSampleRate(device->sampleRate());
+            const double rate = device->sampleRate();
+            const bool rateChanged = oldRate > 0.0 && std::fabs(rate - oldRate) > 0.5;
+            if (!rateChanged) controller.setSampleRate(rate);
             controller.setInputChannels(device->inputChannels());
             controller.setRecordOffsetMs(latencyFor(*device));
             engine->setOutputLatencyFrames(device->outputLatencyFrames());
@@ -732,13 +802,51 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
             disk.start(*engine);
             std::string startError;
             if (!device->start(*engine, startError)) showError("Audio-Start fehlgeschlagen: " + startError);
-            if (lostPlugins > 0)
+            if (rateChanged) {
+                // Positionen, Noten, Automation und Audiodateien auf die neue Rate bringen.
+                std::string rateMessage;
+                controller.changeSampleRate(rate, rateMessage);
+                engine->locate(Resampler::convertPosition(oldPosition, oldRate, rate));
+                view.sampleRateChanged(oldRate, rate);
+                view.showMessage(fromUtf8(rateMessage) + L".");
+                reported = true;
+            }
+            if (lostPlugins > 0) {
                 view.showMessage(std::to_wstring(lostPlugins) + L" Plugin(s) ließen sich mit dem neuen Gerät nicht laden.");
-            else if (oldRate > 0.0 && std::fabs(device->sampleRate() - oldRate) > 0.5)
-                view.showMessage(L"Achtung: Samplerate jetzt " + std::to_wstring(static_cast<int>(device->sampleRate())) +
-                                 L" Hz. Vorhandene Clips stimmen zeitlich nicht mehr.");
+                reported = true;
+            }
         }
         view.setDeviceInfo(describeDevice());
+        updateTitle();
+        return reported;
+    };
+
+    // Projekt oeffnen. Laeuft ASIO und kann der Treiber die Rate des Projekts,
+    // wird er vorher darauf gestellt; dann muss nichts umgerechnet werden.
+    const auto openProject = [&](const std::filesystem::path& path) {
+        SavedProject peek;
+        std::string message;
+        if (current.asio && readProjectFile(path, peek, message) && peek.sampleRate > 0.0 &&
+            std::fabs(peek.sampleRate - device->sampleRate()) > 0.5 && !controller.isRecording() && !probe) {
+            const auto rates = device->supportedRates();
+            if (std::any_of(rates.begin(), rates.end(), [&](double r) { return std::fabs(r - peek.sampleRate) < 0.5; })) {
+                controller.newProject();  // das alte Projekt nicht erst umrechnen
+                view.projectReplaced();
+                AudioChoice wanted = current;
+                wanted.rate = peek.sampleRate;
+                switchAudio(wanted);
+            }
+        }
+        message.clear();
+        if (!controller.loadProject(path, message)) {
+            MessageBoxW(window.hwnd(), (L"\u00D6ffnen fehlgeschlagen.\n\n" + fromUtf8(message)).c_str(), L"MiniDAW",
+                        MB_OK | MB_ICONERROR);
+            return;
+        }
+        view.projectReplaced();
+        updateTitle();
+        if (!message.empty())
+            MessageBoxW(window.hwnd(), fromUtf8(message).c_str(), L"MiniDAW", MB_OK | MB_ICONINFORMATION);
     };
 
     const auto exportWav = [&] {
@@ -757,13 +865,16 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
         }
         const std::wstring suggestion =
             (controller.projectPath().empty() ? std::wstring(L"Export") : controller.projectPath().stem().wstring()) + L".wav";
+        const auto rate = static_cast<int>(device->sampleRate() + 0.5);
+        const auto options = exportOptions(rate);
+        const std::wstring filter = exportFilter(options);
         int filterIndex = 1;
-        const auto path = ui::askSaveFile(window.hwnd(), L"Als WAV exportieren", kExportFilter, L"wav", suggestion, &filterIndex);
+        const auto path = ui::askSaveFile(window.hwnd(), L"Als WAV exportieren", filter.c_str(), L"wav", suggestion, &filterIndex);
         if (path.empty()) return;
-        const WavFormat format = filterIndex == 2 ? WavFormat::Pcm16 : filterIndex == 3 ? WavFormat::Float32 : WavFormat::Pcm24;
+        const ExportOption& option = options[static_cast<std::size_t>(std::clamp<int>(filterIndex, 1, static_cast<int>(options.size())) - 1)];
+        const WavFormat format = option.format;
 
         // Zwei Sekunden anhaengen, damit Hall und ausklingende Noten nicht abgeschnitten werden.
-        const auto rate = static_cast<int>(device->sampleRate() + 0.5);
         const std::int64_t frames = content + 2 * static_cast<std::int64_t>(rate);
 
         // Audiogeraet und Disk-Thread anhalten: Solange exportiert wird, treibt
@@ -783,7 +894,8 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
                                           MSG peek;  // haelt das Fenster fuer Windows "ansprechbar"
                                           PeekMessageW(&peek, nullptr, 0, 0, PM_NOREMOVE);
                                           return true;
-                                      });
+                                      },
+                                      option.rate);
         shownTitle.clear();
 
         Sleep(30);  // der MIDI-Thread verwirft noch, was beim Export angefallen ist
@@ -794,7 +906,9 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
         if (!device->start(*engine, startError))
             showError("Das Audiogeraet liess sich nach dem Export nicht wieder starten: " + startError);
 
-        if (ok) view.showMessage(L"Exportiert: " + path.filename().wstring());
+        if (ok)
+            view.showMessage(L"Exportiert: " + path.filename().wstring() +
+                             (option.rate > 0 ? L" (umgerechnet auf " + std::to_wstring(option.rate) + L" Hz)" : L""));
         else MessageBoxW(window.hwnd(), (L"Export fehlgeschlagen.\n\n" + fromUtf8(message)).c_str(), L"MiniDAW",
                          MB_OK | MB_ICONERROR);
     };
@@ -843,6 +957,12 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
             switchAudio(asio);
             return;
         }
+        if (command >= ui::kAudioRateBase && command < ui::kAudioRateBase + static_cast<int>(menuRates.size())) {
+            AudioChoice wanted = current;
+            wanted.rate = menuRates[static_cast<std::size_t>(command - ui::kAudioRateBase)];
+            if (std::fabs(wanted.rate - device->sampleRate()) > 0.5) switchAudio(wanted);
+            return;
+        }
         if (command == ui::kAudioAsioPanel) {
             device->showControlPanel();  // aendert der Benutzer etwas, meldet der Treiber das per Reset
             return;
@@ -887,8 +1007,10 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
         // Der ASIO-Treiber will neu gestartet werden (Puffer oder Samplerate im
         // Treiberfenster geaendert). Waehrend einer Aufnahme wird damit gewartet.
         if (device->resetRequested() && !controller.isRecording() && !probe) {
-            switchAudio(current);
-            view.showMessage(L"Audiotreiber neu gestartet: " + std::to_wstring(device->bufferFrames()) + L" Samples Puffer.");
+            AudioChoice again = current;
+            again.rate = 0.0;  // die Rate nehmen, die im Treiberfenster eingestellt wurde
+            if (!switchAudio(again))
+                view.showMessage(L"Audiotreiber neu gestartet: " + std::to_wstring(device->bufferFrames()) + L" Samples Puffer.");
         }
     };
     splash.setStatus(L"\u00D6ffne Fenster \u2026");

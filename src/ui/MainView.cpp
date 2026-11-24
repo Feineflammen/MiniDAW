@@ -306,6 +306,15 @@ void MainView::projectReplaced() {
     viewStart_ = 0.0;
 }
 
+void MainView::sampleRateChanged(double from, double to) {
+    if (from <= 0.0 || to <= 0.0) return;
+    const double factor = to / from;
+    viewStart_ *= factor;
+    framesPerPixel_ = std::clamp(framesPerPixel_ * factor, 8.0, 16384.0);
+    pianoRoll_.sampleRateChanged(factor);
+    drag_ = Drag::None;
+}
+
 void MainView::togglePlay() {
     if (engine_.isPlaying()) engine_.stop();
     else engine_.play();

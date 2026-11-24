@@ -17,7 +17,7 @@
 //   UI-Thread     done(), ...        erfaehrt, wann die Datei fertig ist
 class RecordSink {
 public:
-    static constexpr std::size_t kCapacity = std::size_t{1} << 17;  // Frames im Ringpuffer
+    static constexpr std::size_t kCapacity = std::size_t{1} << 19;  // Frames im Ringpuffer: 2,7 s bei 192 kHz
 
     static std::shared_ptr<RecordSink> create(const std::filesystem::path& path, int channels,
                                               int sampleRate, std::string& error);

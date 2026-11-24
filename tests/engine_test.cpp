@@ -3,6 +3,7 @@
 #include "audio/AsioFormat.h"
 #include "engine/FaderCurve.h"
 #include "disk/DiskThread.h"
+#include "disk/Resampler.h"
 #include "disk/WavFile.h"
 #include "engine/Engine.h"
 #include "engine/OfflineRender.h"
@@ -455,7 +456,7 @@ void testUnderrunRecovery() {
 
     // Der Disk-Thread "haengt": so lange spielen, bis der Puffer leer ist.
     bool allValid = true;
-    for (int b = 0; b < 270; ++b, pos += kBlock)
+    for (int b = 0; b < static_cast<int>(TrackStream::kCapacity / kBlock) + 14; ++b, pos += kBlock)
         if (!renderAndCompare(rig, pos, expected).valid) allValid = false;
     CHECK(allValid);
     CHECK(rig.engine->underruns() > 0);
@@ -1894,7 +1895,7 @@ void testProjectFile() {
         std::stringstream text;
         text << in.rdbuf();
         const std::string content = text.str();
-        CHECK(content.rfind("MiniDAW-Projekt 2", 0) == 0);
+        CHECK(content.rfind("MiniDAW-Projekt 3", 0) == 0);
         CHECK(content.find(" Audio/drin.wav\n") != std::string::npos);
         CHECK(content.find("tempo 97") != std::string::npos);
         CHECK(content.find("slotzustand 0 01020300ff") != std::string::npos);
@@ -3145,6 +3146,290 @@ void testMastering() {
 
 // --- Eingebaute Effekte (EQ, Kompressor, Hall, Echo) -------------------------
 
+// --- Samplerates: Umrechnen, RF64, Projekt bei Ratenwechsel ---------------------
+
+namespace rate_test {
+
+std::vector<float> sineWave(double hz, double amp, std::int64_t frames, double rate, int channels = 1) {
+    std::vector<float> v(static_cast<std::size_t>(frames * channels));
+    for (std::int64_t i = 0; i < frames; ++i)
+        for (int c = 0; c < channels; ++c)
+            v[static_cast<std::size_t>(i * channels + c)] =
+                static_cast<float>(amp * std::sin(2.0 * 3.141592653589793 * hz * static_cast<double>(i) / rate + c));
+    return v;
+}
+
+// Fehler (dB) gegen den idealen Sinus bei der Zielrate, Raender ausgenommen.
+double sineError(const std::vector<float>& y, double hz, double amp, double rate) {
+    double e = 0.0, s = 0.0;
+    const auto from = static_cast<std::size_t>(rate / 8), to = y.size() - static_cast<std::size_t>(rate / 8);
+    for (std::size_t i = from; i < to; ++i) {
+        const double ideal = amp * std::sin(2.0 * 3.141592653589793 * hz * static_cast<double>(i) / rate);
+        e += (y[i] - ideal) * (y[i] - ideal);
+        s += ideal * ideal;
+    }
+    return 10.0 * std::log10(std::max(e, 1e-30) / s);
+}
+
+}  // namespace rate_test
+
+void testSampleRates() {
+    using namespace rate_test;
+
+    // 1. Resampler: genau, Laenge stimmt, Stueckelung egal, oberhalb Nyquist still.
+    {
+        const int pairs[][2] = {{44100, 48000}, {48000, 44100}, {96000, 44100}, {44100, 192000}, {44056, 48000}};
+        for (const auto& pair : pairs) {
+            const std::int64_t n = pair[0];  // eine Sekunde
+            const auto x = sineWave(1000.0, 0.5, n, pair[0]);
+            std::vector<float> whole, pieces;
+            Resampler a(pair[0], pair[1], 1);
+            a.push(x.data(), n, whole);
+            a.finish(whole);
+            Resampler b(pair[0], pair[1], 1);
+            for (std::int64_t pos = 0, step = 100; pos < n; pos += step, step = step * 3 % 5000 + 7)
+                b.push(x.data() + pos, std::min(step, n - pos), pieces);
+            b.finish(pieces);
+            CHECK(static_cast<std::int64_t>(whole.size()) == Resampler::outputFrames(n, pair[0], pair[1]));
+            CHECK(whole == pieces);
+            CHECK(sineError(whole, 1000.0, 0.5, pair[1]) < -100.0);
+        }
+        // 19 kHz bleibt (Durchlass bis 20,3 kHz), 23 kHz verschwindet beim Herunterrechnen auf 44,1.
+        std::vector<float> y;
+        Resampler r(48000, 44100, 1);
+        const auto high = sineWave(19000.0, 0.5, 48000, 48000.0);
+        r.push(high.data(), 48000, y);
+        r.finish(y);
+        CHECK(sineError(y, 19000.0, 0.5, 44100.0) < -90.0);
+        y.clear();
+        Resampler r2(96000, 44100, 1);
+        const auto alias = sineWave(23000.0, 0.5, 96000, 96000.0);
+        r2.push(alias.data(), 96000, y);
+        r2.finish(y);
+        double energy = 0.0;
+        for (std::size_t i = 4410; i + 4410 < y.size(); ++i) energy += static_cast<double>(y[i]) * y[i];
+        CHECK(10.0 * std::log10(energy / static_cast<double>(y.size() - 8820) + 1e-30) < 10.0 * std::log10(0.125) - 90.0);
+        CHECK(Resampler::convertPosition(44100, 44100.0, 48000.0) == 48000);
+        CHECK(Resampler::convertPosition(123, 48000.0, 48000.0) == 123);
+    }
+
+    // 2. WAV: ueber der Grenze RF64, und eine nicht beendete Datei ist lesbar.
+    {
+        const auto path = tempFile("minidaw_test_rf64.wav");
+        const auto data = sineWave(440.0, 0.5, 5000, 48000.0, 2);
+        std::string error;
+        WavWriter::riffLimit = 4000;  // statt 4 GB
+        CHECK(writeWav(path, data.data(), 5000, 2, 48000, WavFormat::Float32, error));
+        WavWriter::riffLimit = 0xFFFFFFFFll;
+        {
+            std::ifstream in(path, std::ios::binary);
+            char head[16] = {};
+            in.read(head, 16);
+            CHECK(std::string(head, 4) == "RF64" && std::string(head + 12, 4) == "ds64");
+        }
+        auto wav = WavFile::open(path, error);
+        CHECK(wav && wav->frames() == 5000 && wav->sampleRate() == 48000);
+        if (wav) {
+            std::vector<float> back(10000);
+            wav->readStereo(0, 5000, back.data());
+            CHECK(back == data);
+        }
+        wav.reset();
+        // Normale Datei: RIFF mit JUNK-Platzhalter, andere Programme ueberspringen ihn.
+        CHECK(writeWav(path, data.data(), 5000, 2, 48000, WavFormat::Pcm24, error));
+        {
+            std::ifstream in(path, std::ios::binary);
+            char head[16] = {};
+            in.read(head, 16);
+            CHECK(std::string(head, 4) == "RIFF" && std::string(head + 12, 4) == "JUNK");
+        }
+        // Abgebrochene Aufnahme: Kopf nie nachgetragen (Laenge 0).
+        {
+            WavWriter writer;
+            CHECK(writer.open(path, 2, 48000, error));
+            CHECK(writer.write(data.data(), 5000));
+            // kein finish(): Datei wie nach einem Absturz
+        }
+        wav = WavFile::open(path, error);
+        CHECK(wav && wav->frames() == 5000);
+        wav.reset();
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+    }
+
+    // 3. Datei umrechnen: Kanalzahl bleibt, Laenge passt, Inhalt stimmt.
+    const auto folder = tempFile("minidaw_test_raten");
+    std::error_code ec;
+    std::filesystem::remove_all(folder, ec);
+    std::filesystem::create_directories(folder / "Quellen", ec);
+    const auto source441 = folder / "Quellen" / "Gitarre.wav";
+    {
+        const auto mono = sineWave(1000.0, 0.5, 44100, 44100.0);
+        std::string error;
+        CHECK(writeWav(source441, mono.data(), 44100, 1, 44100, WavFormat::Float32, error));
+        const auto converted = folder / "gitarre48.wav";
+        CHECK(resampleWavFile(source441, converted, 48000, error));
+        auto wav = WavFile::open(converted, error);
+        CHECK(wav && wav->channels() == 1 && wav->sampleRate() == 48000 && wav->frames() == 48000);
+        if (wav) {
+            std::vector<float> stereo(96000), left(48000);
+            wav->readStereo(0, 48000, stereo.data());
+            for (std::size_t i = 0; i < left.size(); ++i) left[i] = stereo[2 * i];
+            CHECK(sineError(left, 1000.0, 0.5, 48000.0) < -100.0);
+        }
+    }
+
+    // 4. Projekt: Import mit anderer Rate, Speichern, Laden bei anderer Rate, Ratenwechsel.
+    const auto project = folder / "Song.mdaw";
+    std::string message;
+    {
+        Rig rig;
+        ProjectController controller(*rig.engine);
+        controller.setSampleRate(48000.0);
+        controller.setConversionFolder(folder / "Umgerechnet");
+        CHECK(controller.addClip(0, source441, 4800, message));
+        CHECK(message.find("umgerechnet") != std::string::npos);
+        const ClipModel& clip = controller.project().tracks[0].clips[0];
+        CHECK(clip.file->wav->sampleRate() == 48000 && clip.length == 48000);
+        CHECK(clip.file->original == source441);
+        // Zweiter Import derselben Datei rechnet nicht neu, sondern nimmt die Kopie.
+        const auto copyTime = std::filesystem::last_write_time(clip.file->path, ec);
+        CHECK(controller.addClip(1, source441, 0, message));
+        CHECK(controller.project().tracks[1].clips[0].file->path == clip.file->path);
+        CHECK(std::filesystem::last_write_time(clip.file->path, ec) == copyTime);
+
+        MidiClipModel midi;
+        midi.start = 96000;
+        midi.length = 48000;
+        midi.notes = {{24000, 4800, 60, 100}};
+        midi.controls = {{12000, 1, 64}};
+        CHECK(controller.addMidiClip(2, midi) == 0);
+        controller.addAutomationPoint(0, kAutoVolume, 48000, 0.5f);
+        CHECK(controller.trimClip(0, 0, 4800 + 4800, 4800 + 24000));  // Ausschnitt 0,1 s .. 0,5 s der Datei
+        CHECK(controller.saveProject(project, message));
+        std::ifstream in(project);
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(text.find("Gitarre.wav") != std::string::npos);    // das Original, nicht die Kopie
+        CHECK(text.find("Umgerechnet") == std::string::npos);
+
+        // Ratenwechsel 48 -> 96 kHz: alles doppelt so weit, Datei neu aus dem Original.
+        CHECK(controller.changeSampleRate(96000.0, message));
+        const Project& p = controller.project();
+        CHECK(p.tracks[0].clips[0].start == 19200 && p.tracks[0].clips[0].offset == 9600 &&
+              p.tracks[0].clips[0].length == 38400);
+        CHECK(p.tracks[0].clips[0].file->wav->sampleRate() == 96000);
+        CHECK(p.tracks[0].clips[0].file->original == source441);
+        CHECK(p.tracks[2].midiClips[0].start == 192000 && p.tracks[2].midiClips[0].length == 96000);
+        CHECK(p.tracks[2].midiClips[0].notes[0].start == 48000 && p.tracks[2].midiClips[0].notes[0].length == 9600);
+        CHECK(p.tracks[2].midiClips[0].controls[0].position == 24000);
+        CHECK(p.tracks[0].automation[kAutoVolume][0].position == 96000);
+        // Rueckgaengig ist mit umgerechnet.
+        CHECK(controller.undo());
+        CHECK(controller.project().tracks[0].clips[0].start == 9600 && controller.project().tracks[0].clips[0].length == 96000);
+        CHECK(controller.redo());
+        // Auf 44,1 kHz: das Original selbst, keine Kopie mehr.
+        CHECK(controller.changeSampleRate(44100.0, message));
+        const ClipModel& back = controller.project().tracks[0].clips[0];
+        CHECK(back.file->path == source441 && back.file->original.empty());
+        CHECK(back.start == 8820 && back.offset == 4410 && back.length == 17640);
+        while (!controller.peaksIdle()) std::this_thread::yield();
+    }
+    {
+        // Laden bei 44,1 kHz (gespeichert mit 48 kHz): Original ohne Umrechnung, Positionen umgerechnet.
+        Rig rig;
+        ProjectController controller(*rig.engine);
+        controller.setSampleRate(44100.0);
+        controller.setConversionFolder(folder / "Umgerechnet");
+        CHECK(controller.loadProject(project, message));
+        CHECK(message.find("44100") != std::string::npos);
+        const ClipModel& clip = controller.project().tracks[0].clips[0];
+        CHECK(clip.file->path == source441 && clip.file->wav->sampleRate() == 44100);
+        CHECK(clip.start == 8820 && clip.offset == 4410 && clip.length == 17640);
+        CHECK(controller.project().tracks[2].midiClips[0].start == 88200);
+        CHECK(controller.project().tracks[2].midiClips[0].notes[0].start == 22050);
+        CHECK(controller.project().tracks[0].automation[kAutoVolume][0].position == 44100);
+        while (!controller.peaksIdle()) std::this_thread::yield();
+    }
+    {
+        // Alte Projektdatei (Version 2) mit einer 44,1-kHz-Datei in einem 48-kHz-Projekt:
+        // offset und length zaehlten damals in Frames der Datei.
+        std::ofstream out(project, std::ios::trunc);
+        out << "MiniDAW-Projekt 2\nsamplerate 48000\ntempo 120\nmaster 1\nspur 1\n  name Alt\n"
+            << "  audioclip 48000 4410 22050 Quellen/Gitarre.wav\n";
+        out.close();
+        Rig rig;
+        ProjectController controller(*rig.engine);
+        controller.setSampleRate(48000.0);
+        controller.setConversionFolder(folder / "Umgerechnet");
+        CHECK(controller.loadProject(project, message));
+        const ClipModel& clip = controller.project().tracks[0].clips[0];
+        CHECK(clip.start == 48000 && clip.offset == 4800 && clip.length == 24000);
+        CHECK(clip.file->wav->sampleRate() == 48000);
+        while (!controller.peaksIdle()) std::this_thread::yield();
+    }
+
+    // 5. Export mit anderer Rate und 16 Bit mit Dither.
+    {
+        Rig rig;
+        ProjectController controller(*rig.engine);
+        controller.setSampleRate(48000.0);
+        controller.setConversionFolder(folder / "Umgerechnet");
+        CHECK(controller.addClip(0, source441, 0, message));
+        const auto exportPath = folder / "export.wav";
+        CHECK(renderOffline(*rig.engine, 48000, kBlock, 48000, exportPath, WavFormat::Float32, message, {}, 44100));
+        auto wav = WavFile::open(exportPath, message);
+        CHECK(wav && wav->sampleRate() == 44100 && wav->frames() == 44100);
+        if (wav) {
+            std::vector<float> stereo(2 * 44100), left(44100);
+            wav->readStereo(0, 44100, stereo.data());
+            for (std::size_t i = 0; i < left.size(); ++i) left[i] = stereo[2 * i];
+            const float g = std::cos(0.7853981633974483f);  // Mitte im Panorama
+            for (float& v : left) v /= g;
+            // Zweimal umgerechnet (Import 44,1 -> 48, Export 48 -> 44,1) und immer noch sauber.
+            CHECK(sineError(left, 1000.0, 0.5, 44100.0) < -90.0);
+        }
+        wav.reset();
+        // 16 Bit: Stille wird zu leisem Rauschen von hoechstens 1 LSB.
+        controller.removeClip(0, 0);
+        CHECK(renderOffline(*rig.engine, 4800, kBlock, 48000, exportPath, WavFormat::Pcm16, message));
+        wav = WavFile::open(exportPath, message);
+        if (wav) {
+            std::vector<float> stereo(2 * 4800);
+            wav->readStereo(0, 4800, stereo.data());
+            float peak = 0.0f;
+            bool anyNoise = false;
+            for (float v : stereo) {
+                peak = std::max(peak, std::fabs(v));
+                if (v != 0.0f) anyNoise = true;
+            }
+            CHECK(anyNoise && peak <= 1.5f / 32768.0f);
+        }
+        wav.reset();
+        while (!controller.peaksIdle()) std::this_thread::yield();
+    }
+
+    // 6. True-Peak misst immer mit etwa 384 kHz.
+    {
+        mastering::TruePeak tp;
+        tp.setSampleRate(44100.0);
+        CHECK(tp.factor() == 8);
+        tp.setSampleRate(96000.0);
+        CHECK(tp.factor() == 4);
+        tp.setSampleRate(192000.0);
+        CHECK(tp.factor() == 2);
+        // Ein Sinus knapp unter Nyquist/4 mit Spitzen zwischen den Samples: bei jeder Rate erkannt.
+        for (const double rate : {48000.0, 96000.0, 192000.0}) {
+            mastering::TruePeak peak;
+            peak.setSampleRate(rate);
+            double maxPeak = 0.0;
+            for (int i = 0; i < static_cast<int>(rate / 10); ++i)
+                maxPeak = std::max(maxPeak, peak.push(std::sin(2.0 * 3.141592653589793 * (rate / 4.0) * i / rate + 0.785398)));
+            CHECK(maxPeak > 0.99);
+        }
+    }
+    std::filesystem::remove_all(folder, ec);
+}
+
 namespace effects_test {
 
 // Laesst das Signal in Bloecken durch den Effekt laufen.
@@ -3459,6 +3744,7 @@ int main() {
     testMidiLearnState();
     testMastering();
     testBuiltinEffects();
+    testSampleRates();
     {
         std::error_code ec;
         std::filesystem::remove_all(tempFile("minidaw_test_aufnahmen"), ec);

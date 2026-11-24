@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 
 // Schnittstelle der Treiber aus dem ASIO SDK von Steinberg (GPLv3,
@@ -70,6 +71,7 @@ struct AsioDevice::Impl {
     std::wstring name;
     std::wstring emptyName;
     double rate = 0.0;
+    std::vector<double> rates;  // annehmbare Samplerates
     int inputs = 0;
     int outputs = 0;
     int bufferSize = 0;
@@ -216,7 +218,7 @@ std::vector<std::wstring> AsioDevice::drivers() {
     return names;
 }
 
-bool AsioDevice::open(const std::wstring& driverName, void* window, std::string& error) {
+bool AsioDevice::open(const std::wstring& driverName, void* window, std::string& error, double wantedRate) {
     close();
     if (g_active.load() != nullptr) {
         error = "Es ist schon ein ASIO-Treiber offen.";
@@ -265,8 +267,18 @@ bool AsioDevice::open(const std::wstring& driverName, void* window, std::string&
     d->outputs = std::min<int>(static_cast<int>(numOut), kMaxOutputs);
     d->inError = d->inputs == 0 ? "Der Treiber hat keine Eing\u00E4nge" : "";
 
-    // Samplerate: wie im Treiber eingestellt; meldet er keine, 48000 oder 44100 versuchen.
+    // Welche gaengigen Raten nimmt der Treiber?
+    d->rates.clear();
+    for (const double candidate : {44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0})
+        if (succeeded(d->driver->canSampleRate(candidate))) d->rates.push_back(candidate);
+
+    // Samplerate: die gewuenschte, sonst wie im Treiber eingestellt; meldet er
+    // keine, 48000 oder 44100 versuchen.
     ASIOSampleRate rate = 0.0;
+    if (wantedRate > 0.0 && succeeded(d->driver->getSampleRate(&rate)) && std::fabs(rate - wantedRate) > 0.5 &&
+        succeeded(d->driver->canSampleRate(wantedRate)))
+        d->driver->setSampleRate(wantedRate);
+    rate = 0.0;
     if (!succeeded(d->driver->getSampleRate(&rate)) || rate <= 0.0) {
         for (const double wanted : {48000.0, 44100.0}) {
             if (succeeded(d->driver->canSampleRate(wanted)) && succeeded(d->driver->setSampleRate(wanted))) {
@@ -391,6 +403,8 @@ void AsioDevice::close() {
 }
 
 double AsioDevice::sampleRate() const { return d->rate; }
+
+std::vector<double> AsioDevice::supportedRates() const { return d->driver ? d->rates : std::vector<double>{}; }
 int AsioDevice::numChannels() const { return d->outputs; }
 int AsioDevice::bufferFrames() const { return d->bufferSize; }
 int AsioDevice::inputChannels() const { return d->inputs; }

@@ -9,7 +9,7 @@
 namespace {
 
 const char* const kMagic = "MiniDAW-Projekt";
-constexpr int kVersion = 2;  // 2: Effekt-Plaetze, Sends, Busse
+constexpr int kVersion = 3;  // 2: Effekt-Plaetze, Sends, Busse; 3: Clip-Positionen in Projekt-Frames
 
 std::string pathToUtf8(const std::filesystem::path& path) {
     const std::u8string u8 = path.generic_u8string();
@@ -292,7 +292,8 @@ bool readProjectFile(const std::filesystem::path& path, SavedProject& project, s
     if (!line.empty() && line.back() == '\r') line.pop_back();
     splitLine(line, key, rest);
     if (key != kMagic) { error = "Das ist keine MiniDAW-Projektdatei."; return false; }
-    if (std::atoi(rest.c_str()) > kVersion) {
+    project.version = std::atoi(rest.c_str());
+    if (project.version > kVersion) {
         error = "Die Datei stammt von einer neueren Programmversion.";
         return false;
     }

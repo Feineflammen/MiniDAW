@@ -35,11 +35,16 @@ using SlotArray = std::array<SlotModel, kSlotsPerStrip>;
 // dieselbe Datei benutzen.
 struct AudioFile {
     std::filesystem::path path;
+    // Bei einer umgerechneten Kopie (andere Samplerate) die Datei, aus der sie
+    // entstand; sonst leer. Gespeichert wird immer das Original.
+    std::filesystem::path original;
     std::wstring name;
     std::shared_ptr<WavFile> wav;
     std::shared_ptr<PeakData> peaks;
 };
 
+// Alle Positionen im Modell sind Frames bei der Samplerate des Geraets. Jede
+// Audiodatei eines Clips hat ebendiese Rate (sonst eine umgerechnete Kopie).
 struct ClipModel {
     std::shared_ptr<AudioFile> file;
     std::int64_t start = 0;   // Position auf der Zeitachse, in Frames

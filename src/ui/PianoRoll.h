@@ -23,6 +23,8 @@ public:
     int track() const { return track_; }
     int index() const { return index_; }
     void open(int track, int index);
+    // Die Samplerate hat sich um factor geaendert (neu / alt): Ausschnitt mitnehmen.
+    void sampleRateChanged(double factor) noexcept;
     void close();
 
     void draw(Canvas& canvas, const Rect& panel);

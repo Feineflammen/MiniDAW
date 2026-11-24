@@ -55,6 +55,9 @@ struct SavedBus {
 };
 
 struct SavedProject {
+    // Ab Version 3 sind offset und length der Audio-Clips Frames bei sampleRate
+    // (die Datei kann eine andere Rate haben); davor Frames der Datei selbst.
+    int version = 0;
     double sampleRate = 0.0;  // Samplerate, mit der gespeichert wurde (Positionen sind in Frames)
     double bpm = 120.0;
     float masterGain = 1.0f;

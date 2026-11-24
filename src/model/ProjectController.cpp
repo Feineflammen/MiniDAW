@@ -1,5 +1,6 @@
 #include "model/ProjectController.h"
 
+#include "disk/Resampler.h"
 #include "engine/FaderCurve.h"
 
 #include <algorithm>
@@ -8,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <ctime>
+#include <cwchar>
 #include <thread>
 #include <utility>
 
@@ -39,6 +41,161 @@ std::shared_ptr<AudioFile> ProjectController::openFile(const std::filesystem::pa
     peakBuilder_.add(wav, file->peaks);
     files_.push_back(file);
     return file;
+}
+
+namespace {
+
+// Kennung einer Quelldatei fuer den Namen ihrer umgerechneten Kopie: Pfad,
+// Groesse und Aenderungszeit. Aendert sich die Quelle, entsteht eine neue Kopie.
+std::wstring sourceTag(const std::filesystem::path& source) {
+    std::error_code ec;
+    const std::u8string text = source.lexically_normal().generic_u8string();
+    std::uint64_t hash = 1469598103934665603ull;
+    const auto mix = [&](std::uint64_t value) {
+        for (int i = 0; i < 8; ++i) {
+            hash ^= (value >> (8 * i)) & 0xFF;
+            hash *= 1099511628211ull;
+        }
+    };
+    for (const char8_t c : text) mix(static_cast<unsigned char>(c));
+    mix(static_cast<std::uint64_t>(std::filesystem::file_size(source, ec)));
+    mix(static_cast<std::uint64_t>(std::filesystem::last_write_time(source, ec).time_since_epoch().count()));
+    wchar_t buffer[17];
+    std::swprintf(buffer, 17, L"%08x", static_cast<unsigned>(hash ^ (hash >> 32)));
+    return buffer;
+}
+
+std::int64_t convertFrames(std::int64_t frames, double from, double to) {
+    return Resampler::convertPosition(frames, from, to);
+}
+
+void rescaleMidiClip(MidiClipModel& clip, double from, double to) {
+    const std::int64_t start = convertFrames(clip.start, from, to);
+    clip.length = std::max<std::int64_t>(1, convertFrames(clip.start + clip.length, from, to) - start);
+    clip.start = start;
+    for (MidiNote& note : clip.notes) {
+        const std::int64_t s = convertFrames(note.start, from, to);
+        note.length = std::max<std::int64_t>(1, convertFrames(note.start + note.length, from, to) - s);
+        note.start = s;
+    }
+    for (MidiControl& control : clip.controls) control.position = convertFrames(control.position, from, to);
+}
+
+void rescaleAutomation(std::array<AutomationLane, kAutomationParams>& lanes, double from, double to) {
+    for (AutomationLane& lane : lanes)
+        for (AutomationPoint& point : lane) point.position = convertFrames(point.position, from, to);
+}
+
+}  // namespace
+
+std::shared_ptr<AudioFile> ProjectController::openAtRate(const std::filesystem::path& source, std::string& error,
+                                                         int* sourceRate) {
+    const int rate = static_cast<int>(std::lround(sampleRate_));
+    auto probe = WavFile::open(source, error);
+    if (!probe) return nullptr;
+    if (sourceRate) *sourceRate = probe->sampleRate();
+    if (probe->sampleRate() == rate || rate <= 0 || conversionFolder_.empty()) {
+        probe.reset();
+        return openFile(source, error);
+    }
+
+    std::error_code ec;
+    std::filesystem::create_directories(conversionFolder_, ec);
+    const auto target = conversionFolder_ / (source.stem().wstring() + L"_" + std::to_wstring(rate) + L"_" +
+                                             sourceTag(source) + L".wav");
+    // Eine fertige Kopie von frueher wiederverwenden, wenn sie vollstaendig ist.
+    bool ready = false;
+    if (std::filesystem::exists(target, ec)) {
+        std::string ignored;
+        auto existing = WavFile::open(target, ignored);
+        ready = existing && existing->sampleRate() == rate &&
+                existing->frames() == Resampler::outputFrames(probe->frames(), probe->sampleRate(), rate);
+    }
+    if (!ready) {
+        const std::wstring name = source.filename().wstring();
+        std::function<bool(double)> progress;
+        if (conversionProgress_) progress = [&](double fraction) { conversionProgress_(name, fraction); return true; };
+        probe.reset();
+        if (!resampleWavFile(source, target, rate, error, progress)) {
+            error = "Umrechnen auf " + std::to_string(rate) + " Hz fehlgeschlagen: " + error;
+            return nullptr;
+        }
+    }
+    auto file = openFile(target, error);
+    if (file) {
+        file->original = source;
+        file->name = source.stem().wstring();
+    }
+    return file;
+}
+
+bool ProjectController::changeSampleRate(double rate, std::string& message) {
+    message.clear();
+    if (rate <= 0.0) return false;
+    const double old = sampleRate_;
+    if (std::fabs(rate - old) < 0.5) {
+        sampleRate_ = rate;
+        return true;
+    }
+    if (isRecording()) { message = "Während einer Aufnahme lässt sich die Samplerate nicht umstellen."; return false; }
+    sampleRate_ = rate;
+
+    // Jede benutzte Audiodatei (auch in Rueckgaengig-Schritten) bekommt ihren
+    // Ersatz in der neuen Rate, gerechnet aus dem Original.
+    std::vector<std::pair<const AudioFile*, std::shared_ptr<AudioFile>>> replaced;
+    int converted = 0, failed = 0;
+    std::string firstProblem;
+    const auto replacement = [&](const std::shared_ptr<AudioFile>& file) -> std::shared_ptr<AudioFile> {
+        for (const auto& entry : replaced)
+            if (entry.first == file.get()) return entry.second;
+        std::error_code ec;
+        std::filesystem::path source = file->original.empty() ? file->path : file->original;
+        if (!std::filesystem::exists(source, ec)) source = file->path;  // Original weg: aus der Kopie rechnen
+        std::string error;
+        int sourceRate = 0;
+        auto fresh = openAtRate(source, error, &sourceRate);
+        if (!fresh) {
+            ++failed;
+            if (firstProblem.empty()) firstProblem = toUtf8(file->name) + ": " + error;
+            fresh = file;  // klingt dann falsch, ist aber nicht verloren
+        } else if (sourceRate != static_cast<int>(std::lround(rate))) {
+            ++converted;
+        }
+        replaced.emplace_back(file.get(), fresh);
+        return fresh;
+    };
+    const auto rescale = [&](Project& project) {
+        for (TrackModel& track : project.tracks) {
+            for (ClipModel& clip : track.clips) {
+                auto file = replacement(clip.file);
+                const std::int64_t offset = convertFrames(clip.offset, old, rate);
+                const std::int64_t end = convertFrames(clip.offset + clip.length, old, rate);
+                clip.start = convertFrames(clip.start, old, rate);
+                clip.offset = std::clamp<std::int64_t>(offset, 0, file->wav->frames());
+                clip.length = std::max<std::int64_t>(1, std::min(end, file->wav->frames()) - clip.offset);
+                clip.file = std::move(file);
+            }
+            for (MidiClipModel& clip : track.midiClips) rescaleMidiClip(clip, old, rate);
+            rescaleAutomation(track.automation, old, rate);
+        }
+    };
+    rescale(project_);
+    for (UndoStep& step : undo_) rescale(step.project);
+    for (UndoStep& step : redo_) rescale(step.project);
+    for (auto& tracks : writeFrom_) tracks.fill(-1);
+
+    for (int t = 0; t < kProjectTracks; ++t) {
+        syncTrack(t);
+        syncMidi(t);
+        syncAutomation(t);
+    }
+    modified_ = true;
+
+    message = "Samplerate jetzt " + std::to_string(static_cast<int>(std::lround(rate))) + " Hz";
+    if (contentLength() > 0) message += ", Projekt umgerechnet";
+    if (converted > 0) message += " (" + std::to_string(converted) + " Audiodatei(en) neu berechnet)";
+    if (failed > 0) message += ". Problem: " + firstProblem;
+    return failed == 0;
 }
 
 // --- Rueckgaengig / Wiederholen ----------------------------------------------
@@ -167,11 +324,15 @@ bool ProjectController::addClip(int track, const std::filesystem::path& path, st
     message.clear();
     if (!validTrack(track)) { message = "Ungueltige Spur"; return false; }
 
-    auto file = openFile(path, message);
+    int sourceRate = 0;
+    auto file = openAtRate(path, message, &sourceRate);
     if (!file) return false;
 
-    if (std::fabs(file->wav->sampleRate() - sampleRate_) > 0.5) {
-        message = "Datei hat " + std::to_string(file->wav->sampleRate()) + " Hz, das Geraet " +
+    if (sourceRate != file->wav->sampleRate()) {
+        message = "Datei hat " + std::to_string(sourceRate) + " Hz, auf " +
+                  std::to_string(file->wav->sampleRate()) + " Hz umgerechnet.";
+    } else if (std::fabs(file->wav->sampleRate() - sampleRate_) > 0.5) {
+        message = "Datei hat " + std::to_string(file->wav->sampleRate()) + " Hz, das Ger\u00E4t " +
                   std::to_string(static_cast<int>(sampleRate_)) +
                   " Hz. Sie klingt deshalb zu " +
                   (file->wav->sampleRate() < sampleRate_ ? "hoch und schnell." : "tief und langsam.");
@@ -454,7 +615,8 @@ bool ProjectController::saveProject(const std::filesystem::path& path, std::stri
         out.sends = track.sends;
         out.output = track.output;
         for (const ClipModel& clip : track.clips)
-            out.clips.push_back({clip.file->path, clip.start, clip.offset, clip.length});
+            out.clips.push_back({clip.file->original.empty() ? clip.file->path : clip.file->original, clip.start,
+                                 clip.offset, clip.length});
         out.midiClips = track.midiClips;
         out.automation = track.automation;
     }
@@ -497,8 +659,10 @@ bool ProjectController::loadProject(const std::filesystem::path& path, std::stri
 
     clearProject();
     ++suppressUndo_;
-    int missingFiles = 0, failedPlugins = 0;
+    int missingFiles = 0, failedPlugins = 0, convertedFiles = 0;
     std::string firstProblem;
+    // Gespeichert mit anderer Rate: alle Positionen umrechnen.
+    const double savedRate = saved.sampleRate > 0.0 ? saved.sampleRate : sampleRate_;
 
     setBpm(saved.bpm);
     setMasterGain(saved.masterGain);
@@ -518,16 +682,22 @@ bool ProjectController::loadProject(const std::filesystem::path& path, std::stri
 
         for (const SavedClip& savedClip : in.clips) {
             std::string error;
-            auto file = openFile(savedClip.file, error);
+            int sourceRate = 0;
+            auto file = openAtRate(savedClip.file, error, &sourceRate);
             if (!file) {
                 ++missingFiles;
                 if (firstProblem.empty()) firstProblem = toUtf8(savedClip.file.filename().wstring()) + ": " + error;
                 continue;
             }
+            if (sourceRate != file->wav->sampleRate()) ++convertedFiles;
+            // Bis Version 2 zaehlten offset und length in Frames der Datei selbst.
+            const double clipRate = saved.version >= 3 ? savedRate : static_cast<double>(sourceRate);
             ClipModel clip;
-            clip.start = std::max<std::int64_t>(0, savedClip.start);
-            clip.offset = std::clamp<std::int64_t>(savedClip.offset, 0, file->wav->frames());
-            clip.length = std::min(savedClip.length, file->wav->frames() - clip.offset);
+            clip.start = std::max<std::int64_t>(0, convertFrames(savedClip.start, savedRate, sampleRate_));
+            const std::int64_t offset = convertFrames(savedClip.offset, clipRate, sampleRate_);
+            const std::int64_t end = convertFrames(savedClip.offset + savedClip.length, clipRate, sampleRate_);
+            clip.offset = std::clamp<std::int64_t>(offset, 0, file->wav->frames());
+            clip.length = std::min(end, file->wav->frames()) - clip.offset;
             if (clip.length <= 0) continue;
             clip.file = std::move(file);
             track.clips.push_back(std::move(clip));
@@ -535,8 +705,12 @@ bool ProjectController::loadProject(const std::filesystem::path& path, std::stri
         syncTrack(t);
 
         track.midiClips = in.midiClips;
-        syncMidi(t);
         track.automation = in.automation;
+        if (std::fabs(savedRate - sampleRate_) > 0.5) {
+            for (MidiClipModel& clip : track.midiClips) rescaleMidiClip(clip, savedRate, sampleRate_);
+            rescaleAutomation(track.automation, savedRate, sampleRate_);
+        }
+        syncMidi(t);
         syncAutomation(t);
 
     }
@@ -575,10 +749,12 @@ bool ProjectController::loadProject(const std::filesystem::path& path, std::stri
         if (missingFiles > 0 && failedPlugins > 0) message += ", ";
         if (failedPlugins > 0) message += std::to_string(failedPlugins) + " Plugin(s) nicht geladen";
         message += " (" + firstProblem + ")";
-    } else if (saved.sampleRate > 0.0 && std::fabs(saved.sampleRate - sampleRate_) > 0.5) {
-        message = "Das Projekt wurde mit " + std::to_string(static_cast<int>(saved.sampleRate)) +
-                  " Hz gespeichert, das Ger\u00E4t l\u00E4uft mit " + std::to_string(static_cast<int>(sampleRate_)) +
-                  " Hz. Positionen und Tonh\u00F6hen stimmen deshalb nicht.";
+    } else if (std::fabs(savedRate - sampleRate_) > 0.5 || convertedFiles > 0) {
+        message = "Auf " + std::to_string(static_cast<int>(std::lround(sampleRate_))) + " Hz umgerechnet";
+        if (std::fabs(savedRate - sampleRate_) > 0.5)
+            message += " (gespeichert mit " + std::to_string(static_cast<int>(std::lround(savedRate))) + " Hz)";
+        if (convertedFiles > 0) message += ", " + std::to_string(convertedFiles) + " Audiodatei(en) neu berechnet";
+        message += ".";
     }
     return true;
 }

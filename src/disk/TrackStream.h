@@ -37,7 +37,7 @@ using Playlist = std::vector<Clip>;
 // sind, liefert read() Stille und holt danach samplegenau wieder auf.
 class TrackStream {
 public:
-    static constexpr std::size_t kCapacity = std::size_t{1} << 16;  // Frames im Ringpuffer
+    static constexpr std::size_t kCapacity = std::size_t{1} << 18;  // Frames im Ringpuffer: 5,5 s bei 48 kHz, 1,4 s bei 192 kHz
     static constexpr int kChunk = 4096;                             // Frames pro Lesevorgang
 
     TrackStream();

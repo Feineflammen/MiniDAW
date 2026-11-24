@@ -8,7 +8,7 @@
 // prepare() angelegt; process() fordert nichts an und wartet nie.
 class DelayLine {
 public:
-    static constexpr int kCapacity = 1 << 15;  // groesste Verzoegerung: 32767 Frames
+    static constexpr int kCapacity = 1 << 17;  // groesste Verzoegerung: 131071 Frames (2,7 s bei 48 kHz, 0,68 s bei 192 kHz)
 
     void prepare() {
         buffer_.assign(2 * static_cast<std::size_t>(kCapacity), 0.0f);

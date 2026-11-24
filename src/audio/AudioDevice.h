@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 class AudioCallback;
 
@@ -39,6 +40,9 @@ public:
     // Der Treiber will neu geoeffnet werden (Puffergroesse oder Samplerate
     // im Treiberfenster geaendert). Die UI fragt das regelmaessig ab.
     virtual bool resetRequested() const { return false; }
+    // Samplerates, auf die sich das Geraet umstellen laesst (nur ASIO; bei
+    // WASAPI bestimmt Windows die Rate, die Liste ist leer).
+    virtual std::vector<double> supportedRates() const { return {}; }
     // Eigenes Einstellungsfenster des Treibers (nur ASIO).
     virtual bool hasControlPanel() const { return false; }
     virtual void showControlPanel() {}

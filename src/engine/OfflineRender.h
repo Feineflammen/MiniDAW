@@ -14,8 +14,13 @@
 // frames:    Laenge der Datei in Frames
 // blockSize: Blocklaenge, hoechstens die bei Engine::prepare() genannte
 // progress:  wird regelmaessig mit dem Anteil 0..1 gerufen; liefert es false, wird abgebrochen
+// fileRate:  Samplerate der Datei; 0 oder gleich sampleRate = ohne Umrechnung,
+//            sonst wird hochwertig umgerechnet (disk/Resampler.h)
+//
+// 16 Bit bekommt Dither (dreieckverteiltes Rauschen von 1 LSB), damit leise
+// Ausklaenge nicht zu Stufen werden.
 //
 // Danach steht der Transport, die Position ist unveraendert gegenueber vorher.
 bool renderOffline(Engine& engine, std::int64_t frames, int blockSize, int sampleRate,
                    const std::filesystem::path& path, WavFormat format, std::string& error,
-                   const std::function<bool(double)>& progress = {});
+                   const std::function<bool(double)>& progress = {}, int fileRate = 0);

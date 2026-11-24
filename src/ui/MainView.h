@@ -60,6 +60,8 @@ public:
     void showMessage(const std::wstring& message) { setStatus(message); }
     // Nach "Neu" oder "Oeffnen": Auswahl, Editor und Ansicht zuruecksetzen.
     void projectReplaced();
+    // Die Samplerate hat sich geaendert: Ausschnitt und Zoom mitnehmen.
+    void sampleRateChanged(double from, double to);
 
     void tick();  // einmal pro Bild: Pegel abholen, Ansicht nachfuehren
     void draw(Canvas& canvas, float width, float height);

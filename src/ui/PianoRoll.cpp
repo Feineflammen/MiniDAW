@@ -64,6 +64,14 @@ void PianoRoll::open(int track, int index) {
     if (!clip()) close();
 }
 
+void PianoRoll::sampleRateChanged(double factor) noexcept {
+    viewStart_ *= factor;
+    framesPerPixel_ *= factor;
+    drag_ = Drag::None;
+    editing_ = false;
+    controlEditing_ = false;
+}
+
 void PianoRoll::close() {
     track_ = index_ = -1;
     selected_ = -1;

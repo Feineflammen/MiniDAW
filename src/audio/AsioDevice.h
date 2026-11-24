@@ -26,9 +26,13 @@ public:
     static std::vector<std::wstring> drivers();
 
     // Oeffnet den Treiber mit diesem Namen. window ist das Hauptfenster (HWND),
-    // manche Treiber brauchen es. Die Samplerate bleibt, wie sie im Treiber
-    // eingestellt ist; die Puffergroesse ist die vom Treiber bevorzugte.
-    bool open(const std::wstring& driverName, void* window, std::string& error);
+    // manche Treiber brauchen es. rate > 0 stellt den Treiber auf diese
+    // Samplerate (falls er sie kann), sonst bleibt sie, wie sie im Treiber
+    // eingestellt ist. Die Puffergroesse ist die vom Treiber bevorzugte.
+    bool open(const std::wstring& driverName, void* window, std::string& error, double rate = 0.0);
+
+    // Die gaengigen Raten von 44,1 bis 192 kHz, die der Treiber annimmt.
+    std::vector<double> supportedRates() const override;
 
     bool start(AudioCallback& callback, std::string& error) override;
     void stop() override;

@@ -9,7 +9,8 @@
 #include <vector>
 
 // Liest WAV-Dateien: PCM mit 16, 24 oder 32 Bit sowie 32-Bit-Float, Mono oder Stereo.
-// Bei mehr als zwei Kanaelen werden die ersten beiden benutzt.
+// Bei mehr als zwei Kanaelen werden die ersten beiden benutzt. Auch RF64
+// (WAV ueber 4 GB) und nicht sauber beendete Aufnahmen (Laenge 0 im Kopf).
 //
 // Nicht fuer den Audio-Thread: readStereo() greift auf die Platte zu.
 class WavFile {
@@ -45,7 +46,8 @@ private:
 enum class WavFormat { Pcm16, Pcm24, Float32 };
 
 // Schreibt eine WAV-Datei stueckweise, zum Beispiel waehrend einer Aufnahme
-// oder beim Export. Die Laengenangaben im Kopf traegt finish() nach.
+// oder beim Export. Die Laengenangaben im Kopf traegt finish() nach; ueber
+// 4 GB wird daraus RF64 (dafuer haelt der Kopf einen JUNK-Platzhalter frei).
 class WavWriter {
 public:
     bool open(const std::filesystem::path& path, int channels, int sampleRate, std::string& error,
@@ -53,6 +55,9 @@ public:
     bool write(const float* interleaved, std::int64_t frames);
     bool finish();
     bool isOpen() const { return out_.is_open(); }
+
+    // Ab dieser RIFF-Groesse schreibt finish() RF64 (nur Tests setzen weniger).
+    static inline std::int64_t riffLimit = 0xFFFFFFFFll;
     std::int64_t frames() const noexcept { return frames_; }
 
 private:

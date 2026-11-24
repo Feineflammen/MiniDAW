@@ -75,10 +75,19 @@ public:
     // Laenge fuer den Export: Ende des letzten Audio- oder MIDI-Clips.
     std::int64_t contentLength() const noexcept;
 
-    // Samplerate des Audiogeraets; dient der Zeitanzeige und der Warnung bei
-    // Dateien mit anderer Samplerate.
+    // Samplerate des Audiogeraets. setSampleRate() setzt sie nur (vor dem
+    // ersten Projekt); changeSampleRate() rechnet das Projekt um: alle
+    // Positionen, und Audiodateien mit anderer Rate werden als Kopie im
+    // Umrechnungsordner neu berechnet. message nennt Umgerechnetes und Probleme.
     void setSampleRate(double sampleRate) noexcept { sampleRate_ = sampleRate; }
     double sampleRate() const noexcept { return sampleRate_; }
+    bool changeSampleRate(double sampleRate, std::string& message);
+    // Hierhin kommen umgerechnete Kopien von Audiodateien.
+    void setConversionFolder(std::filesystem::path folder) { conversionFolder_ = std::move(folder); }
+    // Meldet den Fortschritt laengerer Umrechnungen (Dateiname, 0..1).
+    void setConversionProgress(std::function<void(const std::wstring&, double)> progress) {
+        conversionProgress_ = std::move(progress);
+    }
 
     // Legt eine WAV-Datei als Clip auf die Spur. Bei false steht der Grund in
     // message; bei true kann message einen Hinweis enthalten.
@@ -245,6 +254,13 @@ public:
 private:
     static bool validTrack(int track) noexcept { return track >= 0 && track < kProjectTracks; }
     std::shared_ptr<AudioFile> openFile(const std::filesystem::path& path, std::string& error);
+    // Oeffnet eine Datei passend zur Samplerate des Projekts; hat sie eine
+    // andere, wird eine umgerechnete Kopie benutzt (und notfalls erzeugt).
+    // sourceRate bekommt die Rate der Datei selbst.
+    std::shared_ptr<AudioFile> openAtRate(const std::filesystem::path& source, std::string& error,
+                                          int* sourceRate = nullptr);
+    std::filesystem::path conversionFolder_;
+    std::function<void(const std::wstring&, double)> conversionProgress_;
     void syncTrack(int track);
     void syncMidi(int track);
     void syncAutomation(int track);

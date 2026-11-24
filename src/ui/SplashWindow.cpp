@@ -19,7 +19,7 @@ namespace {
 constexpr wchar_t kClassName[] = L"MiniDAWSplash";
 constexpr int kWidthDip = 860;   // 16:9 wie das Bild
 constexpr int kHeightDip = 484;
-constexpr wchar_t kVersion[] = L"Version 0.8";
+constexpr wchar_t kVersion[] = L"Version 0.9";
 
 constexpr wchar_t kAboutText[] =
     L"Kleine Musik-Software für Windows: 16 Spuren, Audio und MIDI, VST3, Mischpult, Mastering.\n\n"

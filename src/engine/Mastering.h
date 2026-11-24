@@ -115,10 +115,16 @@ public:
     TruePeak();
     void reset() noexcept;
     double push(double sample) noexcept;
+    // Ueberabtastung passend zur Rate: 8-fach bis 64 kHz, 4-fach bis 128 kHz,
+    // darueber 2-fach. So wird immer mit etwa 384 kHz gemessen (BS.1770 verlangt
+    // bei 48 kHz mindestens 4-fach), hohe Raten kosten nicht unnoetig Rechenzeit.
+    void setSampleRate(double sampleRate) noexcept;
+    int factor() const noexcept { return 8 / step_; }
 
 private:
     std::array<double, 4 * kHalf> history_{};  // jedes Sample doppelt: das Fenster liegt am Stueck
     int pos_ = 0;
+    int step_ = 1;  // jede wievielte der 7 Zwischenphasen berechnet wird
 };
 
 // Der Effekt ohne Plugin-Huelle: Parameter in Anzeigewerten, Audio in Bloecken.

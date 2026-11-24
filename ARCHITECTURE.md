@@ -386,6 +386,7 @@ Windows-Code. Sie bilden die Bibliothek `dawcore`, die auch die Tests benutzen.
 | 15 | Eingebaute Effekte EQ, Kompressor, Hall, Echo (`engine/BuiltinEffect`, `engine/Effects`, `ui/EffectView`) | fertig; EQ-Kurve am Gerät bedient |
 | 16 | Gate und Chorus | Code und Offline-Tests fertig (Öffnen/Schließen mit Hysterese, Verzögerung, Breite, Pegel), Bedientest offen |
 | 17 | MIDI-Controller: Aufnahme, Wiedergabe mit Ruhestellung und Nachführen, Controller-Spur im Noten-Editor, MIDI-Dateien, VST3-Zuordnung dynamisch, MIDI-Lernen im Plugin-Fenster (`vst3/MidiLearn.h`) | Code und Offline-Tests fertig, per Screenshot geprüft, Bedientest mit Hardware offen |
+| 18 | Samplerate: Umrechnen von Dateien und Projekten (`disk/Resampler`), ASIO-Rate im Menü, Projekt stellt den Treiber ein, Export mit anderer Rate, RF64, Puffer für 192 kHz | Code und Offline-Tests fertig (Genauigkeit unter −100 dB, Sperrbereich, Projekt 48 → 96 → 44,1 kHz, alte Dateien), Bedientest offen |
 
 Jeder Schritt gilt erst als fertig, wenn er auf echter Hardware läuft und
 ohne Knackser klingt.
@@ -457,8 +458,8 @@ zwei Samples.
   Sends, Ziel (Master oder Bus), Plugins je Platz (Pfad und Einstellungen als
   Hex-Text), Audio-Clips (Pfad, Position, Ausschnitt) und MIDI-Clips mit Noten;
   dazu je Bus Regler und Plugins und die Plugins des Masters, je Spur die
-  Automation (`automation lautstaerke Frame:Wert ...`). Dateiversion 2;
-  Dateien der Version 1 (ein Plugin je Spur) werden weiter gelesen.
+  Automation (`automation lautstaerke Frame:Wert ...`). Dateiversion 3;
+  Dateien der Versionen 1 (ein Plugin je Spur) und 2 werden weiter gelesen.
 - Audiodateien bleiben, wo sie sind: Pfade unterhalb des Projektordners
   stehen relativ in der Datei, andere vollständig.
 - Geschrieben wird erst in eine Nachbardatei, dann umbenannt. Scheitert das
@@ -471,13 +472,41 @@ zwei Samples.
 - `ProjectController::modified()` merkt sich Änderungen am Modell. Drehen an
   Reglern in Plugin-Fenstern wird dabei nicht erkannt.
 
-Positionen stehen in Frames. Ein Projekt passt deshalb nur zu der Samplerate,
-mit der es gespeichert wurde; beim Laden mit anderer Samplerate wird gewarnt.
+## Samplerate
+
+- Im Modell stehen alle Positionen in Frames bei der Rate des Geräts, und jede
+  Audiodatei eines Clips hat genau diese Rate. Die Engine muss deshalb nie
+  umrechnen.
+- Eine Datei mit anderer Rate wird beim Import, beim Laden und beim
+  Ratenwechsel hochwertig umgerechnet (`disk/Resampler`: Kaiser-gefensterter
+  Sinc, polyphas, Durchlass bis 92 % der kleineren Nyquist-Frequenz, über
+  100 dB Sperrdämpfung). Die Kopie liegt unter `Dokumente\MiniDAW\Umgerechnet`,
+  ihr Name enthält Rate und eine Kennung aus Pfad, Größe und Änderungszeit
+  der Quelle; eine fertige Kopie wird wiederverwendet. Das Original bleibt
+  unangetastet, und nur das Original steht in der Projektdatei
+  (`AudioFile::original`). Umgerechnet wird immer aus dem Original, damit
+  Hin- und Herschalten nichts verschlechtert.
+- Die Projektdatei speichert ihre Rate (`samplerate`). Ab Version 3 sind auch
+  Ausschnitt und Länge der Audio-Clips Frames bei dieser Rate; Version 2
+  zählte sie in Frames der Datei, das berücksichtigt das Laden.
+- Laden mit anderer Rate und `ProjectController::changeSampleRate()` rechnen
+  Clips, Noten, Controller und Automation um, auch in den Rückgängig-Schritten.
+  Mit ASIO stellt das Programm den Treiber vorher auf die Rate des Projekts,
+  wenn er sie kann; dann ist nichts umzurechnen.
+- Puffer sind so bemessen, dass sie auch bei 192 kHz reichen: Lesepuffer je
+  Spur 2^18 Frames (1,4 s), Aufnahmepuffer 2^19, Latenzausgleich bis 131071
+  Frames (0,68 s).
+- WAV-Dateien über 4 GB werden als RF64 geschrieben (der Kopf hält dafür einen
+  JUNK-Platzhalter frei) und gelesen. Eine nicht sauber beendete Aufnahme
+  (Länge 0 im Kopf) wird bis zum Dateiende gelesen.
+- Der True-Peak-Messer des Mastering-Effekts misst immer mit etwa 384 kHz:
+  8-fach bis 64 kHz, 4-fach bis 128 kHz, darüber 2-fach.
 
 ## Export
 
 `engine/OfflineRender` rechnet das Projekt ohne Audiogerät in eine WAV-Datei
-(16 Bit, 24 Bit oder 32-Bit-Float). Dafür hält das Programm Audiogerät und
+(16 Bit, 24 Bit oder 32-Bit-Float), auf Wunsch mit anderer Samplerate (über
+`Resampler`). 16 Bit bekommt Dither (dreieckverteilt, 1 LSB, fester Startwert). Dafür hält das Programm Audiogerät und
 Disk-Thread an und treibt die Engine aus dem UI-Thread an; danach startet
 beides wieder. Im Offline-Modus blendet die Engine Start und Stopp nicht ein
 und aus, der Anfang der Datei bleibt also unverändert. MIDI an externe Geräte

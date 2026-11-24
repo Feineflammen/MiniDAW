@@ -193,6 +193,10 @@ void LoudnessMeter::updateIntegrated() noexcept {
 
 TruePeak::TruePeak() { peakTaps(); }  // Tabelle hier anlegen, nicht im Audio-Thread
 
+void TruePeak::setSampleRate(double sampleRate) noexcept {
+    step_ = sampleRate < 64000.0 ? 1 : sampleRate < 128000.0 ? 2 : 4;
+}
+
 void TruePeak::reset() noexcept {
     history_.fill(0.0);
     pos_ = 0;
@@ -206,7 +210,9 @@ double TruePeak::push(double sample) noexcept {
     const double* w = history_.data() + pos_;  // w[0] aeltestes, w[n-1] neuestes Sample
     // c = neuestes - kHalf: w[kHalf-1] ist Sample c, w[kHalf] ist c+1.
     double peak = std::max(std::abs(w[kHalf - 1]), std::abs(w[kHalf]));
-    for (const auto& taps : peakTaps()) {
+    const PeakTaps& all = peakTaps();
+    for (int phase = step_; phase < 8; phase += step_) {
+        const auto& taps = all[static_cast<std::size_t>(phase - 1)];
         double v = 0.0;
         for (int k = 0; k < n; ++k) v += w[k] * taps[static_cast<std::size_t>(k)];
         peak = std::max(peak, std::abs(v));
@@ -334,6 +340,8 @@ void Processor::prepare(double sampleRate) {
     compAttack_ = std::exp(-1.0 / (fs_ * 0.025));
     compRelease_ = std::exp(-1.0 / (fs_ * 0.160));
     sideCoef_ = std::exp(-2.0 * kPi * 120.0 / fs_);
+    for (TruePeak& peak : detect_) peak.setSampleRate(fs_);
+    for (TruePeak& peak : outPeak_) peak.setSampleRate(fs_);
     outMeter_.prepare(fs_);
     inMeter_.prepare(fs_);
     reset();

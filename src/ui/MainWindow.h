@@ -26,13 +26,15 @@ enum HelpCommand { kHelpAbout = 1401 };
 enum ViewCommand { kViewMixer = 1301 };
 // Eintraege im Menue "Audio": Ausgabegeraet i = kAudioOutputBase + i, Eingabegeraet
 // i = kAudioInputBase + i, kein Eingang = kAudioNoInput.
-// ASIO-Treiber i = kAudioAsioBase + i, Einstellungsfenster des Treibers = kAudioAsioPanel.
+// ASIO-Treiber i = kAudioAsioBase + i, Einstellungsfenster des Treibers = kAudioAsioPanel,
+// Samplerate i der Liste = kAudioRateBase + i.
 enum AudioCommand {
     kAudioOutputBase = 2000,
     kAudioInputBase = 2200,
     kAudioNoInput = 2399,
     kAudioAsioBase = 2400,
     kAudioAsioPanel = 2500,
+    kAudioRateBase = 2510,
 };
 
 // Das Win32-Fenster. Reicht Eingaben an die MainView weiter und zeichnet sie

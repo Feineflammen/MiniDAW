@@ -46,6 +46,7 @@ add_library(dawcore STATIC
     src/engine/Synth.cpp
     src/disk/PeakData.cpp
     src/disk/RecordSink.cpp
+    src/disk/Resampler.cpp
     src/disk/TrackStream.cpp
     src/disk/WavFile.cpp
     src/model/ProjectController.cpp

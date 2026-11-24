@@ -82,6 +82,18 @@ public:
     void setSampleRate(double sampleRate) noexcept { sampleRate_ = sampleRate; }
     double sampleRate() const noexcept { return sampleRate_; }
     bool changeSampleRate(double sampleRate, std::string& message);
+    // Schleife A-B (gehoert zum Projekt, aber nicht zu Rueckgaengig). setLoop()
+    // legt den Bereich fest und schaltet sie ein; zu kurze Bereiche (unter
+    // 10 ms) werden ignoriert. Waehrend einer Aufnahme und beim Export
+    // (setLoopSuspended) ist sie ausgesetzt.
+    bool setLoop(std::int64_t start, std::int64_t end);
+    void setLoopEnabled(bool on);
+    bool hasLoop() const noexcept { return loopEnd_ > loopStart_; }
+    bool loopEnabled() const noexcept { return loopOn_ && hasLoop(); }
+    std::int64_t loopStart() const noexcept { return loopStart_; }
+    std::int64_t loopEnd() const noexcept { return loopEnd_; }
+    void setLoopSuspended(bool suspended);
+
     // Hierhin kommen umgerechnete Kopien von Audiodateien.
     void setConversionFolder(std::filesystem::path folder) { conversionFolder_ = std::move(folder); }
     // Meldet den Fortschritt laengerer Umrechnungen (Dateiname, 0..1).
@@ -260,6 +272,11 @@ private:
     std::shared_ptr<AudioFile> openAtRate(const std::filesystem::path& source, std::string& error,
                                           int* sourceRate = nullptr);
     std::filesystem::path conversionFolder_;
+    std::int64_t loopStart_ = 0, loopEnd_ = 0;
+    bool loopOn_ = false;
+    bool loopSuspended_ = false;           // Export
+    bool loopSuspendedForRecording_ = false;
+    void syncLoop();
     std::function<void(const std::wstring&, double)> conversionProgress_;
     void syncTrack(int track);
     void syncMidi(int track);

@@ -386,6 +386,7 @@ Windows-Code. Sie bilden die Bibliothek `dawcore`, die auch die Tests benutzen.
 | 15 | Eingebaute Effekte EQ, Kompressor, Hall, Echo (`engine/BuiltinEffect`, `engine/Effects`, `ui/EffectView`) | fertig; EQ-Kurve am Gerät bedient |
 | 16 | Gate und Chorus | Code und Offline-Tests fertig (Öffnen/Schließen mit Hysterese, Verzögerung, Breite, Pegel), Bedientest offen |
 | 17 | MIDI-Controller: Aufnahme, Wiedergabe mit Ruhestellung und Nachführen, Controller-Spur im Noten-Editor, MIDI-Dateien, VST3-Zuordnung dynamisch, MIDI-Lernen im Plugin-Fenster (`vst3/MidiLearn.h`) | Code und Offline-Tests fertig, per Screenshot geprüft, Bedientest mit Hardware offen |
+| 19 | Schleife A–B: nahtlos über Disk-Strom und Engine, mit Latenzausgleich, Noten enden an B; Lineal, Knopf, Strg+L, Projektdatei | Code und Offline-Tests fertig (samplegenau mit und ohne Plugin-Latenz), Bedientest offen |
 | 18 | Samplerate: Umrechnen von Dateien und Projekten (`disk/Resampler`), ASIO-Rate im Menü, Projekt stellt den Treiber ein, Export mit anderer Rate, RF64, Puffer für 192 kHz | Code und Offline-Tests fertig (Genauigkeit unter −100 dB, Sperrbereich, Projekt 48 → 96 → 44,1 kHz, alte Dateien), Bedientest offen |
 
 Jeder Schritt gilt erst als fertig, wenn er auf echter Hardware läuft und
@@ -501,6 +502,26 @@ zwei Samples.
   (Länge 0 im Kopf) wird bis zum Dateiende gelesen.
 - Der True-Peak-Messer des Mastering-Effekts misst immer mit etwa 384 kHz:
   8-fach bis 64 kHz, 4-fach bis 128 kHz, darüber 2-fach.
+
+## Schleife A–B
+
+- `Engine::setLoop()` gibt den Bereich an den Audio-Thread und an alle
+  `TrackStream`s. Der Disk-Thread liest beim Erreichen von B gleich ab A
+  weiter vor; im Ringpuffer folgt auf den letzten Frame vor B also der erste
+  von A. Der Strom übernimmt eine neue Schleife wie eine neue Playlist
+  (Neuansatz ab der aktuellen Position), damit Vorgelesenes nie zur falschen
+  Schleife gehört.
+- Die Engine teilt ihre Blöcke dort, wo die Ausgabeposition oder die um die
+  Plugin-Latenz vorauslaufende Leseposition B erreicht. Die Leseposition
+  bricht schon vor der Ausgabe um (`Engine::aheadOf`); so stimmt das Gehörte
+  auch mit Latenzausgleich samplegenau.
+- Der Sprung der Leseposition gilt für die MIDI-Sequenzen als Sprung: Klingende
+  Noten enden am Blockanfang, also genau an B, Controller werden für A
+  nachgeführt.
+- Umgebrochen wird nur, wer B von vorn erreicht; hinter B geht es weiter.
+  Während einer Aufnahme und beim Export setzt der `ProjectController` die
+  Schleife aus; die Engine wertet sie im Offline-Modus ohnehin nicht aus.
+- Gespeichert als `schleife <A> <B> <an>`; nicht Teil von Rückgängig.
 
 ## Export
 

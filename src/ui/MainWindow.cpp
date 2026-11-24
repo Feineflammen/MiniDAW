@@ -319,6 +319,11 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
                     InvalidateRect(hwnd_, nullptr, FALSE);
                     return 0;
                 }
+                if (wParam == 'L' && !repeat) {
+                    view_.key(Key::Loop);
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return 0;
+                }
                 if (command != 0 && !repeat && onCommand) {
                     view_.releaseAllNotes();
                     onCommand(command);
@@ -346,6 +351,7 @@ LRESULT MainWindow::handle(UINT message, WPARAM wParam, LPARAM lParam) {
             }
             if (wParam == VK_SPACE) view_.key(Key::Space);
             else if (wParam == VK_F3) view_.key(Key::ToggleMixer);
+            else if (wParam == VK_DIVIDE) view_.key(Key::Loop);  // Ziffernblock "/" wie in anderen DAWs
             else if (wParam == VK_HOME) view_.key(Key::Home);
             else if (wParam == VK_DELETE) view_.key(Key::Delete);
             else if (wParam == VK_ESCAPE) view_.key(Key::Escape);

@@ -193,6 +193,8 @@ int runScreenshot(const std::filesystem::path& output, const std::wstring& mode)
     controller.setTrackPan(1, -0.6f);
     controller.setTrackPan(2, 0.6f);
     controller.setTrackMute(4, true);
+    // Schleife A-B ueber die Takte 3 und 4 (120 BPM: 2 s je Takt)
+    controller.setLoop(kRate * 4, kRate * 8);
     // Soundkarte mit vier Eingaengen: zwei Spuren nehmen gleichzeitig auf.
     controller.setInputChannels(4);
     controller.setTrackAudioInput(0, 0, true);
@@ -881,6 +883,7 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
         // nur dieser Thread die Engine an. MIDI-Geraete bekommen nichts.
         const bool metronome = controller.metronome();
         controller.setMetronome(false);
+        controller.setLoopSuspended(true);  // exportiert wird das ganze Stueck
         device->stop();
         disk.stop();
         midiOut.setMuted(true);
@@ -901,6 +904,7 @@ int runApp(HINSTANCE instance, int showCommand, const std::filesystem::path& ini
         Sleep(30);  // der MIDI-Thread verwirft noch, was beim Export angefallen ist
         midiOut.setMuted(false);
         controller.setMetronome(metronome);
+        controller.setLoopSuspended(false);
         disk.start(*engine);
         std::string startError;
         if (!device->start(*engine, startError))

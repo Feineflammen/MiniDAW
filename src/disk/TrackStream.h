@@ -44,6 +44,10 @@ public:
 
     // --- UI-Thread ---
     void setPlaylist(Playlist playlist);
+    // Schleife A-B: Wer beim Lesen genau end erreicht, liest bei start weiter.
+    // Der Disk-Thread liest dafuer schon vor dem Sprung ab start vor, damit
+    // es keine Luecke gibt. Muss zur Schleife der Engine passen.
+    void setLoop(std::int64_t start, std::int64_t end, bool on);
 
     // --- Disk-Thread ---
     // Erledigt hoechstens einen Lesevorgang. true, wenn etwas zu tun war.
@@ -61,7 +65,8 @@ public:
 
 private:
     bool sync(std::int64_t pos) noexcept;
-    void renderChunk();
+    // Mischt count Frames ab Zeitachsen-Position start nach chunk_ ab Frame offset.
+    void renderRange(std::int64_t start, int count, int offset);
 
     static constexpr std::size_t kMask = kCapacity - 1;
 
@@ -74,9 +79,12 @@ private:
     std::atomic<std::uint32_t> seekGen_{0};
     std::atomic<std::uint32_t> seekDone_{0};  // Disk -> Audio: bis hierhin erledigt
 
-    // Flush: Disk -> Audio
+    // Flush: Disk -> Audio (mit der Schleife, die ab dort gilt)
     std::atomic<std::size_t> flushTo_{0};
     std::atomic<std::int64_t> flushPos_{0};
+    std::atomic<std::int64_t> flushLoopStart_{0};
+    std::atomic<std::int64_t> flushLoopEnd_{0};
+    std::atomic<bool> flushLoopOn_{false};
     std::atomic<std::uint32_t> flushGen_{0};
     std::atomic<std::uint32_t> flushAck_{0};  // Audio -> Disk: uebernommen
 
@@ -87,6 +95,8 @@ private:
     std::int64_t nextPos_ = 0;  // Zeitachsen-Position des naechsten Frames im Puffer
     std::uint32_t seekGenAudio_ = 0;
     std::uint32_t flushSeenAudio_ = 0;
+    std::int64_t loopStartAudio_ = 0, loopEndAudio_ = 0;
+    bool loopOnAudio_ = false;
 
     // Nur Disk-Thread
     Playlist playlist_;
@@ -94,6 +104,8 @@ private:
     std::uint32_t seekDoneDisk_ = 0;
     std::uint32_t flushGenDisk_ = 0;
     bool playlistRestart_ = false;
+    std::int64_t loopStartDisk_ = 0, loopEndDisk_ = 0;
+    bool loopOnDisk_ = false;
     std::vector<float> chunk_;
     std::vector<float> temp_;
 
@@ -101,4 +113,7 @@ private:
     std::mutex mutex_;
     Playlist pending_;
     bool hasPending_ = false;
+    std::int64_t pendingLoopStart_ = 0, pendingLoopEnd_ = 0;
+    bool pendingLoopOn_ = false;
+    bool hasPendingLoop_ = false;
 };

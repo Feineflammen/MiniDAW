@@ -90,6 +90,20 @@ bool Engine::setTempo(double bpm) noexcept {
     return send({CommandType::Tempo, 0, static_cast<float>(std::clamp(bpm, 20.0, 400.0))});
 }
 
+bool Engine::setLoop(std::int64_t start, std::int64_t end, bool on) {
+    on = on && start >= 0 && end > start;
+    for (auto& stream : streams_) stream.setLoop(start, end, on);
+    Command c{CommandType::Loop, 0, on ? 1.0f : 0.0f, start};
+    c.position2 = end;
+    return send(c);
+}
+
+std::int64_t Engine::aheadOf(std::int64_t ahead) const noexcept {
+    const std::int64_t s = position_ + ahead;
+    if (loopActive() && position_ < loopEnd_ && s >= loopEnd_) return loopStart_ + (s - loopEnd_);
+    return s;
+}
+
 bool Engine::startLatencyProbe(LatencyProbe* probe) noexcept {
     if (!probe) return false;
     Command c{CommandType::Probe};
@@ -456,6 +470,11 @@ void Engine::drainCommands() noexcept {
             case CommandType::Tempo:
                 tempo_ = static_cast<double>(c.value);
                 break;
+            case CommandType::Loop:
+                loopStart_ = c.position;
+                loopEnd_ = c.position2;
+                loopOn_ = c.value != 0.0f;
+                break;
             case CommandType::Probe:
                 probe_ = c.probe;
                 break;
@@ -568,7 +587,7 @@ void Engine::updateTargets() noexcept {
 // Master-Latenz. Zu genau dieser Zeit wird die Kurve gelesen, damit man den
 // Wechsel an der Stelle hoert, an der er auf der Zeitachse steht.
 void Engine::applyAutomation() noexcept {
-    const std::int64_t at = position_ + busLatency_ + masterLatency_;
+    const std::int64_t at = aheadOf(busLatency_ + masterLatency_);
     for (std::size_t ti = 0; ti < tracks_.size(); ++ti) {
         Track& t = tracks_[ti];
         const AutomationCurve* volume = t.automation[kAutomationVolume];
@@ -704,7 +723,7 @@ int Engine::gatherMidi(std::size_t ti, int numFrames, std::int64_t blockMicros) 
     lastLiveCount_ = count;
 
     // Noten aus den MIDI-Clips, um die Plugin-Latenz vorausgelesen.
-    const std::int64_t sourcePos = position_ + latency_;
+    const std::int64_t sourcePos = aheadOf(latency_);
     if (rolling_ && wantPlay_ && t.sequence) {
         const auto& events = t.sequence->events;
         if (t.seqDirty || t.seqNextPos != sourcePos) {
@@ -788,7 +807,7 @@ void Engine::renderBlock(int numFrames, std::int64_t blockMicros) noexcept {
     const bool liveMidi = liveMidiCount_ > 0 && anyArmed_;
 
     // Clips und Noten werden um die Plugin-Latenz vorausgelesen.
-    const std::int64_t sourcePos = position_ + latency_;
+    const std::int64_t sourcePos = aheadOf(latency_);
 
     if (!rolling_) {
         // Transport steht: Stroeme auf die aktuelle Position vorbereiten,
@@ -1073,10 +1092,19 @@ void Engine::process(const float* const* in, int numInputs, float* const* out, i
     const double microsPerFrame = 1'000'000.0 / sampleRate_;
     int done = 0;
     while (done < numFrames) {
-        const int n = std::min(numFrames - done, maxFrames_);
+        int n = std::min(numFrames - done, maxFrames_);
+        // Schleife: Bloecke enden dort, wo die Ausgabe oder die vorauslaufende
+        // Leseposition B erreicht, damit beide genau dort umbrechen.
+        if (rolling_ && loopActive() && position_ < loopEnd_) {
+            n = static_cast<int>(std::min<std::int64_t>(n, loopEnd_ - position_));
+            if (position_ + latency_ < loopEnd_)
+                n = static_cast<int>(std::min<std::int64_t>(n, loopEnd_ - position_ - latency_));
+        }
         numIn_ = (in != nullptr) ? std::clamp(numInputs, 0, kMaxInputs) : 0;
         for (int c = 0; c < numIn_; ++c) in_[static_cast<std::size_t>(c)] = in[c] + done;
+        const bool wasRolling = rolling_;
         renderBlock(n, blockMicros + static_cast<std::int64_t>(done * microsPerFrame));
+        if (wasRolling && loopActive() && position_ == loopEnd_) position_ = loopStart_;
 
         const std::size_t bytes = static_cast<std::size_t>(n) * sizeof(float);
         if (numOutputs >= 2) {

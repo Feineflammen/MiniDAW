@@ -197,6 +197,8 @@ bool writeProjectFile(const std::filesystem::path& path, const SavedProject& pro
     out << "samplerate " << formatNumber(project.sampleRate) << '\n';
     out << "tempo " << formatNumber(project.bpm) << '\n';
     out << "master " << formatNumber(project.masterGain) << '\n';
+    if (project.loopEnd > project.loopStart)
+        out << "schleife " << project.loopStart << ' ' << project.loopEnd << ' ' << (project.loopOn ? 1 : 0) << '\n';
 
     for (int t = 0; t < kProjectTracks; ++t) {
         const SavedTrack& track = project.tracks[static_cast<std::size_t>(t)];
@@ -310,6 +312,13 @@ bool readProjectFile(const std::filesystem::path& path, SavedProject& project, s
         if (key == "samplerate") project.sampleRate = std::strtod(rest.c_str(), nullptr);
         else if (key == "tempo") project.bpm = std::strtod(rest.c_str(), nullptr);
         else if (key == "master") project.masterGain = static_cast<float>(std::strtod(rest.c_str(), nullptr));
+        else if (key == "schleife") {
+            char* cursor = nullptr;
+            project.loopStart = std::strtoll(rest.c_str(), &cursor, 10);
+            project.loopEnd = std::strtoll(cursor, &cursor, 10);
+            project.loopOn = std::strtol(cursor, &cursor, 10) != 0;
+            if (project.loopStart < 0 || project.loopEnd <= project.loopStart) project.loopStart = project.loopEnd = 0;
+        }
         else if (key == "spur" || key == "bus" || key == "masterkanal") {
             // Neuer Abschnitt.
             const int index = std::atoi(rest.c_str());

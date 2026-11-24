@@ -129,6 +129,40 @@ std::shared_ptr<AudioFile> ProjectController::openAtRate(const std::filesystem::
     return file;
 }
 
+// --- Schleife A-B -------------------------------------------------------------
+
+void ProjectController::syncLoop() {
+    const bool active = loopEnabled() && !loopSuspended_ && !loopSuspendedForRecording_;
+    engine_.setLoop(loopStart_, loopEnd_, active);
+}
+
+bool ProjectController::setLoop(std::int64_t start, std::int64_t end) {
+    if (start > end) std::swap(start, end);
+    start = std::max<std::int64_t>(0, start);
+    if (end - start < static_cast<std::int64_t>(sampleRate_ * 0.01)) return false;
+    if (start == loopStart_ && end == loopEnd_ && loopOn_) return true;
+    loopStart_ = start;
+    loopEnd_ = end;
+    loopOn_ = true;
+    modified_ = true;
+    syncLoop();
+    return true;
+}
+
+void ProjectController::setLoopEnabled(bool on) {
+    on = on && hasLoop();
+    if (on == loopOn_) return;
+    loopOn_ = on;
+    modified_ = true;
+    syncLoop();
+}
+
+void ProjectController::setLoopSuspended(bool suspended) {
+    if (suspended == loopSuspended_) return;
+    loopSuspended_ = suspended;
+    syncLoop();
+}
+
 bool ProjectController::changeSampleRate(double rate, std::string& message) {
     message.clear();
     if (rate <= 0.0) return false;
@@ -183,6 +217,9 @@ bool ProjectController::changeSampleRate(double rate, std::string& message) {
     for (UndoStep& step : undo_) rescale(step.project);
     for (UndoStep& step : redo_) rescale(step.project);
     for (auto& tracks : writeFrom_) tracks.fill(-1);
+    loopStart_ = convertFrames(loopStart_, old, rate);
+    loopEnd_ = convertFrames(loopEnd_, old, rate);
+    syncLoop();
 
     for (int t = 0; t < kProjectTracks; ++t) {
         syncTrack(t);
@@ -546,6 +583,9 @@ void ProjectController::clearProject() {
     ++suppressUndo_;
     engine_.stop();
     engine_.locate(0);
+    loopStart_ = loopEnd_ = 0;
+    loopOn_ = false;
+    syncLoop();
     // Alle Plugins entfernen.
     for (int strip = 0; strip < kProjectStrips; ++strip) {
         for (int s = 0; s < kSlotsPerStrip; ++s) {
@@ -600,6 +640,9 @@ bool ProjectController::saveProject(const std::filesystem::path& path, std::stri
     saved.sampleRate = sampleRate_;
     saved.bpm = project_.bpm;
     saved.masterGain = project_.masterGain;
+    saved.loopStart = loopStart_;
+    saved.loopEnd = loopEnd_;
+    saved.loopOn = loopOn_;
     for (int t = 0; t < kProjectTracks; ++t) {
         const TrackModel& track = project_.tracks[static_cast<std::size_t>(t)];
         SavedTrack& out = saved.tracks[static_cast<std::size_t>(t)];
@@ -666,6 +709,12 @@ bool ProjectController::loadProject(const std::filesystem::path& path, std::stri
 
     setBpm(saved.bpm);
     setMasterGain(saved.masterGain);
+    if (saved.loopEnd > saved.loopStart) {
+        loopStart_ = convertFrames(saved.loopStart, savedRate, sampleRate_);
+        loopEnd_ = convertFrames(saved.loopEnd, savedRate, sampleRate_);
+        loopOn_ = saved.loopOn;
+        syncLoop();
+    }
     for (int t = 0; t < kProjectTracks; ++t) {
         const SavedTrack& in = saved.tracks[static_cast<std::size_t>(t)];
         TrackModel& track = project_.tracks[static_cast<std::size_t>(t)];
@@ -1398,7 +1447,12 @@ bool ProjectController::startRecording(std::string& message) {
         midiRecordBegun_ = false;
     }
 
+    // Aufgenommen wird am Stueck: die Schleife bis zum Ende der Aufnahme aussetzen.
+    loopSuspendedForRecording_ = true;
+    syncLoop();
     if (!engine_.record(sinks, !midiTracks.empty())) {
+        loopSuspendedForRecording_ = false;
+        syncLoop();
         std::error_code ec;
         for (const auto& made : sinks) std::filesystem::remove(made.sink->path(), ec);
         engine_.releaseRecordSinks();
@@ -1491,6 +1545,10 @@ bool ProjectController::poll(std::string& message) {
         audioTakes_.erase(audioTakes_.begin() + static_cast<std::ptrdiff_t>(i));
         if (audioTakes_.empty()) engine_.releaseRecordSinks();
         changed = finishAudioTake(take.track, take.sink, message) || changed;
+    }
+    if (loopSuspendedForRecording_ && !isRecording()) {
+        loopSuspendedForRecording_ = false;
+        syncLoop();
     }
     return changed;
 }

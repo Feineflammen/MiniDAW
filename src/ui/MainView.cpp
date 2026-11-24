@@ -32,6 +32,7 @@ const Rect kBarRect{10.0f, 44.0f, 84.0f, 24.0f};
 const Rect kBpmRect{100.0f, 47.0f, 84.0f, 18.0f};
 const Rect kClickRect{192.0f, 47.0f, 50.0f, 18.0f};
 const Rect kMixerRect{250.0f, 47.0f, 80.0f, 18.0f};
+const Rect kLoopRect{336.0f, 47.0f, 30.0f, 18.0f};
 
 const Rect kRewindRect{8.0f, 8.0f, 34.0f, 28.0f};
 const Rect kPlayRect{46.0f, 8.0f, 58.0f, 28.0f};
@@ -572,6 +573,23 @@ void MainView::drawRuler(Canvas& c) {
         c.text(label, {x + 4.0f, kTopH, 80.0f, kRulerH - 4.0f}, beatInBar == 1 ? kText : kTextDim, Font::Small);
     }
 
+    // Schleife A-B: Band im Lineal, kraeftig wenn eingeschaltet.
+    if (loopGhost_ || controller_.hasLoop()) {
+        const auto a = static_cast<double>(loopGhost_ ? loopGhostA_ : controller_.loopStart());
+        const auto b = static_cast<double>(loopGhost_ ? loopGhostB_ : controller_.loopEnd());
+        const bool on = loopGhost_ || controller_.loopEnabled();
+        const float x0 = frameToX(a), x1 = frameToX(b);
+        const Color band = on ? kAccent : kTextDim;
+        c.fill({x0, kTopH, std::max(1.0f, x1 - x0), kRulerH}, Color{band.r, band.g, band.b, on ? 0.22f : 0.12f});
+        c.fill({x0, kTopH, std::max(1.0f, x1 - x0), 3.0f}, band);
+        c.fill({x0, kTopH, 2.0f, kRulerH}, band);
+        c.fill({x1 - 2.0f, kTopH, 2.0f, kRulerH}, band);
+        if (x1 - x0 > 40.0f) {
+            c.text(L"A", {x0 + 4.0f, kTopH + 3.0f, 12.0f, kRulerH - 6.0f}, band, Font::Small);
+            c.text(L"B", {x1 - 14.0f, kTopH + 3.0f, 12.0f, kRulerH - 6.0f}, band, Font::Small);
+        }
+    }
+
     const float px = frameToX(static_cast<double>(engine_.position()));
     c.fill({px - 4.0f, kTopH + kRulerH - 8.0f, 9.0f, 8.0f}, kPlayhead);
     c.popClip();
@@ -599,6 +617,10 @@ void MainView::drawRulerInfo(Canvas& c) {
 
     c.fillRounded(kMixerRect, 3.0f, mixerMode_ ? kAccent : kButton);
     c.text(L"Mixer (F3)", kMixerRect, mixerMode_ ? kDark : kTextDim, Font::Small, Align::Center);
+
+    const bool loop = controller_.loopEnabled();
+    c.fillRounded(kLoopRect, 3.0f, loop ? kAccent : kButton);
+    c.text(L"A\u2013B", kLoopRect, loop ? kDark : controller_.hasLoop() ? kText : kTextDim, Font::Small, Align::Center);
 
     if (mixerMode_) {
         // Latenz der Plugins, um die der Latenzausgleich alles vorlaufen laesst.
@@ -796,6 +818,15 @@ void MainView::drawTimeline(Canvas& c) {
             drawMidiClip(c, model.midiClips[static_cast<std::size_t>(selIndex_)], ghostTrack_, ghostStart_, true, 0.9f);
         else if (!selMidi_ && selIndex_ < static_cast<int>(model.clips.size()))
             drawClip(c, model.clips[static_cast<std::size_t>(selIndex_)], ghostTrack_, ghostStart_, true, 0.9f);
+    }
+
+    if (loopGhost_ || controller_.loopEnabled()) {
+        const float x0 = frameToX(static_cast<double>(loopGhost_ ? loopGhostA_ : controller_.loopStart()));
+        const float x1 = frameToX(static_cast<double>(loopGhost_ ? loopGhostB_ : controller_.loopEnd()));
+        c.fill({x0, top, std::max(1.0f, x1 - x0), std::max(0.0f, height_ - kStatusH - top)},
+               Color{kAccent.r, kAccent.g, kAccent.b, 0.05f});
+        c.line(x0 + 0.5f, top, x0 + 0.5f, height_ - kStatusH, Color{kAccent.r, kAccent.g, kAccent.b, 0.55f});
+        c.line(x1 - 0.5f, top, x1 - 0.5f, height_ - kStatusH, Color{kAccent.r, kAccent.g, kAccent.b, 0.55f});
     }
 
     const float px = frameToX(static_cast<double>(engine_.position()));
@@ -1004,6 +1035,26 @@ void MainView::drawHeaders(Canvas& c) {
 }
 
 // --- Bedienung ---------------------------------------------------------------
+
+// Position fuer A oder B: rastet auf Schlaegen ein (bei starkem Zoom auf
+// Sechzehnteln), mit Umschalt frei.
+std::int64_t MainView::loopSnap(float x) const {
+    const double frame = std::max(0.0, xToFrame(std::max(x, kHeaderW)));
+    if (dragFree_) return static_cast<std::int64_t>(frame);
+    double grid = controller_.framesPerBeat();
+    if (grid / framesPerPixel_ >= 160.0) grid /= 4.0;
+    return static_cast<std::int64_t>(std::llround(std::llround(frame / grid) * grid));
+}
+
+void MainView::toggleLoop() {
+    if (!controller_.hasLoop()) {
+        setStatus(L"Erst im Lineal einen Bereich A\u2013B ziehen.");
+        return;
+    }
+    controller_.setLoopEnabled(!controller_.loopEnabled());
+    if (controller_.isRecording() && controller_.loopEnabled())
+        setStatus(L"Die Schleife wirkt erst nach der Aufnahme.");
+}
 
 void MainView::locateTo(float x) {
     const double frame = std::max(0.0, xToFrame(std::max(x, kHeaderW)));
@@ -1306,8 +1357,26 @@ void MainView::mouseDown(float x, float y, bool doubleClick) {
             controller_.setMetronome(!controller_.metronome());
         } else if (kMixerRect.contains(x, y)) {
             setMixerMode(!mixerMode_);
+        } else if (kLoopRect.contains(x, y)) {
+            toggleLoop();
         } else if (x >= kHeaderW && !mixerMode_) {
-            drag_ = Drag::Scrub;
+            // Kanten der Schleife greifen, sonst: Klick setzt den Abspielzeiger,
+            // Ziehen legt einen neuen Bereich A-B fest.
+            if (controller_.hasLoop()) {
+                const float ax = frameToX(static_cast<double>(controller_.loopStart()));
+                const float bx = frameToX(static_cast<double>(controller_.loopEnd()));
+                const bool nearB = std::fabs(x - bx) <= 5.0f;
+                const bool nearA = std::fabs(x - ax) <= 5.0f;
+                if (nearA || nearB) {
+                    drag_ = nearB && (!nearA || x >= bx) ? Drag::LoopEnd : Drag::LoopStart;
+                    loopGhost_ = true;
+                    loopGhostA_ = controller_.loopStart();
+                    loopGhostB_ = controller_.loopEnd();
+                    return;
+                }
+            }
+            drag_ = Drag::RulerPress;
+            dragStartX_ = x;
             locateTo(x);
         }
         return;
@@ -1484,6 +1553,24 @@ void MainView::applyDrag(float x, float y) {
         case Drag::Scrub:
             locateTo(x);
             break;
+        case Drag::RulerPress:
+            if (std::fabs(x - dragStartX_) < 4.0f) break;
+            drag_ = Drag::LoopNew;
+            loopGhost_ = true;
+            loopAnchor_ = loopSnap(dragStartX_);
+            [[fallthrough]];
+        case Drag::LoopNew: {
+            const std::int64_t f = loopSnap(x);
+            loopGhostA_ = std::min(loopAnchor_, f);
+            loopGhostB_ = std::max(loopAnchor_, f);
+            break;
+        }
+        case Drag::LoopStart:
+            loopGhostA_ = std::min(loopSnap(x), loopGhostB_ - 1);
+            break;
+        case Drag::LoopEnd:
+            loopGhostB_ = std::max(loopSnap(x), loopGhostA_ + 1);
+            break;
         case Drag::Clip: {
             if (!dragMoved_ && std::fabs(x - dragStartX_) < 4.0f && std::fabs(y - dragStartY_) < 4.0f) break;
             dragMoved_ = true;
@@ -1575,7 +1662,16 @@ void MainView::mouseUp(float x, float y, bool free) {
         pianoRoll_.mouseUp(x, y);
         return;
     }
-    if (drag_ == Drag::Clip) {
+    if (drag_ == Drag::LoopNew || drag_ == Drag::LoopStart || drag_ == Drag::LoopEnd) {
+        applyDrag(x, y);
+        const bool wasOn = controller_.loopEnabled();
+        if (!controller_.setLoop(loopGhostA_, loopGhostB_)) {
+            setStatus(L"Der Bereich A\u2013B ist zu kurz.");
+        } else if (drag_ != Drag::LoopNew && !wasOn) {
+            controller_.setLoopEnabled(false);  // nur die Kante verschoben, Schleife bleibt aus
+        }
+        loopGhost_ = false;
+    } else if (drag_ == Drag::Clip) {
         applyDrag(x, y);
         if (dragMoved_) {
             const int index = selMidi_ ? controller_.moveMidiClip(selTrack_, selIndex_, ghostTrack_, ghostStart_)
@@ -1656,6 +1752,9 @@ void MainView::key(Key k) {
             break;
         case Key::ToggleMixer:
             setMixerMode(!mixerMode_);
+            break;
+        case Key::Loop:
+            toggleLoop();
             break;
         case Key::Undo:
         case Key::Redo: {

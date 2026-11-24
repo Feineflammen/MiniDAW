@@ -2326,6 +2326,141 @@ struct Delayer final : AudioPlugin {
     }
 };
 
+// Schleife A-B: nahtlos, auch mit Latenzausgleich; Noten enden an B.
+void testLoop() {
+    auto source = makeSource();
+    if (!source) return;
+    constexpr std::int64_t kA = 10000, kB = 13333;  // absichtlich nicht auf Blockgrenzen
+    const Expected looped = [](std::int64_t t) -> std::int64_t {
+        return t < kB ? t : kA + (t - kA) % (kB - kA);
+    };
+    for (const int latency : {0, 700}) {
+        Rig rig;
+        rig.engine->setTrackPlaylist(0, {Clip{source, 0, 0, kSourceFrames, 1.0f}});
+        Delayer delayer(latency > 0 ? latency : 1);
+        if (latency > 0) rig.engine->setPlugin(0, 1, &delayer);
+        rig.engine->setLoop(kA, kB, true);
+        rig.service();
+        rig.render();  // Transport steht, Strom wird vorbereitet
+        rig.service();
+        rig.engine->play();
+        bool exact = true;
+        std::int64_t t = 0;
+        for (int b = 0; b < 160; ++b, t += kBlock) {
+            rig.service();
+            const BlockResult r = renderAndCompare(rig, t, looped);
+            if (t >= 4 * kBlock && !r.exact) exact = false;  // Einblenden und Verzoegerung am Anfang
+        }
+        CHECK(exact);
+        CHECK(rig.engine->underruns() == 0);
+        CHECK(rig.engine->position() >= kA && rig.engine->position() < kB);
+        // Abschalten waehrend der Wiedergabe: Es geht ueber B hinaus weiter.
+        rig.engine->setLoop(kA, kB, false);
+        std::int64_t last = rig.engine->position();
+        bool passed = false;
+        for (int b = 0; b < 40; ++b) {
+            rig.service();
+            rig.render();
+            if (rig.engine->position() < last) passed = false;
+            last = rig.engine->position();
+            if (last > kB + kBlock) passed = true;
+        }
+        CHECK(passed);
+        rig.engine->stop();
+        rig.render();
+        rig.render();
+    }
+
+    // Wer hinter B startet, spielt einfach weiter.
+    {
+        Rig rig;
+        rig.engine->setLoop(kA, kB, true);
+        rig.engine->locate(20000);
+        rig.render();
+        rig.engine->play();
+        for (int b = 0; b < 20; ++b) rig.render();
+        CHECK(rig.engine->position() == 20000 + 20 * kBlock);
+    }
+
+    // MIDI: Eine Note ueber B hinaus endet an B und setzt im naechsten Durchlauf neu ein.
+    {
+        Rig rig;
+        ProjectController controller(*rig.engine);
+        controller.setSampleRate(kRate);
+        MidiClipModel clip;
+        clip.start = 0;
+        clip.length = 30000;
+        clip.notes = {{12000, 8000, 60, 100}};
+        CHECK(controller.addMidiClip(1, clip) == 0);
+        controller.setTrackMidiOutput(1, 0);
+        rig.engine->setLoop(kA, kB, true);
+        rig.render();
+        drainMidiOut(*rig.engine);
+        rig.engine->play();
+        // bis kurz nach dem dritten Einsatz: 12000, dann 2 Durchlaeufe zu je 3333 Frames
+        const int blocks = static_cast<int>((12000 + 2 * (kB - kA) + 200) / kBlock) + 1;
+        for (int b = 0; b < blocks; ++b) rig.render();
+        const auto sent = drainMidiOut(*rig.engine);
+        int ons = 0, offs = 0;
+        bool alternating = true;
+        for (const MidiMessage& m : sent) {
+            if (m.isNoteOn()) { if (ons != offs) alternating = false; ++ons; }
+            else if (m.isNoteOff()) { ++offs; if (offs != ons) alternating = false; }
+        }
+        CHECK(ons == 3 && offs == 2 && alternating);
+        rig.engine->stop();
+        rig.render();
+        rig.render();
+    }
+
+    // Projekt: Schleife speichern, laden (auch mit anderer Rate), aussetzen.
+    {
+        const auto path = tempFile("minidaw_test_schleife.mdaw");
+        std::string message;
+        {
+            Rig rig;
+            ProjectController controller(*rig.engine);
+            controller.setSampleRate(48000.0);
+            CHECK(!controller.hasLoop() && !controller.loopEnabled());
+            CHECK(!controller.setLoop(1000, 1200));  // unter 10 ms
+            CHECK(controller.setLoop(96000, 48000));  // vertauscht ist auch recht
+            CHECK(controller.loopStart() == 48000 && controller.loopEnd() == 96000 && controller.loopEnabled());
+            CHECK(controller.modified());
+            // Ausgesetzt (Export): Die Wiedergabe laeuft ueber B hinaus.
+            controller.setLoopSuspended(true);
+            rig.engine->locate(90000);
+            rig.render();
+            rig.engine->play();
+            for (int b = 0; b < 40; ++b) rig.render();
+            CHECK(rig.engine->position() > 96000);
+            controller.setLoopSuspended(false);
+            rig.engine->locate(90000);
+            for (int b = 0; b < 40; ++b) rig.render();
+            CHECK(rig.engine->position() >= 48000 && rig.engine->position() < 96000);
+            rig.engine->stop();
+            rig.render();
+            rig.render();
+            controller.setLoopEnabled(false);
+            CHECK(controller.hasLoop() && !controller.loopEnabled());
+            CHECK(controller.saveProject(path, message));
+            controller.setLoopEnabled(true);
+            CHECK(controller.changeSampleRate(96000.0, message));
+            CHECK(controller.loopStart() == 96000 && controller.loopEnd() == 192000);
+        }
+        {
+            Rig rig;
+            ProjectController controller(*rig.engine);
+            controller.setSampleRate(44100.0);
+            CHECK(controller.loadProject(path, message));
+            CHECK(controller.loopStart() == 44100 && controller.loopEnd() == 88200 && !controller.loopEnabled());
+            controller.newProject();
+            CHECK(!controller.hasLoop());
+        }
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+    }
+}
+
 void testMixerRouting() {
     Rig rig;
     ConstantSource source(0.5f);
@@ -3745,6 +3880,7 @@ int main() {
     testMastering();
     testBuiltinEffects();
     testSampleRates();
+    testLoop();
     {
         std::error_code ec;
         std::filesystem::remove_all(tempFile("minidaw_test_aufnahmen"), ec);

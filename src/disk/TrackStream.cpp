@@ -17,6 +17,14 @@ void TrackStream::setPlaylist(Playlist playlist) {
     hasPending_ = true;
 }
 
+void TrackStream::setLoop(std::int64_t start, std::int64_t end, bool on) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pendingLoopStart_ = start;
+    pendingLoopEnd_ = end;
+    pendingLoopOn_ = on && end > start && start >= 0;
+    hasPendingLoop_ = true;
+}
+
 // --- Disk-Thread -------------------------------------------------------------
 
 bool TrackStream::service() {
@@ -28,6 +36,16 @@ bool TrackStream::service() {
             hasPending_ = false;
             playlistRestart_ = true;
             hasClips_.store(!playlist_.empty(), std::memory_order_relaxed);
+        }
+        if (hasPendingLoop_) {
+            hasPendingLoop_ = false;
+            if (pendingLoopOn_ != loopOnDisk_ ||
+                (pendingLoopOn_ && (pendingLoopStart_ != loopStartDisk_ || pendingLoopEnd_ != loopEndDisk_))) {
+                loopStartDisk_ = pendingLoopStart_;
+                loopEndDisk_ = pendingLoopEnd_;
+                loopOnDisk_ = pendingLoopOn_;
+                playlistRestart_ = true;  // Vorgelesenes passt nicht mehr
+            }
         }
     }
 
@@ -42,6 +60,9 @@ bool TrackStream::service() {
                                  : audioPos_.load(std::memory_order_relaxed);
         flushTo_.store(write_.load(std::memory_order_relaxed), std::memory_order_relaxed);
         flushPos_.store(diskPos_, std::memory_order_relaxed);
+        flushLoopStart_.store(loopStartDisk_, std::memory_order_relaxed);
+        flushLoopEnd_.store(loopEndDisk_, std::memory_order_relaxed);
+        flushLoopOn_.store(loopOnDisk_, std::memory_order_relaxed);
         flushGen_.store(++flushGenDisk_, std::memory_order_release);
 
         if (seekRequested) {
@@ -57,7 +78,18 @@ bool TrackStream::service() {
     const std::size_t used = w - read_.load(std::memory_order_acquire);
     if (kCapacity - used < static_cast<std::size_t>(kChunk)) return false;
 
-    renderChunk();
+    // Ein Stueck Zeitachse; in der Schleife geht es an deren Ende bei A weiter.
+    std::fill(chunk_.begin(), chunk_.end(), 0.0f);
+    int filled = 0;
+    while (filled < kChunk) {
+        std::int64_t n = kChunk - filled;
+        const bool inLoop = loopOnDisk_ && diskPos_ < loopEndDisk_;
+        if (inLoop) n = std::min(n, loopEndDisk_ - diskPos_);
+        renderRange(diskPos_, static_cast<int>(n), filled);
+        diskPos_ += n;
+        filled += static_cast<int>(n);
+        if (inLoop && diskPos_ == loopEndDisk_) diskPos_ = loopStartDisk_;
+    }
 
     for (int i = 0; i < kChunk; ++i) {
         const std::size_t idx = (w + static_cast<std::size_t>(i)) & kMask;
@@ -65,15 +97,13 @@ bool TrackStream::service() {
         ring_[2 * idx + 1] = chunk_[2 * static_cast<std::size_t>(i) + 1];
     }
     write_.store(w + static_cast<std::size_t>(kChunk), std::memory_order_release);
-    diskPos_ += kChunk;
     return true;
 }
 
-// Mischt alle Clips, die [diskPos_, diskPos_ + kChunk) beruehren, nach chunk_.
-void TrackStream::renderChunk() {
-    std::fill(chunk_.begin(), chunk_.end(), 0.0f);
-    const std::int64_t blockStart = diskPos_;
-    const std::int64_t blockEnd = diskPos_ + kChunk;
+// Mischt alle Clips, die [start, start + count) beruehren, nach chunk_ ab Frame offset.
+void TrackStream::renderRange(std::int64_t start, int count, int offset) {
+    const std::int64_t blockStart = start;
+    const std::int64_t blockEnd = start + count;
 
     for (const Clip& clip : playlist_) {
         if (!clip.source || clip.length <= 0) continue;
@@ -84,7 +114,7 @@ void TrackStream::renderChunk() {
         const int count = static_cast<int>(b - a);
         clip.source->readStereo(clip.sourceOffset + (a - clip.start), count, temp_.data());
 
-        float* dst = chunk_.data() + 2 * static_cast<std::size_t>(a - blockStart);
+        float* dst = chunk_.data() + 2 * static_cast<std::size_t>(offset + (a - blockStart));
         const std::int64_t first = a - clip.start;  // Position im Clip
         const bool fading = (clip.fadeIn > 0 && first < clip.fadeIn) ||
                             (clip.fadeOut > 0 && b - clip.start > clip.length - clip.fadeOut);
@@ -117,6 +147,9 @@ bool TrackStream::sync(std::int64_t pos) noexcept {
     if (flushGen != flushSeenAudio_) {
         read_.store(flushTo_.load(std::memory_order_relaxed), std::memory_order_release);
         nextPos_ = flushPos_.load(std::memory_order_relaxed);
+        loopStartAudio_ = flushLoopStart_.load(std::memory_order_relaxed);
+        loopEndAudio_ = flushLoopEnd_.load(std::memory_order_relaxed);
+        loopOnAudio_ = flushLoopOn_.load(std::memory_order_relaxed);
         flushSeenAudio_ = flushGen;
         flushAck_.store(flushGen, std::memory_order_release);
     }
@@ -127,8 +160,10 @@ bool TrackStream::sync(std::int64_t pos) noexcept {
     if (gap == 0) return true;
 
     // Der Puffer haengt etwas hinterher (nach einem Aussetzer oder einem
-    // Neuansatz): ueberholte Frames wegwerfen, bis er wieder passt.
-    if (gap > 0 && gap <= static_cast<std::int64_t>(kCapacity)) {
+    // Neuansatz): ueberholte Frames wegwerfen, bis er wieder passt. Liegt
+    // dazwischen das Schleifenende, kommt im Puffer danach A: dann neu ansetzen.
+    const bool acrossLoop = loopOnAudio_ && nextPos_ < loopEndAudio_ && pos >= loopEndAudio_;
+    if (gap > 0 && gap <= static_cast<std::int64_t>(kCapacity) && !acrossLoop) {
         const std::size_t r = read_.load(std::memory_order_relaxed);
         const std::size_t avail = write_.load(std::memory_order_acquire) - r;
         const std::size_t drop = std::min(static_cast<std::size_t>(gap), avail);
@@ -151,6 +186,10 @@ int TrackStream::read(std::int64_t pos, float* left, float* right, int n) noexce
         const std::size_t r = read_.load(std::memory_order_relaxed);
         const std::size_t avail = write_.load(std::memory_order_acquire) - r;
         got = static_cast<int>(std::min(static_cast<std::size_t>(n), avail));
+        // Hinter dem Schleifenende stehen im Puffer Frames ab A; die gehoeren
+        // nicht zu dieser Anfrage (die Engine teilt ihre Bloecke dort).
+        if (loopOnAudio_ && nextPos_ < loopEndAudio_)
+            got = static_cast<int>(std::min<std::int64_t>(got, loopEndAudio_ - nextPos_));
         for (int i = 0; i < got; ++i) {
             const std::size_t idx = (r + static_cast<std::size_t>(i)) & kMask;
             left[i] = ring_[2 * idx];
@@ -158,6 +197,7 @@ int TrackStream::read(std::int64_t pos, float* left, float* right, int n) noexce
         }
         read_.store(r + static_cast<std::size_t>(got), std::memory_order_release);
         nextPos_ += got;
+        if (loopOnAudio_ && nextPos_ == loopEndAudio_) nextPos_ = loopStartAudio_;
     }
     if (got < n) {
         const std::size_t bytes = static_cast<std::size_t>(n - got) * sizeof(float);

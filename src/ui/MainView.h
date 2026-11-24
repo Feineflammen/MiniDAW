@@ -23,6 +23,7 @@ enum class Key {
     Split,                                                // Clip am Abspielzeiger teilen
     ToggleMixer,                                          // zwischen Spuren und Mischpult umschalten
     Undo, Redo,                                           // Rueckgaengig, Wiederholen
+    Loop,                                                 // Schleife A-B an/aus
 };
 
 // Die gesamte Oberflaeche: Transportleiste, Spurkoepfe, Zeitachse.
@@ -86,7 +87,8 @@ public:
     void importMidiFile(const std::filesystem::path& path);
 
 private:
-    enum class Drag { None, MasterGain, TrackGain, TrackPan, Scrub, Clip, TrimStart, TrimEnd, AutoPoint };
+    enum class Drag { None, MasterGain, TrackGain, TrackPan, Scrub, Clip, TrimStart, TrimEnd, AutoPoint,
+                      RulerPress, LoopNew, LoopStart, LoopEnd };
 
     // Geometrie
     float frameToX(double frame) const;
@@ -197,6 +199,11 @@ private:
     Drag drag_ = Drag::None;
     int dragTrack_ = -1;
     float dragStartX_ = 0.0f, dragStartY_ = 0.0f;
+    // Schleife A-B beim Ziehen im Lineal (erst beim Loslassen uebernommen)
+    bool loopGhost_ = false;
+    std::int64_t loopAnchor_ = 0, loopGhostA_ = 0, loopGhostB_ = 0;
+    std::int64_t loopSnap(float x) const;
+    void toggleLoop();
     bool dragMoved_ = false;
     bool dragFree_ = false;  // Umschalttaste: ohne Einrasten
     std::int64_t grabOffset_ = 0;

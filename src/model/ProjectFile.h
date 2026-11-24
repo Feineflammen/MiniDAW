@@ -61,6 +61,8 @@ struct SavedProject {
     double sampleRate = 0.0;  // Samplerate, mit der gespeichert wurde (Positionen sind in Frames)
     double bpm = 120.0;
     float masterGain = 1.0f;
+    std::int64_t loopStart = 0, loopEnd = 0;  // Schleife A-B (Frames), Ende 0 = keine
+    bool loopOn = false;
     std::array<SavedTrack, kProjectTracks> tracks;
     std::array<SavedBus, kProjectBuses> buses;
     std::vector<SavedSlot> masterSlots;

@@ -106,6 +106,11 @@ public:
     // Tempo in Schlaegen pro Minute (nur fuer das Metronom) und Metronom an/aus.
     // Das Metronom klickt waehrend der Wiedergabe auf jedem Schlag, betont auf der Eins (4/4).
     bool setTempo(double bpm) noexcept;
+    // Schleife A-B: Laeuft die Wiedergabe von vorn auf end zu, geht es dort
+    // nahtlos bei start weiter (Clips werden vorausgelesen, Noten enden an B).
+    // Wer hinter B startet, spielt einfach weiter. Waehrend Aufnahme und
+    // Export schaltet der Aufrufer die Schleife ab. Nur UI-Thread.
+    bool setLoop(std::int64_t start, std::int64_t end, bool on);
     bool setMetronome(bool on) noexcept;
 
     // Latenzmessung: Solange die Sonde laeuft, gibt die Engine nur ihr
@@ -238,7 +243,7 @@ private:
         ArmTrack, TrackAudioInput, TrackRecordSink, InputMonitor, Record,
         TrackMidiInput, TrackMidiOutput, TrackMidiSequence, TrackAutomation,
         Tempo, Metronome, TrackPlugin, Offline, Probe,
-        TrackSend, TrackOutput, BusGain, BusPan, BusMute,
+        TrackSend, TrackOutput, BusGain, BusPan, BusMute, Loop,
     };
 
     struct Command {
@@ -246,6 +251,7 @@ private:
         std::int32_t track = 0;
         float value = 0.0f;
         std::int64_t position = 0;
+        std::int64_t position2 = 0;  // Schleife: Ende
         RecordSink* sink = nullptr;
         const MidiSequence* sequence = nullptr;
         const AutomationCurve* curve = nullptr;
@@ -370,6 +376,12 @@ private:
     bool wantPlay_ = false;      // Wunsch des Benutzers
     bool rolling_ = false;       // Transport laeuft (auch noch waehrend des Ausblendens)
     std::int64_t position_ = 0;
+    std::int64_t loopStart_ = 0, loopEnd_ = 0;
+    bool loopOn_ = false;
+    // Die Schleife wirkt (lang genug fuer den Latenzausgleich, nicht beim Export).
+    bool loopActive() const noexcept { return loopOn_ && !offline_ && loopEnd_ - loopStart_ > latency_; }
+    // Leseposition fuer Clips und Noten: um die Latenz voraus, in der Schleife umgebrochen.
+    std::int64_t aheadOf(std::int64_t ahead) const noexcept;
     bool anyArmed_ = false;
     bool monitor_ = false;
     bool recording_ = false;  // Audio-Aufnahme laeuft

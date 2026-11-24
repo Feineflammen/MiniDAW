@@ -1,0 +1,32 @@
+name: defender
+on:
+  push:
+    branches: [defender-test]
+jobs:
+  scan:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Defender pruefen
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Get-MpComputerStatus | Format-List AMProductVersion,AntivirusSignatureVersion,AntivirusSignatureLastUpdated,RealTimeProtectionEnabled,IsTamperProtected
+          & "$env:ProgramFiles\Windows Defender\MpCmdRun.exe" -SignatureUpdate
+          Get-MpComputerStatus | Format-List AntivirusSignatureVersion,AntivirusSignatureLastUpdated
+          Get-MpPreference | Format-List MAPSReporting,SubmitSamplesConsent,CloudBlockLevel,DisableRealtimeMonitoring
+          New-Item -ItemType Directory -Force scan | Out-Null
+          git show 0d27b2b:bin/minidaw.exe > $null
+          foreach ($c in @('0d27b2b','16850d7','HEAD')) {
+            git cat-file -p "$($c):bin/minidaw.exe" | Out-Null
+            cmd /c "git show $($c):bin/minidaw.exe > scan\minidaw_$c.exe"
+          }
+          Get-ChildItem scan | ForEach-Object { "{0} {1} {2}" -f $_.Name, $_.Length, (Get-FileHash $_.FullName).Hash }
+          foreach ($f in Get-ChildItem scan) {
+            Write-Output "=== Scan $($f.Name)"
+            & "$env:ProgramFiles\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File $f.FullName -DisableRemediation
+            Write-Output "Exitcode $LASTEXITCODE"
+          }
+          Get-MpThreatDetection | Format-List

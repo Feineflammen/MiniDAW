@@ -584,9 +584,10 @@ void MainView::drawRuler(Canvas& c) {
         c.fill({x0, kTopH, std::max(1.0f, x1 - x0), 3.0f}, band);
         c.fill({x0, kTopH, 2.0f, kRulerH}, band);
         c.fill({x1 - 2.0f, kTopH, 2.0f, kRulerH}, band);
-        // A und B aussen neben die Kanten, damit sie keine Taktzahl verdecken.
+        // A und B jeweils links neben ihre Kante: Taktzahlen stehen rechts von ihrem Strich.
         c.text(L"A", {x0 - 13.0f, kTopH + 3.0f, 11.0f, kRulerH - 6.0f}, band, Font::Small, Align::Right);
-        c.text(L"B", {x1 + 3.0f, kTopH + 3.0f, 11.0f, kRulerH - 6.0f}, band, Font::Small);
+        if (x1 - x0 > 30.0f)
+            c.text(L"B", {x1 - 15.0f, kTopH + 3.0f, 11.0f, kRulerH - 6.0f}, band, Font::Small, Align::Right);
     }
 
     const float px = frameToX(static_cast<double>(engine_.position()));

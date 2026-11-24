@@ -65,8 +65,8 @@ public:
 
 private:
     bool sync(std::int64_t pos) noexcept;
-    // Mischt count Frames ab Zeitachsen-Position start nach chunk_ ab Frame offset.
-    void renderRange(std::int64_t start, int count, int offset);
+    // Mischt frames Frames ab Zeitachsen-Position start nach chunk_ ab Frame offset.
+    void renderRange(std::int64_t start, int frames, int offset);
 
     static constexpr std::size_t kMask = kCapacity - 1;
 

@@ -584,10 +584,9 @@ void MainView::drawRuler(Canvas& c) {
         c.fill({x0, kTopH, std::max(1.0f, x1 - x0), 3.0f}, band);
         c.fill({x0, kTopH, 2.0f, kRulerH}, band);
         c.fill({x1 - 2.0f, kTopH, 2.0f, kRulerH}, band);
-        if (x1 - x0 > 40.0f) {
-            c.text(L"A", {x0 + 4.0f, kTopH + 3.0f, 12.0f, kRulerH - 6.0f}, band, Font::Small);
-            c.text(L"B", {x1 - 14.0f, kTopH + 3.0f, 12.0f, kRulerH - 6.0f}, band, Font::Small);
-        }
+        // A und B aussen neben die Kanten, damit sie keine Taktzahl verdecken.
+        c.text(L"A", {x0 - 13.0f, kTopH + 3.0f, 11.0f, kRulerH - 6.0f}, band, Font::Small, Align::Right);
+        c.text(L"B", {x1 + 3.0f, kTopH + 3.0f, 11.0f, kRulerH - 6.0f}, band, Font::Small);
     }
 
     const float px = frameToX(static_cast<double>(engine_.position()));

@@ -101,9 +101,9 @@ bool TrackStream::service() {
 }
 
 // Mischt alle Clips, die [start, start + count) beruehren, nach chunk_ ab Frame offset.
-void TrackStream::renderRange(std::int64_t start, int count, int offset) {
+void TrackStream::renderRange(std::int64_t start, int frames, int offset) {
     const std::int64_t blockStart = start;
-    const std::int64_t blockEnd = start + count;
+    const std::int64_t blockEnd = start + frames;
 
     for (const Clip& clip : playlist_) {
         if (!clip.source || clip.length <= 0) continue;

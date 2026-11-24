@@ -38,20 +38,9 @@ Impressum: [feineflammen.de](https://feineflammen.de)
 
 ## Fertiges Programm
 
-`bin/minidaw.exe` ist fertig gebaut, Windows 10/11, 64 Bit. Herunterladen und
-starten, eine Installation ist nicht nötig; die exe bringt alles mit, was sie
-braucht.
-
-- Gebaut von GitHub Actions aus genau diesem Quellcode. Drei unabhängige
-  Builds ergaben Byte für Byte dieselbe Datei.
-- SHA-256: `CDBDCE548593E6BBAC247EE5966BE131C94B2C12940F0ABC781F73A9ECFBD49D`
-  (prüfen in PowerShell mit `Get-FileHash minidaw.exe`)
-- Browser und Windows warnen beim Herunterladen, weil die Datei nicht signiert
-  und weitgehend unbekannt ist. Eine frühere Fassung wurde bei VirusTotal
-  geprüft: keiner der Scanner meldete etwas.
-
-Ändert sich der Quellcode, ist diese Datei veraltet, bis sie ersetzt wird.
-Der Build auf GitHub warnt dann.
+Zurzeit gibt es hier keine fertige exe: Version 0.9 wurde von Microsoft
+Defender als `Trojan:Win32/Sabsik.FL.A!ml` gemeldet und deshalb
+zurückgezogen, bis die Meldung geklärt ist.
 
 ## Bauen
 
